@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: geodude-teleoperation
+Version: 0.1.0
+Requires-Python: >=3.10
+Requires-Dist: gafropy
+Requires-Dist: numpy
+Requires-Dist: viser
+Requires-Dist: trimesh
+Requires-Dist: rtree
+Requires-Dist: pyspacemouse
+Requires-Dist: diffused_fields @ file:///home/tloew/coding/diffused_fields
+Provides-Extra: viz
+Requires-Dist: gafropy[viz]; extra == "viz"

@@ -1,0 +1,10 @@
+gafropy
+numpy
+viser
+trimesh
+rtree
+pyspacemouse
+diffused_fields @ file:///home/tloew/coding/diffused_fields
+
+[viz]
+gafropy[viz]
