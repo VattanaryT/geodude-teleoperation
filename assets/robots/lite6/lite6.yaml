@@ -1,0 +1,992 @@
+system:
+  name: ufactory_lite6
+  meshdir: assets
+  root_link: link_base
+  base_pose:
+    position:
+      x: -0
+      y: -0
+      z: -0
+    orientation:
+      w: 1
+      x: -0
+      y: 0
+      z: -0
+  kinematic_chains:
+    - name: link6
+      tip: link6
+    - name: lite6_ee
+      tip: lite6_ee
+  task_spaces:
+    - name: ee
+      chains:
+        - lite6_ee
+      control_groups:
+        - arm
+  control_groups:
+    - name: arm
+      joint:
+        - joint1
+        - joint2
+        - joint3
+        - joint4
+        - joint5
+        - joint6
+  links:
+    link1:
+      name: link1
+      parent_joint: joint1
+      gravcomp: 1
+      inertial:
+        mass: 1.411
+        inertia:
+          xx: 0.0014516370479116878
+          xy: 1.2399951213438295e-05
+          xz: 6.69990516678686e-06
+          yy: 0.0008872999861208135
+          yz: 0.00012549984363230664
+          zz: 0.0013199279659674987
+        origin:
+          position:
+            x: -0.00035999999999999986
+            y: 0.04195
+            z: -0.002500000000000002
+          orientation:
+            w: 1
+            x: -0
+            y: 0
+            z: -0
+      geometries:
+        - origin:
+            position:
+              x: -0
+              y: -0
+              z: -0
+            orientation:
+              w: 1
+              x: -0
+              y: 0
+              z: -0
+          geometry:
+            type: mesh
+            filename: link1.stl
+            mesh_name: link1
+            scale:
+              x: 1
+              y: 1
+              z: 1
+          attributes:
+            geometry_class: visual
+            group: 2
+            contype: 0
+            conaffinity: 0
+            material: white
+        - origin:
+            position:
+              x: -0
+              y: -0
+              z: -0
+            orientation:
+              w: 1
+              x: -0
+              y: 0
+              z: -0
+          geometry:
+            type: mesh
+            filename: link1.stl
+            mesh_name: link1_c
+            scale:
+              x: 1
+              y: 1
+              z: 1
+          attributes:
+            name: link1_c
+            geometry_class: collision
+            group: 3
+            mass: 0
+            density: 0
+      joints:
+        - joint2
+    link2:
+      name: link2
+      parent_joint: joint2
+      gravcomp: 1
+      inertial:
+        mass: 1.34
+        inertia:
+          xx: 0.0015854001024178633
+          xy: -6.768098188598281e-06
+          xz: 0.0011513637776023361
+          yy: 0.005609697145365885
+          yz: 1.1404870612185744e-06
+          zz: 0.0048499927522162485
+        origin:
+          position:
+            x: 0.179
+            y: 3.469446951953614e-18
+            z: 0.05840000000000001
+          orientation:
+            w: 1
+            x: -0
+            y: 0
+            z: -0
+      geometries:
+        - origin:
+            position:
+              x: -0
+              y: -0
+              z: -0
+            orientation:
+              w: 1
+              x: -0
+              y: 0
+              z: -0
+          geometry:
+            type: mesh
+            filename: link2.stl
+            mesh_name: link2
+            scale:
+              x: 1
+              y: 1
+              z: 1
+          attributes:
+            geometry_class: visual
+            group: 2
+            contype: 0
+            conaffinity: 0
+            material: white
+        - origin:
+            position:
+              x: -0
+              y: -0
+              z: -0
+            orientation:
+              w: 1
+              x: -0
+              y: 0
+              z: -0
+          geometry:
+            type: mesh
+            filename: link2.stl
+            mesh_name: link2_c
+            scale:
+              x: 1
+              y: 1
+              z: 1
+          attributes:
+            name: link2_c
+            geometry_class: collision
+            group: 3
+            mass: 0
+            density: 0
+      joints:
+        - joint3
+    link3:
+      name: link3
+      parent_joint: joint3
+      gravcomp: 1
+      inertial:
+        mass: 0.953
+        inertia:
+          xx: 0.0008860991074053359
+          xy: -0.00039286809994388503
+          xz: -7.065982646046825e-05
+          yy: 0.001578497925021069
+          yz: -2.4449583012658684e-05
+          zz: 0.001846769967573594
+        origin:
+          position:
+            x: 0.072
+            y: -0.035699999999999996
+            z: -0.0009999999999999996
+          orientation:
+            w: 1
+            x: -0
+            y: 0
+            z: -0
+      geometries:
+        - origin:
+            position:
+              x: -0
+              y: -0
+              z: -0
+            orientation:
+              w: 1
+              x: -0
+              y: 0
+              z: -0
+          geometry:
+            type: mesh
+            filename: link3.stl
+            mesh_name: link3
+            scale:
+              x: 1
+              y: 1
+              z: 1
+          attributes:
+            geometry_class: visual
+            group: 2
+            contype: 0
+            conaffinity: 0
+            material: white
+        - origin:
+            position:
+              x: -0
+              y: -0
+              z: -0
+            orientation:
+              w: 1
+              x: -0
+              y: 0
+              z: -0
+          geometry:
+            type: mesh
+            filename: link3.stl
+            mesh_name: link3_c
+            scale:
+              x: 1
+              y: 1
+              z: 1
+          attributes:
+            name: link3_c
+            geometry_class: collision
+            group: 3
+            mass: 0
+            density: 0
+      joints:
+        - joint4
+    link4:
+      name: link4
+      parent_joint: joint4
+      gravcomp: 1
+      inertial:
+        mass: 1.284
+        inertia:
+          xx: 0.0037050016556066274
+          xy: -1.9999704901142425e-06
+          xz: -7.170012520142505e-06
+          yy: 0.003045499661567256
+          yz: -0.0009318774501889608
+          zz: 0.0015412986828261166
+        origin:
+          position:
+            x: -0.002
+            y: -0.028500000000000008
+            z: -0.08130000000000001
+          orientation:
+            w: 1
+            x: -0
+            y: 0
+            z: -0
+      geometries:
+        - origin:
+            position:
+              x: -0
+              y: -0
+              z: -0
+            orientation:
+              w: 1
+              x: -0
+              y: 0
+              z: -0
+          geometry:
+            type: mesh
+            filename: link4.stl
+            mesh_name: link4
+            scale:
+              x: 1
+              y: 1
+              z: 1
+          attributes:
+            geometry_class: visual
+            group: 2
+            contype: 0
+            conaffinity: 0
+            material: white
+        - origin:
+            position:
+              x: -0
+              y: -0
+              z: -0
+            orientation:
+              w: 1
+              x: -0
+              y: 0
+              z: -0
+          geometry:
+            type: mesh
+            filename: link4.stl
+            mesh_name: link4_c
+            scale:
+              x: 1
+              y: 1
+              z: 1
+          attributes:
+            name: link4_c
+            geometry_class: collision
+            group: 3
+            mass: 0
+            density: 0
+      joints:
+        - joint5
+    link5:
+      name: link5
+      parent_joint: joint5
+      gravcomp: 1
+      inertial:
+        mass: 0.804
+        inertia:
+          xx: 0.0005668002386478409
+          xy: 5.999982960684849e-07
+          xz: 5.300090615582311e-06
+          yy: 0.0005077001328740125
+          yz: -4.799846403321988e-07
+          zz: 0.0005299996284781464
+        origin:
+          position:
+            x: 5.421010862427522e-20
+            y: 0.009999999999999997
+            z: 0.0019000000000000002
+          orientation:
+            w: 1
+            x: -0
+            y: 0
+            z: -0
+      geometries:
+        - origin:
+            position:
+              x: -0
+              y: -0
+              z: -0
+            orientation:
+              w: 1
+              x: -0
+              y: 0
+              z: -0
+          geometry:
+            type: mesh
+            filename: link5.stl
+            mesh_name: link5
+            scale:
+              x: 1
+              y: 1
+              z: 1
+          attributes:
+            geometry_class: visual
+            group: 2
+            contype: 0
+            conaffinity: 0
+            material: white
+        - origin:
+            position:
+              x: -0
+              y: -0
+              z: -0
+            orientation:
+              w: 1
+              x: -0
+              y: 0
+              z: -0
+          geometry:
+            type: mesh
+            filename: link5.stl
+            mesh_name: link5_c
+            scale:
+              x: 1
+              y: 1
+              z: 1
+          attributes:
+            name: link5_c
+            geometry_class: collision
+            group: 3
+            mass: 0
+            density: 0
+      joints:
+        - joint6
+    link6:
+      name: link6
+      parent_joint: joint6
+      gravcomp: 1
+      inertial:
+        mass: 0.13
+        inertia:
+          xx: 7.726004840947744e-05
+          xy: 9.999923747263217e-07
+          xz: -4.000296478033544e-07
+          yy: 8.566498107375794e-05
+          yz: -6.000148609989018e-07
+          zz: 0.00014813987051676464
+        origin:
+          position:
+            x: -3.3881317890172014e-19
+            y: -0.0019400000000000003
+            z: -0.0102
+          orientation:
+            w: 1
+            x: -0
+            y: 0
+            z: -0
+      geometries:
+        - origin:
+            position:
+              x: -0
+              y: -0
+              z: -0
+            orientation:
+              w: 1
+              x: -0
+              y: 0
+              z: -0
+          geometry:
+            type: mesh
+            filename: link6.stl
+            mesh_name: link6
+            scale:
+              x: 1
+              y: 1
+              z: 1
+          attributes:
+            geometry_class: visual
+            group: 2
+            contype: 0
+            conaffinity: 0
+            material: silver
+        - origin:
+            position:
+              x: -0
+              y: -0
+              z: -0
+            orientation:
+              w: 1
+              x: -0
+              y: 0
+              z: -0
+          geometry:
+            type: mesh
+            filename: link6.stl
+            mesh_name: link6_c
+            scale:
+              x: 1
+              y: 1
+              z: 1
+          attributes:
+            name: link6_c
+            geometry_class: collision
+            group: 3
+            mass: 0
+            density: 0
+      sites:
+        - name: attachment_site
+          pose:
+            position:
+              x: -0
+              y: -0
+              z: -0
+            orientation:
+              w: 1
+              x: -0
+              y: 0
+              z: -0
+          group: 4
+          size:
+            - 0.001
+          rgba:
+            - 0.5
+            - 0.5
+            - 0.5
+            - 0.3
+      joints:
+        - lite6_ee_joint
+    link_base:
+      name: link_base
+      inertial:
+        mass: 1.65394
+        inertia:
+          xx: 0
+          xy: -0
+          xz: 0
+          yy: 0
+          yz: -0
+          zz: 0
+        origin:
+          position:
+            x: -0.00829545
+            y: 3.26357e-05
+            z: 0.0631195
+          orientation:
+            w: 1
+            x: -0
+            y: 0
+            z: -0
+      geometries:
+        - origin:
+            position:
+              x: -0
+              y: -0
+              z: -0
+            orientation:
+              w: 1
+              x: -0
+              y: 0
+              z: -0
+          geometry:
+            type: mesh
+            filename: link_base.stl
+            mesh_name: link_base
+            scale:
+              x: 1
+              y: 1
+              z: 1
+          attributes:
+            geometry_class: visual
+            group: 2
+            contype: 0
+            conaffinity: 0
+            material: white
+        - origin:
+            position:
+              x: -0
+              y: -0
+              z: -0
+            orientation:
+              w: 1
+              x: -0
+              y: 0
+              z: -0
+          geometry:
+            type: mesh
+            filename: link_base.stl
+            mesh_name: link_base_c
+            scale:
+              x: 1
+              y: 1
+              z: 1
+          attributes:
+            name: link_base_c
+            geometry_class: collision
+            group: 3
+            mass: 0
+            density: 0
+      childclass: lite6
+      joints:
+        - joint1
+    lite6_ee:
+      name: lite6_ee
+      parent_joint: lite6_ee_joint
+      gravcomp: 1
+  joints:
+    joint1:
+      type: revolute
+      name: joint1
+      parent_link: link_base
+      child_link: link1
+      origin:
+        position:
+          x: -0
+          y: -0
+          z: 0.2435
+        orientation:
+          w: 1
+          x: -0
+          y: 0
+          z: -0
+      axis:
+        x: 1
+        y: 0
+        z: 0
+      limits:
+        position_lower: -6.28319
+        position_upper: 6.28319
+        velocity: 0
+        torque: 0
+      dynamics:
+        damping: 1
+        armature: 0.1
+    joint2:
+      type: revolute
+      name: joint2
+      parent_link: link1
+      child_link: link2
+      origin:
+        position:
+          x: -0
+          y: -0
+          z: -0
+        orientation:
+          w: -0.5
+          x: 0.5
+          y: 0.5
+          z: 0.5
+      axis:
+        x: 1
+        y: 0
+        z: 0
+      limits:
+        position_lower: -2.61799
+        position_upper: 2.61799
+        velocity: 0
+        torque: 0
+      dynamics:
+        damping: 1
+        armature: 0.1
+    joint3:
+      type: revolute
+      name: joint3
+      parent_link: link2
+      child_link: link3
+      origin:
+        position:
+          x: 0.20019999999999996
+          y: -1.3877787807814457e-17
+          z: 5.293955920339377e-23
+        orientation:
+          w: -2.59734103282963e-06
+          x: -0.7071052811795897
+          y: -0.7071082811807827
+          z: -2.5973510328336063e-06
+      axis:
+        x: 1
+        y: 0
+        z: 0
+      limits:
+        position_lower: -0.061087
+        position_upper: 5.23599
+        velocity: 0
+        torque: 0
+      dynamics:
+        damping: 1
+        armature: 0.1
+    joint4:
+      type: revolute
+      name: joint4
+      parent_link: link3
+      child_link: link4
+      origin:
+        position:
+          x: 0.087
+          y: -0.22761
+          z: -0
+        orientation:
+          w: 0.7071052811843601
+          x: 0.707108281185553
+          y: 0
+          z: -0
+      axis:
+        x: 1
+        y: 0
+        z: 0
+      limits:
+        position_lower: -6.28319
+        position_upper: 6.28319
+        velocity: 0
+        torque: 0
+      dynamics:
+        damping: 1
+        armature: 0.1
+    joint5:
+      type: revolute
+      name: joint5
+      parent_link: link4
+      child_link: link5
+      origin:
+        position:
+          x: -0
+          y: -0
+          z: -0
+        orientation:
+          w: 0.7071067811865475
+          x: 0.7071067811865475
+          y: 0
+          z: -0
+      axis:
+        x: 1
+        y: 0
+        z: 0
+      limits:
+        position_lower: -2.1642
+        position_upper: 2.1642
+        velocity: 0
+        torque: 0
+      dynamics:
+        damping: 1
+        armature: 0.1
+    joint6:
+      type: revolute
+      name: joint6
+      parent_link: link5
+      child_link: link6
+      origin:
+        position:
+          x: -0
+          y: 0.062499999999999986
+          z: -0
+        orientation:
+          w: 0.7071067811865475
+          x: -0.7071067811865475
+          y: 0
+          z: -0
+      axis:
+        x: 1
+        y: 0
+        z: 0
+      limits:
+        position_lower: -6.28319
+        position_upper: 6.28319
+        velocity: 0
+        torque: 0
+      dynamics:
+        damping: 1
+        armature: 0.1
+    lite6_ee_joint:
+      type: fixed
+      name: lite6_ee_joint
+      parent_link: link6
+      child_link: lite6_ee
+      origin:
+        position:
+          x: -0
+          y: -0
+          z: -0
+        orientation:
+          w: 1
+          x: -0
+          y: 0
+          z: -0
+      axis:
+        x: 0
+        y: 0
+        z: 0
+      limits:
+        position_lower: 0
+        position_upper: 0
+        velocity: 0
+        torque: 0
+  actuators:
+    - kind: position
+      actuator_class: size1
+      joint: joint1
+      ctrlrange:
+        - -6.28319
+        - 6.28319
+      kp: 2000
+      kv: 200
+      group: 3
+    - kind: position
+      actuator_class: size1
+      joint: joint2
+      ctrlrange:
+        - -2.61799
+        - 2.61799
+      kp: 2000
+      kv: 200
+      group: 3
+    - kind: position
+      actuator_class: size2
+      joint: joint3
+      ctrlrange:
+        - -0.061087
+        - 5.23599
+      kp: 2000
+      kv: 200
+      group: 3
+    - kind: position
+      actuator_class: size2
+      joint: joint4
+      ctrlrange:
+        - -6.28319
+        - 6.28319
+      kp: 2000
+      kv: 200
+      group: 3
+    - kind: position
+      actuator_class: size2
+      joint: joint5
+      ctrlrange:
+        - -2.1642
+        - 2.1642
+      kp: 2000
+      kv: 200
+      group: 3
+    - kind: position
+      actuator_class: size3
+      joint: joint6
+      ctrlrange:
+        - -6.28319
+        - 6.28319
+      kp: 2000
+      kv: 200
+      group: 3
+    - kind: motor
+      name: joint1_torque
+      joint: joint1
+      group: 1
+    - kind: velocity
+      name: joint1_velocity
+      joint: joint1
+      kv: 10
+      group: 2
+    - kind: motor
+      name: joint2_torque
+      joint: joint2
+      group: 1
+    - kind: velocity
+      name: joint2_velocity
+      joint: joint2
+      kv: 10
+      group: 2
+    - kind: motor
+      name: joint3_torque
+      joint: joint3
+      group: 1
+    - kind: velocity
+      name: joint3_velocity
+      joint: joint3
+      kv: 10
+      group: 2
+    - kind: motor
+      name: joint4_torque
+      joint: joint4
+      group: 1
+    - kind: velocity
+      name: joint4_velocity
+      joint: joint4
+      kv: 10
+      group: 2
+    - kind: motor
+      name: joint5_torque
+      joint: joint5
+      group: 1
+    - kind: velocity
+      name: joint5_velocity
+      joint: joint5
+      kv: 10
+      group: 2
+    - kind: motor
+      name: joint6_torque
+      joint: joint6
+      group: 1
+    - kind: velocity
+      name: joint6_velocity
+      joint: joint6
+      kv: 10
+      group: 2
+  attributes:
+    keyframes:
+      - name: home
+        qpos:
+          - 0.31901815533638
+          - 0.4449637234210968
+          - 1.196472406387329
+          - -0.015339807607233524
+          - 0.6614493131637573
+          - 0.3424611985683441
+        ctrl:
+          - 0.31901815533638
+          - 0.4449637234210968
+          - 1.196472406387329
+          - -0.015339807607233524
+          - 0.6614493131637573
+          - 0.3424611985683441
+    compiler:
+      angle: radian
+      meshdir: assets
+      autolimits: true
+    solver:
+      gravity: ~
+      integrator: implicitfast
+      wind: ~
+      flags: ~
+    default_classes:
+      - children:
+          - class: lite6
+            elements:
+              - tag: geom
+                attributes:
+                  type: mesh
+              - tag: joint
+                attributes:
+                  axis: 0 0 1
+                  damping: 1
+                  armature: 0.1
+              - tag: position
+                attributes:
+                  kp: 2000
+                  kv: 200
+              - tag: site
+                attributes:
+                  size: 0.001
+                  rgba: 0.5 0.5 0.5 0.3
+                  group: 4
+            children:
+              - class: size1
+                elements:
+                  - tag: position
+                    attributes:
+                      forcerange: -50 50
+              - class: size2
+                elements:
+                  - tag: position
+                    attributes:
+                      forcerange: -32 32
+              - class: size3
+                elements:
+                  - tag: position
+                    attributes:
+                      forcerange: -20 20
+              - class: visual
+                elements:
+                  - tag: geom
+                    attributes:
+                      contype: 0
+                      conaffinity: 0
+                      group: 2
+                      material: white
+              - class: collision
+                elements:
+                  - tag: geom
+                    attributes:
+                      group: 3
+                      mass: 0
+                      density: 0
+    meshes:
+      - name: link_base
+        file: link_base.stl
+      - name: link1
+        file: link1.stl
+      - name: link2
+        file: link2.stl
+      - name: link3
+        file: link3.stl
+      - name: link4
+        file: link4.stl
+      - name: link5
+        file: link5.stl
+      - name: link6
+        file: link6.stl
+      - name: link_base_c
+        file: link_base.stl
+      - name: link1_c
+        file: link1.stl
+      - name: link2_c
+        file: link2.stl
+      - name: link3_c
+        file: link3.stl
+      - name: link4_c
+        file: link4.stl
+      - name: link5_c
+        file: link5.stl
+      - name: link6_c
+        file: link6.stl
+    materials:
+      - name: white
+        rgba:
+          - 1
+          - 1
+          - 1
+          - 1
+      - name: silver
+        rgba:
+          - 0.753
+          - 0.753
+          - 0.753
+          - 1

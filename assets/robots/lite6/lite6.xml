@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mujoco model="ufactory_lite6">
+    <compiler angle="radian" meshdir="assets" autolimits="true"/>
+    <default>
+        <default class="lite6">
+            <geom type="mesh"/>
+            <joint axis="0 0 1" damping="1" armature="0.1"/>
+            <position kp="2000" kv="200"/>
+            <site size="0.001" rgba="0.5 0.5 0.5 0.3" group="4"/>
+            <default class="size1">
+                <position forcerange="-50 50"/>
+            </default>
+            <default class="size2">
+                <position forcerange="-32 32"/>
+            </default>
+            <default class="size3">
+                <position forcerange="-20 20"/>
+            </default>
+            <default class="visual">
+                <geom contype="0" conaffinity="0" group="2" material="white"/>
+            </default>
+            <default class="collision">
+                <geom group="3" mass="0" density="0"/>
+            </default>
+        </default>
+    </default>
+    <custom>
+        <text name="gafro_kinematic_chain:link6" data="link6;"/>
+        <text name="gafro_kinematic_chain:lite6_ee" data="lite6_ee;"/>
+        <text name="gafro_task_space:ee" data="lite6_ee"/>
+    </custom>
+    <asset>
+        <mesh name="link_base" file="link_base.stl"/>
+        <mesh name="link1" file="link1.stl"/>
+        <mesh name="link2" file="link2.stl"/>
+        <mesh name="link3" file="link3.stl"/>
+        <mesh name="link4" file="link4.stl"/>
+        <mesh name="link5" file="link5.stl"/>
+        <mesh name="link6" file="link6.stl"/>
+        <mesh name="link_base_c" file="link_base.stl"/>
+        <mesh name="link1_c" file="link1.stl"/>
+        <mesh name="link2_c" file="link2.stl"/>
+        <mesh name="link3_c" file="link3.stl"/>
+        <mesh name="link4_c" file="link4.stl"/>
+        <mesh name="link5_c" file="link5.stl"/>
+        <mesh name="link6_c" file="link6.stl"/>
+        <material name="white" rgba="1 1 1 1"/>
+        <material name="silver" rgba="0.753 0.753 0.753 1"/>
+    </asset>
+    <worldbody>
+        <body name="link_base" pos="-0 -0 -0" quat="1 -0 0 -0">
+            <inertial pos="-0.00829545 3.26357e-05 0.0631195" mass="1.65394" diaginertia="0 0 0"/>
+            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="link_base" class="visual" group="2" contype="0" conaffinity="0" material="white"/>
+            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="link_base_c" name="link_base_c" class="collision" group="3" mass="0" density="0"/>
+            <body name="link1" pos="-0 -0 0.2435" quat="1 -0 0 -0">
+                <inertial pos="-0.00036 0.04195 -0.0025" mass="1.411" fullinertia="0.00145164 0.0008873 0.00131993 1.24e-05 6.69991e-06 0.0001255"/>
+                <joint name="joint1" type="hinge" axis="0 -0 1" range="-6.28319 6.28319" damping="1" armature="0.10000000000000001"/>
+                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="link1" class="visual" group="2" contype="0" conaffinity="0" material="white"/>
+                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="link1_c" name="link1_c" class="collision" group="3" mass="0" density="0"/>
+                <body name="link2" pos="-0 -0 -0" quat="-0.5 0.5 0.5 0.5">
+                    <inertial pos="0.179 3.46945e-18 0.0584" mass="1.3400000000000001" fullinertia="0.0015854 0.0056097 0.00484999 -6.7681e-06 0.00115136 1.14049e-06"/>
+                    <joint name="joint2" type="hinge" axis="0 -0 1" range="-2.61799 2.61799" damping="1" armature="0.10000000000000001"/>
+                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="link2" class="visual" group="2" contype="0" conaffinity="0" material="white"/>
+                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="link2_c" name="link2_c" class="collision" group="3" mass="0" density="0"/>
+                    <body name="link3" pos="0.2002 -1.38778e-17 5.29396e-23" quat="-2.59734e-06 -0.707105 -0.707108 -2.59735e-06">
+                        <inertial pos="0.072 -0.0357 -0.001" mass="0.95299999999999996" fullinertia="0.000886099 0.0015785 0.00184677 -0.000392868 -7.06598e-05 -2.44496e-05"/>
+                        <joint name="joint3" type="hinge" axis="0 -0 1" range="-0.061087 5.23599" damping="1" armature="0.10000000000000001"/>
+                        <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="link3" class="visual" group="2" contype="0" conaffinity="0" material="white"/>
+                        <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="link3_c" name="link3_c" class="collision" group="3" mass="0" density="0"/>
+                        <body name="link4" pos="0.087 -0.22761 -0" quat="0.707105 0.707108 0 -0">
+                            <inertial pos="-0.002 -0.0285 -0.0813" mass="1.284" fullinertia="0.003705 0.0030455 0.0015413 -1.99997e-06 -7.17001e-06 -0.000931877"/>
+                            <joint name="joint4" type="hinge" axis="0 -0 1" range="-6.28319 6.28319" damping="1" armature="0.10000000000000001"/>
+                            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="link4" class="visual" group="2" contype="0" conaffinity="0" material="white"/>
+                            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="link4_c" name="link4_c" class="collision" group="3" mass="0" density="0"/>
+                            <body name="link5" pos="-0 -0 -0" quat="0.707107 0.707107 0 -0">
+                                <inertial pos="5.42101e-20 0.01 0.0019" mass="0.80400000000000005" fullinertia="0.0005668 0.0005077 0.00053 5.99998e-07 5.30009e-06 -4.79985e-07"/>
+                                <joint name="joint5" type="hinge" axis="0 -0 1" range="-2.1642 2.1642" damping="1" armature="0.10000000000000001"/>
+                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="link5" class="visual" group="2" contype="0" conaffinity="0" material="white"/>
+                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="link5_c" name="link5_c" class="collision" group="3" mass="0" density="0"/>
+                                <body name="link6" pos="-0 0.0625 -0" quat="0.707107 -0.707107 0 -0">
+                                    <inertial pos="-3.38813e-19 -0.00194 -0.0102" mass="0.13" fullinertia="7.726e-05 8.5665e-05 0.00014814 9.99992e-07 -4.0003e-07 -6.00015e-07"/>
+                                    <joint name="joint6" type="hinge" axis="0 -0 1" range="-6.28319 6.28319" damping="1" armature="0.10000000000000001"/>
+                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="link6" class="visual" group="2" contype="0" conaffinity="0" material="silver"/>
+                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="link6_c" name="link6_c" class="collision" group="3" mass="0" density="0"/>
+                                    <site name="attachment_site" pos="-0 -0 -0" quat="1 -0 0 -0" group="4" size="0.001" rgba="0.5 0.5 0.5 0.3"/>
+                                    <body name="lite6_ee" pos="-0 -0 -0" quat="1 -0 0 -0"/>
+                                </body>
+                            </body>
+                        </body>
+                    </body>
+                </body>
+            </body>
+        </body>
+    </worldbody>
+    <option integrator="implicitfast"/>
+    <actuator>
+        <position joint="joint1" ctrlrange="-6.28319 6.28319" kp="1" kv="0" group="3"/>
+        <position joint="joint2" ctrlrange="-2.61799 2.61799" kp="1" kv="0" group="3"/>
+        <position joint="joint3" ctrlrange="-0.061087 5.23599" kp="1" kv="0" group="3"/>
+        <position joint="joint4" ctrlrange="-6.28319 6.28319" kp="1" kv="0" group="3"/>
+        <position joint="joint5" ctrlrange="-2.1642 2.1642" kp="1" kv="0" group="3"/>
+        <position joint="joint6" ctrlrange="-6.28319 6.28319" kp="1" kv="0" group="3"/>
+        <motor name="joint1_torque" joint="joint1" group="1"/>
+        <velocity name="joint1_velocity" joint="joint1" kv="10" group="2"/>
+        <motor name="joint2_torque" joint="joint2" group="1"/>
+        <velocity name="joint2_velocity" joint="joint2" kv="10" group="2"/>
+        <motor name="joint3_torque" joint="joint3" group="1"/>
+        <velocity name="joint3_velocity" joint="joint3" kv="10" group="2"/>
+        <motor name="joint4_torque" joint="joint4" group="1"/>
+        <velocity name="joint4_velocity" joint="joint4" kv="10" group="2"/>
+        <motor name="joint5_torque" joint="joint5" group="1"/>
+        <velocity name="joint5_velocity" joint="joint5" kv="10" group="2"/>
+        <motor name="joint6_torque" joint="joint6" group="1"/>
+        <velocity name="joint6_velocity" joint="joint6" kv="10" group="2"/>
+    </actuator>
+    <keyframe>
+        <key name="home" qpos="0 0 1.57 0 1.57 0" ctrl="0 0 1.57 0 1.57 0"/>
+    </keyframe>
+</mujoco>

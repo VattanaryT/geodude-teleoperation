@@ -1,0 +1,627 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mujoco model="geodude">
+    <compiler angle="radian" meshdir="assets" autolimits="true"/>
+    <default>
+        <default class="/">
+            <default class="vention">
+                <material specular="0.59999999999999998" shininess="0.29999999999999999"/>
+                <default class="visual">
+                    <geom type="mesh" contype="0" conaffinity="0" group="2"/>
+                </default>
+                <default class="collision">
+                    <geom type="mesh" group="3" rgba="0.69999999999999996 0.69999999999999996 0.69999999999999996 0.90000000000000002"/>
+                </default>
+            </default>
+        </default>
+        <default class="left_ur5e/">
+            <default class="left_ur5e/ur5e">
+                <material specular="0.90000000000000002" shininess="0.59999999999999998"/>
+                <joint axis="0 1 0" range="-3.1415000000000002 3.1415000000000002" armature="0.10000000000000001"/>
+                <site group="4" rgba="0.5 0.5 0.5 0.29999999999999999" size="0.01"/>
+                <general ctrlrange="-3.1415000000000002 3.1415000000000002" forcerange="-300 300" gaintype="fixed" biastype="affine" gainprm="3000" biasprm="0 -3000 -101"/>
+                <default class="left_ur5e/size1">
+                    <general forcerange="-56 56" gainprm="500" biasprm="0 -500 -11"/>
+                </default>
+                <default class="left_ur5e/visual">
+                    <geom type="mesh" contype="0" conaffinity="0" group="2"/>
+                </default>
+                <default class="left_ur5e/collision">
+                    <geom type="capsule" group="3"/>
+                    <default class="left_ur5e/eef_collision">
+                        <geom type="cylinder"/>
+                    </default>
+                </default>
+            </default>
+        </default>
+        <default class="left_ur5e/gripper/">
+            <default class="left_ur5e/gripper/2f140">
+                <material specular="0.69999999999999996" shininess="0.40000000000000002"/>
+                <joint axis="1 0 0"/>
+                <general biastype="affine"/>
+                <default class="left_ur5e/gripper/driver">
+                    <joint solreflimit="0.0050000000000000001 1" solimplimit="0.94999999999999996 0.98999999999999999 0.001" range="-0.80000000000000004 0" armature="0.0050000000000000001" damping="0.10000000000000001"/>
+                </default>
+                <default class="left_ur5e/gripper/follower">
+                    <joint pos="0 0.0050000000000000001 -0.017500000000000002" solreflimit="0.0050000000000000001 1" solimplimit="0.94999999999999996 0.98999999999999999 0.001" range="-0.87570000000000003 0.87570000000000003" armature="0.001"/>
+                </default>
+                <default class="left_ur5e/gripper/spring_link">
+                    <joint stiffness="0.050000000000000003" range="-0.80000000000000004 0.29670597283" springref="-25.620000000000001" armature="0.001" damping="0.00125"/>
+                </default>
+                <default class="left_ur5e/gripper/coupler">
+                    <joint solreflimit="0.0050000000000000001 1" solimplimit="0.94999999999999996 0.98999999999999999 0.001" range="0 1.5700000000000001" armature="0.001"/>
+                </default>
+                <default class="left_ur5e/gripper/visual">
+                    <geom type="mesh" contype="0" conaffinity="0" group="2"/>
+                </default>
+                <default class="left_ur5e/gripper/collision">
+                    <geom type="mesh" group="3"/>
+                    <default class="left_ur5e/gripper/pad_box1">
+                        <geom type="box" priority="1" size="0.0135 0.032500000000000001 0.0037499999999999999" rgba="0.55000000000000004 0.55000000000000004 0.55000000000000004 1" friction="0.69999999999999996" mass="0" solref="0.0040000000000000001 1" solimp="0.94999999999999996 0.98999999999999999 0.001" pos="0 0.045755400000000002 -0.027220299999999999"/>
+                    </default>
+                </default>
+            </default>
+        </default>
+        <default class="right_ur5e/">
+            <default class="right_ur5e/ur5e">
+                <material specular="0.90000000000000002" shininess="0.59999999999999998"/>
+                <joint axis="0 1 0" range="-3.1415000000000002 3.1415000000000002" armature="0.10000000000000001"/>
+                <site group="4" rgba="0.5 0.5 0.5 0.29999999999999999" size="0.01"/>
+                <general ctrlrange="-3.1415000000000002 3.1415000000000002" forcerange="-300 300" gaintype="fixed" biastype="affine" gainprm="3000" biasprm="0 -3000 -101"/>
+                <default class="right_ur5e/size1">
+                    <general forcerange="-56 56" gainprm="500" biasprm="0 -500 -11"/>
+                </default>
+                <default class="right_ur5e/visual">
+                    <geom type="mesh" contype="0" conaffinity="0" group="2"/>
+                </default>
+                <default class="right_ur5e/collision">
+                    <geom type="capsule" group="3"/>
+                    <default class="right_ur5e/eef_collision">
+                        <geom type="cylinder"/>
+                    </default>
+                </default>
+            </default>
+        </default>
+        <default class="right_ur5e/gripper/">
+            <default class="right_ur5e/gripper/2f140">
+                <material specular="0.69999999999999996" shininess="0.40000000000000002"/>
+                <joint axis="1 0 0"/>
+                <general biastype="affine"/>
+                <default class="right_ur5e/gripper/driver">
+                    <joint solreflimit="0.0050000000000000001 1" solimplimit="0.94999999999999996 0.98999999999999999 0.001" range="-0.80000000000000004 0" armature="0.0050000000000000001" damping="0.10000000000000001"/>
+                </default>
+                <default class="right_ur5e/gripper/follower">
+                    <joint pos="0 0.0050000000000000001 -0.017500000000000002" solreflimit="0.0050000000000000001 1" solimplimit="0.94999999999999996 0.98999999999999999 0.001" range="-0.87570000000000003 0.87570000000000003" armature="0.001"/>
+                </default>
+                <default class="right_ur5e/gripper/spring_link">
+                    <joint stiffness="0.050000000000000003" range="-0.80000000000000004 0.29670597283" springref="-25.620000000000001" armature="0.001" damping="0.00125"/>
+                </default>
+                <default class="right_ur5e/gripper/coupler">
+                    <joint solreflimit="0.0050000000000000001 1" solimplimit="0.94999999999999996 0.98999999999999999 0.001" range="0 1.5700000000000001" armature="0.001"/>
+                </default>
+                <default class="right_ur5e/gripper/visual">
+                    <geom type="mesh" contype="0" conaffinity="0" group="2"/>
+                </default>
+                <default class="right_ur5e/gripper/collision">
+                    <geom type="mesh" group="3"/>
+                    <default class="right_ur5e/gripper/pad_box1">
+                        <geom type="box" priority="1" size="0.0135 0.032500000000000001 0.0037499999999999999" rgba="0.55000000000000004 0.55000000000000004 0.55000000000000004 1" friction="0.69999999999999996" mass="0" solref="0.0040000000000000001 1" solimp="0.94999999999999996 0.98999999999999999 0.001" pos="0 0.045755400000000002 -0.027220299999999999"/>
+                    </default>
+                </default>
+            </default>
+        </default>
+    </default>
+    <custom>
+        <text name="gafro_kinematic_chain:left_ur5e/endeffector_link" data="left_ur5e/endeffector_link"/>
+        <text name="gafro_kinematic_chain:right_ur5e/endeffector_link" data="right_ur5e/endeffector_link"/>
+        <text name="gafro_task_space:ee" data="left_ur5e/endeffector_link;"/>
+        <text name="gafro_task_space:eer" data="right_ur5e/endeffector_link;"/>
+        <text name="gafro_task_space:ee0" data="left_ur5e/endeffector_link;ee0"/>
+        <text name="gafro_task_space:ee1" data="right_ur5e/endeffector_link;ee1"/>
+        <text name="gafro_control_group:ee0" data="joint: left_arm_linear_vention left_ur5e/shoulder_pan_joint left_ur5e/shoulder_lift_joint left_ur5e/elbow_joint left_ur5e/wrist_1_joint left_ur5e/wrist_2_joint left_ur5e/wrist_3_joint"/>
+        <text name="gafro_control_group:ee1" data="joint: right_arm_linear_vention right_ur5e/shoulder_pan_joint right_ur5e/shoulder_lift_joint right_ur5e/elbow_joint right_ur5e/wrist_1_joint right_ur5e/wrist_2_joint right_ur5e/wrist_3_joint"/>
+    </custom>
+    <asset>
+        <mesh name="vention_frame_visual_model" file="vention_frame_visual_model-3ad6025d0633a8c49789e10339a2c0fb6855dd81.stl"/>
+        <mesh name="left_ur5e/base_0" file="base_0-d5328a99917358d9aa384f12743fe73698461d1c.obj"/>
+        <mesh name="left_ur5e/base_1" file="base_1-d1c667ae5f87b9c900fdeadad850205153846396.obj"/>
+        <mesh name="left_ur5e/shoulder_0" file="shoulder_0-89051b80580d45ef39cb220bf068742b01770552.obj"/>
+        <mesh name="left_ur5e/shoulder_1" file="shoulder_1-50ba15e82459989cf7f17cba7b1aafbca2781206.obj"/>
+        <mesh name="left_ur5e/shoulder_2" file="shoulder_2-29ad171bec79e2912abb81d250aaf5ff9a67bc60.obj"/>
+        <mesh name="left_ur5e/upperarm_0" file="upperarm_0-16bfdf8d1b19d35ef0adbc4cf29ab0c7edb62dcf.obj"/>
+        <mesh name="left_ur5e/upperarm_1" file="upperarm_1-c53724435bec35e1b608145457af767b038f4fd1.obj"/>
+        <mesh name="left_ur5e/upperarm_2" file="upperarm_2-199e0d0c1baa55a078742ed298800ff26d072c09.obj"/>
+        <mesh name="left_ur5e/upperarm_3" file="upperarm_3-62f2bba935d9ab94800a49bcb6ede7b0fa9dd071.obj"/>
+        <mesh name="left_ur5e/forearm_0" file="forearm_0-7994229075bdd0e4a5c860ca174278ee8eda8229.obj"/>
+        <mesh name="left_ur5e/forearm_1" file="forearm_1-c72848167eef89e0d9801ddd7da516e7e878776e.obj"/>
+        <mesh name="left_ur5e/forearm_2" file="forearm_2-3a33518f421ed893ff9b0d759af07b0e5900e78c.obj"/>
+        <mesh name="left_ur5e/forearm_3" file="forearm_3-54cad2556a94cdda04a7cef5c84554a7d9f3ab03.obj"/>
+        <mesh name="left_ur5e/wrist1_0" file="wrist1_0-6876ccb9d0084054268dd6aec007e5a61aea6c2d.obj"/>
+        <mesh name="left_ur5e/wrist1_1" file="wrist1_1-0f7e6640a9dfb98e58078997f5f82bd433879387.obj"/>
+        <mesh name="left_ur5e/wrist1_2" file="wrist1_2-3f6dcae8c736e2c42db3746db7f24ac4516aaca7.obj"/>
+        <mesh name="left_ur5e/wrist2_0" file="wrist2_0-fdb3f7bc360f8f37f6be6270c8b507291dc9b01c.obj"/>
+        <mesh name="left_ur5e/wrist2_1" file="wrist2_1-258ca475798c530d954723dc29f3d67086ead0d9.obj"/>
+        <mesh name="left_ur5e/wrist2_2" file="wrist2_2-c6734971531db7f2f09e746377aa9faccb69b192.obj"/>
+        <mesh name="left_ur5e/wrist3" file="wrist3-a1fffb4f599e121fb18be40e087b6fd7fb164e59.obj"/>
+        <mesh name="left_ur5e/gripper/base_mount" file="base_mount-492692230394a1ebdce431c652d89a9c9a4211b5.stl" scale="0.001 0.001 0.001"/>
+        <mesh name="left_ur5e/gripper/base" file="base-89a0661a7293371ffe78c9605d5b7ccef2a78430.stl"/>
+        <mesh name="left_ur5e/gripper/driver" file="driver-a0c14c2ec91c3e05ccc3e9499456623628d28b1a.stl"/>
+        <mesh name="left_ur5e/gripper/follower" file="follower-90ac7cc434d804e958140d6f37fcc14bdbf74f5b.stl"/>
+        <mesh name="left_ur5e/gripper/coupler" file="coupler-e866eb8db5bf2b3f0922658edc8dd3dff1e96529.stl"/>
+        <mesh name="left_ur5e/gripper/pad" file="pad-0fb7d7243a94c9e197e05a09dc9b6de5c126cdfc.stl" scale="0.001 0.001 0.001"/>
+        <mesh name="left_ur5e/gripper/spring_link" file="spring_link-3730a0af47afa032388b26d12d24919377c589c7.stl"/>
+        <mesh name="right_ur5e/base_0" file="base_0-d5328a99917358d9aa384f12743fe73698461d1c.obj"/>
+        <mesh name="right_ur5e/base_1" file="base_1-d1c667ae5f87b9c900fdeadad850205153846396.obj"/>
+        <mesh name="right_ur5e/shoulder_0" file="shoulder_0-89051b80580d45ef39cb220bf068742b01770552.obj"/>
+        <mesh name="right_ur5e/shoulder_1" file="shoulder_1-50ba15e82459989cf7f17cba7b1aafbca2781206.obj"/>
+        <mesh name="right_ur5e/shoulder_2" file="shoulder_2-29ad171bec79e2912abb81d250aaf5ff9a67bc60.obj"/>
+        <mesh name="right_ur5e/upperarm_0" file="upperarm_0-16bfdf8d1b19d35ef0adbc4cf29ab0c7edb62dcf.obj"/>
+        <mesh name="right_ur5e/upperarm_1" file="upperarm_1-c53724435bec35e1b608145457af767b038f4fd1.obj"/>
+        <mesh name="right_ur5e/upperarm_2" file="upperarm_2-199e0d0c1baa55a078742ed298800ff26d072c09.obj"/>
+        <mesh name="right_ur5e/upperarm_3" file="upperarm_3-62f2bba935d9ab94800a49bcb6ede7b0fa9dd071.obj"/>
+        <mesh name="right_ur5e/forearm_0" file="forearm_0-7994229075bdd0e4a5c860ca174278ee8eda8229.obj"/>
+        <mesh name="right_ur5e/forearm_1" file="forearm_1-c72848167eef89e0d9801ddd7da516e7e878776e.obj"/>
+        <mesh name="right_ur5e/forearm_2" file="forearm_2-3a33518f421ed893ff9b0d759af07b0e5900e78c.obj"/>
+        <mesh name="right_ur5e/forearm_3" file="forearm_3-54cad2556a94cdda04a7cef5c84554a7d9f3ab03.obj"/>
+        <mesh name="right_ur5e/wrist1_0" file="wrist1_0-6876ccb9d0084054268dd6aec007e5a61aea6c2d.obj"/>
+        <mesh name="right_ur5e/wrist1_1" file="wrist1_1-0f7e6640a9dfb98e58078997f5f82bd433879387.obj"/>
+        <mesh name="right_ur5e/wrist1_2" file="wrist1_2-3f6dcae8c736e2c42db3746db7f24ac4516aaca7.obj"/>
+        <mesh name="right_ur5e/wrist2_0" file="wrist2_0-fdb3f7bc360f8f37f6be6270c8b507291dc9b01c.obj"/>
+        <mesh name="right_ur5e/wrist2_1" file="wrist2_1-258ca475798c530d954723dc29f3d67086ead0d9.obj"/>
+        <mesh name="right_ur5e/wrist2_2" file="wrist2_2-c6734971531db7f2f09e746377aa9faccb69b192.obj"/>
+        <mesh name="right_ur5e/wrist3" file="wrist3-a1fffb4f599e121fb18be40e087b6fd7fb164e59.obj"/>
+        <mesh name="right_ur5e/gripper/base_mount" file="base_mount-492692230394a1ebdce431c652d89a9c9a4211b5.stl" scale="0.001 0.001 0.001"/>
+        <mesh name="right_ur5e/gripper/base" file="base-89a0661a7293371ffe78c9605d5b7ccef2a78430.stl"/>
+        <mesh name="right_ur5e/gripper/driver" file="driver-a0c14c2ec91c3e05ccc3e9499456623628d28b1a.stl"/>
+        <mesh name="right_ur5e/gripper/follower" file="follower-90ac7cc434d804e958140d6f37fcc14bdbf74f5b.stl"/>
+        <mesh name="right_ur5e/gripper/coupler" file="coupler-e866eb8db5bf2b3f0922658edc8dd3dff1e96529.stl"/>
+        <mesh name="right_ur5e/gripper/pad" file="pad-0fb7d7243a94c9e197e05a09dc9b6de5c126cdfc.stl" scale="0.001 0.001 0.001"/>
+        <mesh name="right_ur5e/gripper/spring_link" file="spring_link-3730a0af47afa032388b26d12d24919377c589c7.stl"/>
+        <material name="blue" rgba="0.12 0.18 0.38 1" specular="0.5" shininess="0.29999999999999999"/>
+        <material name="red" rgba="0.12 0.18 0.38 1" specular="0.5" shininess="0.29999999999999999"/>
+        <material name="left_ur5e/black" rgba="0.033 0.033 0.033 1"/>
+        <material name="left_ur5e/jointgray" rgba="0.278 0.278 0.278 1"/>
+        <material name="left_ur5e/linkgray" rgba="0.65 0.65 0.65 1"/>
+        <material name="left_ur5e/urblue" rgba="0.49 0.678 0.8 1"/>
+        <material name="left_ur5e/gripper/metal" rgba="0.58 0.58 0.58 1"/>
+        <material name="left_ur5e/gripper/silicone" rgba="0.1882 0.1882 0.1882 1"/>
+        <material name="left_ur5e/gripper/gray" rgba="0.4627 0.4627 0.4627 1"/>
+        <material name="left_ur5e/gripper/black" rgba="0.149 0.149 0.149 1"/>
+        <material name="right_ur5e/black" rgba="0.033 0.033 0.033 1"/>
+        <material name="right_ur5e/jointgray" rgba="0.278 0.278 0.278 1"/>
+        <material name="right_ur5e/linkgray" rgba="0.65 0.65 0.65 1"/>
+        <material name="right_ur5e/urblue" rgba="0.49 0.678 0.8 1"/>
+        <material name="right_ur5e/gripper/metal" rgba="0.58 0.58 0.58 1"/>
+        <material name="right_ur5e/gripper/silicone" rgba="0.1882 0.1882 0.1882 1"/>
+        <material name="right_ur5e/gripper/gray" rgba="0.4627 0.4627 0.4627 1"/>
+        <material name="right_ur5e/gripper/black" rgba="0.149 0.149 0.149 1"/>
+        <texture name="light_skybox" type="skybox" builtin="flat" width="1" height="1" rgb1="0.92 0.92 0.92"/>
+    </asset>
+    <worldbody>
+        <body name="vention_base" pos="-0 -0 -0" quat="1 -0 0 -0">
+            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="vention_frame_visual_model" name="geom_0" class="visual" group="2" contype="0" conaffinity="0" material="blue"/>
+            <geom pos="-0 -0.475 0.3825" quat="1 -0 0 -0" type="box" size="0.65 0.6 0.371" name="geom_1" class="collision" group="3" rgba="0.7 0.7 0.7 0.9"/>
+            <geom pos="-0 -0.96 1.41" quat="1 -0 0 -0" type="box" size="0.55 0.1 0.66" name="geom_2" class="collision" group="3" rgba="0.7 0.7 0.7 0.9"/>
+            <geom pos="-0.66 -0.1 0.72" quat="1 -0 0 -0" type="box" size="0.037 0.045 0.072" name="geom_3" class="collision" group="3" rgba="0.7 0.7 0.7 0.9"/>
+            <site name="worktop" pos="-0 -0.35 0.755" quat="1 -0 0 -0" group="2" type="box" size="0.6 0.4 0.005" rgba="0.2 0.8 0.2 0"/>
+            <body name="left_arm_vention_base" pos="-0.33 -0.848 1.12" quat="0 -0 0 1">
+                <!-- Stated explicitly rather than left for MuJoCo to infer from geom_4's box: gafro's
+                     MJCF parser reads only <inertial>, so without this the link comes out massless and
+                     the arm's mass matrix is short by 18.57 kg. Values are exactly what MuJoCo derives
+                     from the box (half-extents 0.1125 0.01 0.1125, mass 18.57), so its model is unchanged. -->
+                <inertial pos="0 0 0" mass="18.57" diaginertia="0.0789611875 0.156684375 0.0789611875"/>
+                <joint name="left_arm_linear_vention" type="slide" axis="0 0 1" range="0 0.5" damping="5000"/>
+                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="box" size="0.1125 0.01 0.1125" name="geom_4" mass="18.57" material="red"/>
+                <site name="left_arm_attachment_site" pos="-0 -0.03 1.73472e-18" quat="0 -0 -0.70709 0.707123" group="4" size="0.01" rgba="0.5 0.5 0.5 0.3"/>
+                <body name="left_ur5e/" pos="-0 -0.03 1.73472e-18" quat="0 -0 -0.70709 0.707123">
+                    <light name="left_ur5e/spotlight" pos="0 -1 2" mode="targetbodycom" target="left_ur5e/wrist_2_link"/>
+                    <body name="left_ur5e/base" gravcomp="1" pos="-0 -0 -0" quat="0 -0 0 -1">
+                        <inertial pos="-0 -0 -0" mass="4" diaginertia="0.00443333 0.00443333 0.0072"/>
+                        <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/base_0" name="left_ur5e/geom_0" class="left_ur5e/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/black"/>
+                        <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/base_1" name="left_ur5e/geom_1" class="left_ur5e/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/jointgray"/>
+                        <body name="left_ur5e/shoulder_link" gravcomp="1" pos="-0 -0 0.163" quat="1 -0 0 -0">
+                            <inertial pos="-0 -0 -0" mass="3.7000000000000002" diaginertia="0.0102675 0.0102675 0.00666"/>
+                            <joint name="left_ur5e/shoulder_pan_joint" type="hinge" axis="0 -0 1" range="-3.1415 3.1415" armature="0.10000000000000001"/>
+                            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/shoulder_0" name="left_ur5e/geom_2" class="left_ur5e/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/urblue"/>
+                            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/shoulder_1" name="left_ur5e/geom_3" class="left_ur5e/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/black"/>
+                            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/shoulder_2" name="left_ur5e/geom_4" class="left_ur5e/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/jointgray"/>
+                            <geom pos="-0 -0 -0.04" quat="1 -0 0 -0" type="capsule" size="0.06 0.06" name="left_ur5e/geom_5" class="left_ur5e/collision" group="3"/>
+                            <body name="left_ur5e/upper_arm_link" gravcomp="1" pos="-0 0.138 -0" quat="0.707107 -0 0.707107 -0">
+                                <inertial pos="-0 -0 0.2125" mass="8.3930000000000007" diaginertia="0.133886 0.133886 0.0151074"/>
+                                <joint name="left_ur5e/shoulder_lift_joint" type="hinge" axis="0 1 0" range="-3.1415 3.1415" armature="0.10000000000000001"/>
+                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/upperarm_0" name="left_ur5e/geom_6" class="left_ur5e/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/linkgray"/>
+                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/upperarm_1" name="left_ur5e/geom_7" class="left_ur5e/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/black"/>
+                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/upperarm_2" name="left_ur5e/geom_8" class="left_ur5e/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/jointgray"/>
+                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/upperarm_3" name="left_ur5e/geom_9" class="left_ur5e/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/urblue"/>
+                                <geom pos="-0 -0.04 -0" quat="0.707107 0.707107 0 -0" type="capsule" size="0.06 0.06" name="left_ur5e/geom_10" class="left_ur5e/collision" group="3"/>
+                                <geom pos="-0 -0 0.2" quat="1 -0 0 -0" type="capsule" size="0.05 0.2" name="left_ur5e/geom_11" class="left_ur5e/collision" group="3"/>
+                                <body name="left_ur5e/forearm_link" gravcomp="1" pos="-0 -0.131 0.425" quat="1 -0 0 -0">
+                                    <inertial pos="-0 -0 0.196" mass="2.2749999999999999" diaginertia="0.0311796 0.0311796 0.004095"/>
+                                    <joint name="left_ur5e/elbow_joint" type="hinge" axis="0 1 0" range="-3.1415 3.1415" armature="0.10000000000000001"/>
+                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/forearm_0" name="left_ur5e/geom_12" class="left_ur5e/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/urblue"/>
+                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/forearm_1" name="left_ur5e/geom_13" class="left_ur5e/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/linkgray"/>
+                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/forearm_2" name="left_ur5e/geom_14" class="left_ur5e/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/black"/>
+                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/forearm_3" name="left_ur5e/geom_15" class="left_ur5e/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/jointgray"/>
+                                    <geom pos="-0 0.08 -0" quat="0.707107 0.707107 0 -0" type="capsule" size="0.055 0.06" name="left_ur5e/geom_16" class="left_ur5e/collision" group="3"/>
+                                    <geom pos="-0 -0 0.2" quat="1 -0 0 -0" type="capsule" size="0.038 0.19" name="left_ur5e/geom_17" class="left_ur5e/collision" group="3"/>
+                                    <body name="left_ur5e/wrist_1_link" gravcomp="1" pos="-0 -0 0.392" quat="0.707107 -0 0.707107 -0">
+                                        <inertial pos="-0 0.127 -0" mass="1.2190000000000001" diaginertia="0.0025599 0.0025599 0.0021942"/>
+                                        <joint name="left_ur5e/wrist_1_joint" type="hinge" axis="0 1 0" range="-3.1415 3.1415" armature="0.10000000000000001"/>
+                                        <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/wrist1_0" name="left_ur5e/geom_18" class="left_ur5e/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/black"/>
+                                        <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/wrist1_1" name="left_ur5e/geom_19" class="left_ur5e/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/urblue"/>
+                                        <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/wrist1_2" name="left_ur5e/geom_20" class="left_ur5e/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/jointgray"/>
+                                        <geom pos="-0 0.05 -0" quat="0.707107 0.707107 0 -0" type="capsule" size="0.04 0.07" name="left_ur5e/geom_21" class="left_ur5e/collision" group="3"/>
+                                        <body name="left_ur5e/wrist_2_link" gravcomp="1" pos="-0 0.127 -0" quat="1 -0 0 -0">
+                                            <inertial pos="-0 -0 0.1" mass="1.2190000000000001" diaginertia="0.0025599 0.0025599 0.0021942"/>
+                                            <joint name="left_ur5e/wrist_2_joint" type="hinge" axis="0 -0 1" range="-3.1415 3.1415" armature="0.10000000000000001"/>
+                                            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/wrist2_0" name="left_ur5e/geom_22" class="left_ur5e/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/black"/>
+                                            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/wrist2_1" name="left_ur5e/geom_23" class="left_ur5e/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/urblue"/>
+                                            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/wrist2_2" name="left_ur5e/geom_24" class="left_ur5e/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/jointgray"/>
+                                            <geom pos="-0 -0 0.04" quat="1 -0 0 -0" type="capsule" size="0.04 0.06" name="left_ur5e/geom_25" class="left_ur5e/collision" group="3"/>
+                                            <geom pos="-0 0.02 0.1" quat="0.707107 0.707107 0 -0" type="capsule" size="0.04 0.04" name="left_ur5e/geom_26" class="left_ur5e/collision" group="3"/>
+                                            <body name="left_ur5e/wrist_3_link" gravcomp="1" pos="-0 -0 0.1" quat="1 -0 0 -0">
+                                                <inertial pos="-0 0.0771683 -0" mass="0.18890000000000001" diaginertia="9.90863e-05 0.000132134 9.90863e-05"/>
+                                                <joint name="left_ur5e/wrist_3_joint" type="hinge" axis="0 1 0" range="-3.1415 3.1415" armature="0.10000000000000001"/>
+                                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/wrist3" name="left_ur5e/geom_27" class="left_ur5e/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/linkgray"/>
+                                                <geom pos="-0 0.08 -0" quat="0.707107 0.707107 0 -0" type="cylinder" size="0.04 0.02" name="left_ur5e/geom_28" class="left_ur5e/eef_collision" group="3"/>
+                                                <site name="left_ur5e/ft_sensor_site" pos="-0 0.1 -0" quat="-0.707107 0.707107 0 -0" group="4" size="0.01" rgba="0.5 0.5 0.5 0.3"/>
+                                                <site name="left_ur5e/gripper_attachment_site" pos="-0 0.1 -0" quat="-0.707107 0.707107 0 -0" group="4" size="0.01" rgba="0.5 0.5 0.5 0.3"/>
+                                                <body name="left_ur5e/gripper/" pos="-0 0.1 -0" quat="-0.707107 0.707107 0 -0">
+                                                    <body name="left_ur5e/gripper/base_mount" gravcomp="1" pos="-0 -0 0.007" quat="1 -0 0 -0">
+                                                        <!-- gafro's MJCF parser reads only <inertial>; these bodies otherwise let MuJoCo derive
+                                                             mass/inertia by integrating their collision MESH, so gafro saw them as massless and
+                                                             the arm's mass matrix was short by their combined 0.189 kg. Values below are exactly
+                                                             what MuJoCo computes from the mesh, so its model is unchanged. -->
+                                                        <inertial pos="-0.00036242243780843793 8.499453951535906e-05 -5.836006089874671e-05" quat="0.0 0.7060891603418311 0.0 0.7081229396423844" mass="0.1497655076744278" diaginertia="0.00010208547191101281 5.345740756291718e-05 5.205041638753298e-05"/>
+                                                        <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/base_mount" name="left_ur5e/gripper/geom_0" class="left_ur5e/gripper/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/gripper/black"/>
+                                                        <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/base_mount" name="left_ur5e/gripper/geom_1" class="left_ur5e/gripper/collision" group="3"/>
+                                                        <site name="left_ur5e/gripper/grasp_site" pos="-0 -0 0.1" quat="0.707107 -0 0 -0.707107" size="0.005" rgba="0 1 0 1"/>
+                                                        <body name="left_ur5e/endeffector_link" gravcomp="1" pos="-0 -0 0.2" quat="0.707107 -0 0 -0.707107"/>
+                                                        <body name="left_ur5e/gripper/base" gravcomp="1" pos="-0 -0 0.0038" quat="0.707107 -0 0 -0.707107">
+                                                            <inertial pos="-0 -2.70394e-05 0.0354675" mass="0.77744100000000005" fullinertia="0.000260285 0.00022538 0.000152709 -0 0 2.22158e-07"/>
+                                                            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/base" name="left_ur5e/gripper/geom_2" class="left_ur5e/gripper/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/gripper/black"/>
+                                                            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/base" name="left_ur5e/gripper/geom_3" class="left_ur5e/gripper/collision" group="3"/>
+                                                            <body name="left_ur5e/gripper/right_driver" gravcomp="1" pos="-0 0.030601 0.054905" quat="0 -0 0.911903 0.410405">
+                                                                <!-- gafro's MJCF parser reads only <inertial>; these bodies otherwise let MuJoCo derive
+                                                                     mass/inertia by integrating their collision MESH, so gafro saw them as massless and
+                                                                     the arm's mass matrix was short by their combined 0.189 kg. Values below are exactly
+                                                                     what MuJoCo computes from the mesh, so its model is unchanged. -->
+                                                                <inertial pos="-0.00020010197300309463 0.008578719350469432 0.00797649757672423" quat="0.3916456824433524 0.92011611192473 0.0 0.0" mass="0.019615842767987314" diaginertia="6.341541271285298e-06 6.194483327387107e-06 6.528118153469622e-07"/>
+                                                                <joint name="left_ur5e/gripper/right_driver_joint" type="hinge" axis="1 -0 0" range="-0.8 0" damping="0.10000000000000001" armature="0.0050000000000000001"/>
+                                                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/driver" name="left_ur5e/gripper/geom_4" class="left_ur5e/gripper/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/gripper/gray"/>
+                                                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/driver" name="left_ur5e/gripper/geom_5" class="left_ur5e/gripper/collision" group="3"/>
+                                                                <body name="left_ur5e/gripper/right_coupler" gravcomp="1" pos="-0 0.01822 0.026001" quat="1 -0 0 -0">
+                                                                    <inertial pos="0.000163875 0.0458404 -0.0117804" mass="0.031146199999999999" fullinertia="2.96016e-05 1.16215e-05 2.07508e-05 1.09755e-07 7.4045e-08 -1.08762e-05"/>
+                                                                    <joint name="left_ur5e/gripper/right_coupler_joint" type="hinge" axis="1 -0 0" range="0 1.57" armature="0.001"/>
+                                                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/coupler" name="left_ur5e/gripper/geom_6" class="left_ur5e/gripper/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/gripper/black"/>
+                                                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/coupler" name="left_ur5e/gripper/geom_7" class="left_ur5e/gripper/collision" group="3"/>
+                                                                </body>
+                                                            </body>
+                                                            <body name="left_ur5e/gripper/right_spring_link" gravcomp="1" pos="-0 0.0127 0.06142" quat="0 -0 -0.913546 -0.406736">
+                                                                <inertial pos="0.000123012 0.0507851 0.00103969" mass="0.027117700000000002" fullinertia="2.61911e-05 2.82702e-06 2.83696e-05 2.4361e-07 -6.3781e-09 5.37174e-07"/>
+                                                                <joint name="left_ur5e/gripper/right_spring_link_joint" type="hinge" axis="1 -0 0" range="-0.8 0.296706" damping="0.00125" armature="0.001" stiffness="0.050000000000000003" springref="-25.620000000000001"/>
+                                                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/spring_link" name="left_ur5e/gripper/geom_8" class="left_ur5e/gripper/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/gripper/black"/>
+                                                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/spring_link" name="left_ur5e/gripper/geom_9" class="left_ur5e/gripper/collision" group="3"/>
+                                                                <body name="left_ur5e/gripper/right_follower" gravcomp="1" pos="-0 0.107454 0.0145185" quat="0.935013 -0.354613 0 -0">
+                                                                    <inertial pos="0.000119314 0.0339244 -0.021841" mass="0.026150300000000001" fullinertia="1.59132e-05 3.17071e-06 1.54593e-05 -5.58953e-08 -2.54169e-08 -3.19508e-06"/>
+                                                                    <joint name="left_ur5e/gripper/right_follower_joint" type="hinge" pos="-0 0.005 -0.0175" axis="1 -0 0" range="-0.8757 0.8757" armature="0.001"/>
+                                                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/follower" name="left_ur5e/gripper/geom_10" class="left_ur5e/gripper/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/gripper/black"/>
+                                                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/follower" name="left_ur5e/gripper/geom_11" class="left_ur5e/gripper/collision" group="3"/>
+                                                                    <geom pos="-0 0.0457554 -0.0272203" quat="1 -0 0 -0" type="box" size="0.0135 0.0325 0.00375" name="left_ur5e/gripper/geom_13" class="left_ur5e/gripper/pad_box1" group="3" priority="1" friction="0.7" solref="0.004 1" solimp="0.95 0.99 0.001" mass="0" rgba="0.55 0.55 0.55 1"/>
+                                                                    <body name="left_ur5e/gripper/right_pad" gravcomp="1" pos="-0 0.012 -0.0276" quat="0.707107 -0.707107 0 -0">
+                                                                        <inertial pos="-0 -0.0025 0.0185" mass="0.0035000000000000001" diaginertia="3.64583e-07 4.73958e-07 1.23958e-07"/>
+                                                                        <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/pad" name="left_ur5e/gripper/geom_12" class="left_ur5e/gripper/visual" group="2" contype="0" conaffinity="0"/>
+                                                                    </body>
+                                                                </body>
+                                                            </body>
+                                                            <body name="left_ur5e/gripper/left_driver" gravcomp="1" pos="-0 -0.0306011 0.054904" quat="0.410405 0.911903 0 -0">
+                                                                <!-- gafro's MJCF parser reads only <inertial>; these bodies otherwise let MuJoCo derive
+                                                                     mass/inertia by integrating their collision MESH, so gafro saw them as massless and
+                                                                     the arm's mass matrix was short by their combined 0.189 kg. Values below are exactly
+                                                                     what MuJoCo computes from the mesh, so its model is unchanged. -->
+                                                                <inertial pos="-0.00020010197300309463 0.008578719350469432 0.00797649757672423" quat="0.3916456824433524 0.92011611192473 0.0 0.0" mass="0.019615842767987314" diaginertia="6.341541271285298e-06 6.194483327387107e-06 6.528118153469622e-07"/>
+                                                                <joint name="left_ur5e/gripper/left_driver_joint" type="hinge" axis="1 -0 0" range="-0.8 0" damping="0.10000000000000001" armature="0.0050000000000000001"/>
+                                                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/driver" name="left_ur5e/gripper/geom_14" class="left_ur5e/gripper/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/gripper/gray"/>
+                                                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/driver" name="left_ur5e/gripper/geom_15" class="left_ur5e/gripper/collision" group="3"/>
+                                                                <body name="left_ur5e/gripper/left_coupler" gravcomp="1" pos="-0 0.01822 0.026001" quat="1 -0 0 -0">
+                                                                    <inertial pos="0.000163875 0.0458404 -0.0117804" mass="0.031146199999999999" fullinertia="2.96016e-05 1.16215e-05 2.07508e-05 1.09755e-07 7.4045e-08 -1.08762e-05"/>
+                                                                    <joint name="left_ur5e/gripper/left_coupler_joint" type="hinge" axis="1 -0 0" range="0 1.57" armature="0.001"/>
+                                                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/coupler" name="left_ur5e/gripper/geom_16" class="left_ur5e/gripper/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/gripper/black"/>
+                                                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/coupler" name="left_ur5e/gripper/geom_17" class="left_ur5e/gripper/collision" group="3"/>
+                                                                </body>
+                                                            </body>
+                                                            <body name="left_ur5e/gripper/left_spring_link" gravcomp="1" pos="-0 -0.0127 0.06142" quat="0.410405 0.911903 0 -0">
+                                                                <inertial pos="0.000123012 0.0507851 0.00103969" mass="0.027117700000000002" fullinertia="2.61911e-05 2.82702e-06 2.83696e-05 2.4361e-07 -6.3781e-09 5.37174e-07"/>
+                                                                <joint name="left_ur5e/gripper/left_spring_link_joint" type="hinge" axis="1 -0 0" range="-0.8 0.296706" damping="0.00125" armature="0.001" stiffness="0.050000000000000003" springref="-25.620000000000001"/>
+                                                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/spring_link" name="left_ur5e/gripper/geom_18" class="left_ur5e/gripper/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/gripper/black"/>
+                                                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/spring_link" name="left_ur5e/gripper/geom_19" class="left_ur5e/gripper/collision" group="3"/>
+                                                                <body name="left_ur5e/gripper/left_follower" gravcomp="1" pos="-0 0.107454 0.0145185" quat="0.935013 -0.354613 0 -0">
+                                                                    <inertial pos="0.000119314 0.0339244 -0.021841" mass="0.026150300000000001" fullinertia="1.59132e-05 3.17071e-06 1.54593e-05 -5.58953e-08 -2.54169e-08 -3.19508e-06"/>
+                                                                    <joint name="left_ur5e/gripper/left_follower_joint" type="hinge" pos="-0 0.005 -0.0175" axis="1 -0 0" range="-0.8757 0.8757" armature="0.001"/>
+                                                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/follower" name="left_ur5e/gripper/geom_20" class="left_ur5e/gripper/visual" group="2" contype="0" conaffinity="0" material="left_ur5e/gripper/black"/>
+                                                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/follower" name="left_ur5e/gripper/geom_21" class="left_ur5e/gripper/collision" group="3"/>
+                                                                    <geom pos="-0 0.0457554 -0.0272203" quat="1 -0 0 -0" type="box" size="0.0135 0.0325 0.00375" name="left_ur5e/gripper/geom_23" class="left_ur5e/gripper/pad_box1" group="3" priority="1" friction="0.7" solref="0.004 1" solimp="0.95 0.99 0.001" mass="0" rgba="0.55 0.55 0.55 1"/>
+                                                                    <body name="left_ur5e/gripper/left_pad" gravcomp="1" pos="-0 0.012 -0.0276" quat="0.707107 -0.707107 0 -0">
+                                                                        <inertial pos="-0 -0.0025 0.0185" mass="0.0035000000000000001" diaginertia="3.64583e-07 4.73958e-07 1.23958e-07"/>
+                                                                        <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="left_ur5e/gripper/pad" name="left_ur5e/gripper/geom_22" class="left_ur5e/gripper/visual" group="2" contype="0" conaffinity="0"/>
+                                                                    </body>
+                                                                </body>
+                                                            </body>
+                                                        </body>
+                                                    </body>
+                                                </body>
+                                            </body>
+                                        </body>
+                                    </body>
+                                </body>
+                            </body>
+                        </body>
+                    </body>
+                </body>
+            </body>
+            <body name="right_arm_vention_base" pos="0.33 -0.848 1.12" quat="0 -0 0 1">
+                <!-- See left_arm_vention_base: same box, same reason. -->
+                <inertial pos="0 0 0" mass="18.57" diaginertia="0.0789611875 0.156684375 0.0789611875"/>
+                <joint name="right_arm_linear_vention" type="slide" axis="0 0 1" range="0 0.5" damping="5000"/>
+                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="box" size="0.1125 0.01 0.1125" name="geom_5" mass="18.57" material="red"/>
+                <site name="right_arm_attachment_site" pos="-0 -0.03 1.73472e-18" quat="0 -0 -0.70709 0.707123" group="4" size="0.01" rgba="0.5 0.5 0.5 0.3"/>
+                <body name="right_ur5e/" pos="-0 -0.03 1.73472e-18" quat="0 -0 -0.70709 0.707123">
+                    <light name="right_ur5e/spotlight" pos="0 -1 2" mode="targetbodycom" target="right_ur5e/wrist_2_link"/>
+                    <body name="right_ur5e/base" gravcomp="1" pos="-0 -0 -0" quat="0 -0 0 -1">
+                        <inertial pos="-0 -0 -0" mass="4" diaginertia="0.00443333 0.00443333 0.0072"/>
+                        <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/base_0" name="right_ur5e/geom_0" class="right_ur5e/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/black"/>
+                        <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/base_1" name="right_ur5e/geom_1" class="right_ur5e/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/jointgray"/>
+                        <body name="right_ur5e/shoulder_link" gravcomp="1" pos="-0 -0 0.163" quat="1 -0 0 -0">
+                            <inertial pos="-0 -0 -0" mass="3.7000000000000002" diaginertia="0.0102675 0.0102675 0.00666"/>
+                            <joint name="right_ur5e/shoulder_pan_joint" type="hinge" axis="0 -0 1" range="-3.1415 3.1415" armature="0.10000000000000001"/>
+                            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/shoulder_0" name="right_ur5e/geom_2" class="right_ur5e/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/urblue"/>
+                            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/shoulder_1" name="right_ur5e/geom_3" class="right_ur5e/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/black"/>
+                            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/shoulder_2" name="right_ur5e/geom_4" class="right_ur5e/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/jointgray"/>
+                            <geom pos="-0 -0 -0.04" quat="1 -0 0 -0" type="capsule" size="0.06 0.06" name="right_ur5e/geom_5" class="right_ur5e/collision" group="3"/>
+                            <body name="right_ur5e/upper_arm_link" gravcomp="1" pos="-0 0.138 -0" quat="0.707107 -0 0.707107 -0">
+                                <inertial pos="-0 -0 0.2125" mass="8.3930000000000007" diaginertia="0.133886 0.133886 0.0151074"/>
+                                <joint name="right_ur5e/shoulder_lift_joint" type="hinge" axis="0 1 0" range="-3.1415 3.1415" armature="0.10000000000000001"/>
+                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/upperarm_0" name="right_ur5e/geom_6" class="right_ur5e/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/linkgray"/>
+                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/upperarm_1" name="right_ur5e/geom_7" class="right_ur5e/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/black"/>
+                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/upperarm_2" name="right_ur5e/geom_8" class="right_ur5e/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/jointgray"/>
+                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/upperarm_3" name="right_ur5e/geom_9" class="right_ur5e/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/urblue"/>
+                                <geom pos="-0 -0.04 -0" quat="0.707107 0.707107 0 -0" type="capsule" size="0.06 0.06" name="right_ur5e/geom_10" class="right_ur5e/collision" group="3"/>
+                                <geom pos="-0 -0 0.2" quat="1 -0 0 -0" type="capsule" size="0.05 0.2" name="right_ur5e/geom_11" class="right_ur5e/collision" group="3"/>
+                                <body name="right_ur5e/forearm_link" gravcomp="1" pos="-0 -0.131 0.425" quat="1 -0 0 -0">
+                                    <inertial pos="-0 -0 0.196" mass="2.2749999999999999" diaginertia="0.0311796 0.0311796 0.004095"/>
+                                    <joint name="right_ur5e/elbow_joint" type="hinge" axis="0 1 0" range="-3.1415 3.1415" armature="0.10000000000000001"/>
+                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/forearm_0" name="right_ur5e/geom_12" class="right_ur5e/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/urblue"/>
+                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/forearm_1" name="right_ur5e/geom_13" class="right_ur5e/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/linkgray"/>
+                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/forearm_2" name="right_ur5e/geom_14" class="right_ur5e/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/black"/>
+                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/forearm_3" name="right_ur5e/geom_15" class="right_ur5e/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/jointgray"/>
+                                    <geom pos="-0 0.08 -0" quat="0.707107 0.707107 0 -0" type="capsule" size="0.055 0.06" name="right_ur5e/geom_16" class="right_ur5e/collision" group="3"/>
+                                    <geom pos="-0 -0 0.2" quat="1 -0 0 -0" type="capsule" size="0.038 0.19" name="right_ur5e/geom_17" class="right_ur5e/collision" group="3"/>
+                                    <body name="right_ur5e/wrist_1_link" gravcomp="1" pos="-0 -0 0.392" quat="0.707107 -0 0.707107 -0">
+                                        <inertial pos="-0 0.127 -0" mass="1.2190000000000001" diaginertia="0.0025599 0.0025599 0.0021942"/>
+                                        <joint name="right_ur5e/wrist_1_joint" type="hinge" axis="0 1 0" range="-3.1415 3.1415" armature="0.10000000000000001"/>
+                                        <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/wrist1_0" name="right_ur5e/geom_18" class="right_ur5e/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/black"/>
+                                        <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/wrist1_1" name="right_ur5e/geom_19" class="right_ur5e/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/urblue"/>
+                                        <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/wrist1_2" name="right_ur5e/geom_20" class="right_ur5e/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/jointgray"/>
+                                        <geom pos="-0 0.05 -0" quat="0.707107 0.707107 0 -0" type="capsule" size="0.04 0.07" name="right_ur5e/geom_21" class="right_ur5e/collision" group="3"/>
+                                        <body name="right_ur5e/wrist_2_link" gravcomp="1" pos="-0 0.127 -0" quat="1 -0 0 -0">
+                                            <inertial pos="-0 -0 0.1" mass="1.2190000000000001" diaginertia="0.0025599 0.0025599 0.0021942"/>
+                                            <joint name="right_ur5e/wrist_2_joint" type="hinge" axis="0 -0 1" range="-3.1415 3.1415" armature="0.10000000000000001"/>
+                                            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/wrist2_0" name="right_ur5e/geom_22" class="right_ur5e/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/black"/>
+                                            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/wrist2_1" name="right_ur5e/geom_23" class="right_ur5e/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/urblue"/>
+                                            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/wrist2_2" name="right_ur5e/geom_24" class="right_ur5e/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/jointgray"/>
+                                            <geom pos="-0 -0 0.04" quat="1 -0 0 -0" type="capsule" size="0.04 0.06" name="right_ur5e/geom_25" class="right_ur5e/collision" group="3"/>
+                                            <geom pos="-0 0.02 0.1" quat="0.707107 0.707107 0 -0" type="capsule" size="0.04 0.04" name="right_ur5e/geom_26" class="right_ur5e/collision" group="3"/>
+                                            <body name="right_ur5e/wrist_3_link" gravcomp="1" pos="-0 -0 0.1" quat="1 -0 0 -0">
+                                                <inertial pos="-0 0.0771683 -0" mass="0.18890000000000001" diaginertia="9.90863e-05 0.000132134 9.90863e-05"/>
+                                                <joint name="right_ur5e/wrist_3_joint" type="hinge" axis="0 1 0" range="-3.1415 3.1415" armature="0.10000000000000001"/>
+                                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/wrist3" name="right_ur5e/geom_27" class="right_ur5e/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/linkgray"/>
+                                                <geom pos="-0 0.08 -0" quat="0.707107 0.707107 0 -0" type="cylinder" size="0.04 0.02" name="right_ur5e/geom_28" class="right_ur5e/eef_collision" group="3"/>
+                                                <site name="right_ur5e/ft_sensor_site" pos="-0 0.1 -0" quat="-0.707107 0.707107 0 -0" group="4" size="0.01" rgba="0.5 0.5 0.5 0.3"/>
+                                                <site name="right_ur5e/gripper_attachment_site" pos="-0 0.1 -0" quat="-0.707107 0.707107 0 -0" group="4" size="0.01" rgba="0.5 0.5 0.5 0.3"/>
+                                                <body name="right_ur5e/gripper/" pos="-0 0.1 -0" quat="-0.707107 0.707107 0 -0">
+                                                    <body name="right_ur5e/gripper/base_mount" gravcomp="1" pos="-0 -0 0.007" quat="1 -0 0 -0">
+                                                        <inertial pos="-0.00036242243780843793 8.499453951535906e-05 -5.836006089874671e-05" quat="0.0 0.7060891603418311 0.0 0.7081229396423844" mass="0.1497655076744278" diaginertia="0.00010208547191101281 5.345740756291718e-05 5.205041638753298e-05"/>
+                                                        <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/base_mount" name="right_ur5e/gripper/geom_0" class="right_ur5e/gripper/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/gripper/black"/>
+                                                        <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/base_mount" name="right_ur5e/gripper/geom_1" class="right_ur5e/gripper/collision" group="3"/>
+                                                        <site name="right_ur5e/gripper/grasp_site" pos="-0 -0 0.1" quat="0.707107 -0 0 -0.707107" size="0.005" rgba="0 1 0 1"/>
+                                                        <body name="right_ur5e/endeffector_link" gravcomp="1" pos="-0 -0 0.2" quat="0.707107 -0 0 -0.707107"/>
+                                                        <body name="right_ur5e/gripper/base" gravcomp="1" pos="-0 -0 0.0038" quat="0.707107 -0 0 -0.707107">
+                                                            <inertial pos="-0 -2.70394e-05 0.0354675" mass="0.77744100000000005" fullinertia="0.000260285 0.00022538 0.000152709 -0 0 2.22158e-07"/>
+                                                            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/base" name="right_ur5e/gripper/geom_2" class="right_ur5e/gripper/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/gripper/black"/>
+                                                            <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/base" name="right_ur5e/gripper/geom_3" class="right_ur5e/gripper/collision" group="3"/>
+                                                            <body name="right_ur5e/gripper/right_driver" gravcomp="1" pos="-0 0.030601 0.054905" quat="0 -0 0.911903 0.410405">
+                                                                <inertial pos="-0.00020010197300309463 0.008578719350469432 0.00797649757672423" quat="0.3916456824433524 0.92011611192473 0.0 0.0" mass="0.019615842767987314" diaginertia="6.341541271285298e-06 6.194483327387107e-06 6.528118153469622e-07"/>
+                                                                <joint name="right_ur5e/gripper/right_driver_joint" type="hinge" axis="1 -0 0" range="-0.8 0" damping="0.10000000000000001" armature="0.0050000000000000001"/>
+                                                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/driver" name="right_ur5e/gripper/geom_4" class="right_ur5e/gripper/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/gripper/gray"/>
+                                                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/driver" name="right_ur5e/gripper/geom_5" class="right_ur5e/gripper/collision" group="3"/>
+                                                                <body name="right_ur5e/gripper/right_coupler" gravcomp="1" pos="-0 0.01822 0.026001" quat="1 -0 0 -0">
+                                                                    <inertial pos="0.000163875 0.0458404 -0.0117804" mass="0.031146199999999999" fullinertia="2.96016e-05 1.16215e-05 2.07508e-05 1.09755e-07 7.4045e-08 -1.08762e-05"/>
+                                                                    <joint name="right_ur5e/gripper/right_coupler_joint" type="hinge" axis="1 -0 0" range="0 1.57" armature="0.001"/>
+                                                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/coupler" name="right_ur5e/gripper/geom_6" class="right_ur5e/gripper/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/gripper/black"/>
+                                                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/coupler" name="right_ur5e/gripper/geom_7" class="right_ur5e/gripper/collision" group="3"/>
+                                                                </body>
+                                                            </body>
+                                                            <body name="right_ur5e/gripper/right_spring_link" gravcomp="1" pos="-0 0.0127 0.06142" quat="0 -0 -0.913546 -0.406736">
+                                                                <inertial pos="0.000123012 0.0507851 0.00103969" mass="0.027117700000000002" fullinertia="2.61911e-05 2.82702e-06 2.83696e-05 2.4361e-07 -6.3781e-09 5.37174e-07"/>
+                                                                <joint name="right_ur5e/gripper/right_spring_link_joint" type="hinge" axis="1 -0 0" range="-0.8 0.296706" damping="0.00125" armature="0.001" stiffness="0.050000000000000003" springref="-25.620000000000001"/>
+                                                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/spring_link" name="right_ur5e/gripper/geom_8" class="right_ur5e/gripper/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/gripper/black"/>
+                                                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/spring_link" name="right_ur5e/gripper/geom_9" class="right_ur5e/gripper/collision" group="3"/>
+                                                                <body name="right_ur5e/gripper/right_follower" gravcomp="1" pos="-0 0.107454 0.0145185" quat="0.935013 -0.354613 0 -0">
+                                                                    <inertial pos="0.000119314 0.0339244 -0.021841" mass="0.026150300000000001" fullinertia="1.59132e-05 3.17071e-06 1.54593e-05 -5.58953e-08 -2.54169e-08 -3.19508e-06"/>
+                                                                    <joint name="right_ur5e/gripper/right_follower_joint" type="hinge" pos="-0 0.005 -0.0175" axis="1 -0 0" range="-0.8757 0.8757" armature="0.001"/>
+                                                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/follower" name="right_ur5e/gripper/geom_10" class="right_ur5e/gripper/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/gripper/black"/>
+                                                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/follower" name="right_ur5e/gripper/geom_11" class="right_ur5e/gripper/collision" group="3"/>
+                                                                    <geom pos="-0 0.0457554 -0.0272203" quat="1 -0 0 -0" type="box" size="0.0135 0.0325 0.00375" name="right_ur5e/gripper/geom_13" class="right_ur5e/gripper/pad_box1" group="3" priority="1" friction="0.7" solref="0.004 1" solimp="0.95 0.99 0.001" mass="0" rgba="0.55 0.55 0.55 1"/>
+                                                                    <body name="right_ur5e/gripper/right_pad" gravcomp="1" pos="-0 0.012 -0.0276" quat="0.707107 -0.707107 0 -0">
+                                                                        <inertial pos="-0 -0.0025 0.0185" mass="0.0035000000000000001" diaginertia="3.64583e-07 4.73958e-07 1.23958e-07"/>
+                                                                        <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/pad" name="right_ur5e/gripper/geom_12" class="right_ur5e/gripper/visual" group="2" contype="0" conaffinity="0"/>
+                                                                    </body>
+                                                                </body>
+                                                            </body>
+                                                            <body name="right_ur5e/gripper/left_driver" gravcomp="1" pos="-0 -0.0306011 0.054904" quat="0.410405 0.911903 0 -0">
+                                                                <inertial pos="-0.00020010197300309463 0.008578719350469432 0.00797649757672423" quat="0.3916456824433524 0.92011611192473 0.0 0.0" mass="0.019615842767987314" diaginertia="6.341541271285298e-06 6.194483327387107e-06 6.528118153469622e-07"/>
+                                                                <joint name="right_ur5e/gripper/left_driver_joint" type="hinge" axis="1 -0 0" range="-0.8 0" damping="0.10000000000000001" armature="0.0050000000000000001"/>
+                                                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/driver" name="right_ur5e/gripper/geom_14" class="right_ur5e/gripper/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/gripper/gray"/>
+                                                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/driver" name="right_ur5e/gripper/geom_15" class="right_ur5e/gripper/collision" group="3"/>
+                                                                <body name="right_ur5e/gripper/left_coupler" gravcomp="1" pos="-0 0.01822 0.026001" quat="1 -0 0 -0">
+                                                                    <inertial pos="0.000163875 0.0458404 -0.0117804" mass="0.031146199999999999" fullinertia="2.96016e-05 1.16215e-05 2.07508e-05 1.09755e-07 7.4045e-08 -1.08762e-05"/>
+                                                                    <joint name="right_ur5e/gripper/left_coupler_joint" type="hinge" axis="1 -0 0" range="0 1.57" armature="0.001"/>
+                                                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/coupler" name="right_ur5e/gripper/geom_16" class="right_ur5e/gripper/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/gripper/black"/>
+                                                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/coupler" name="right_ur5e/gripper/geom_17" class="right_ur5e/gripper/collision" group="3"/>
+                                                                </body>
+                                                            </body>
+                                                            <body name="right_ur5e/gripper/left_spring_link" gravcomp="1" pos="-0 -0.0127 0.06142" quat="0.410405 0.911903 0 -0">
+                                                                <inertial pos="0.000123012 0.0507851 0.00103969" mass="0.027117700000000002" fullinertia="2.61911e-05 2.82702e-06 2.83696e-05 2.4361e-07 -6.3781e-09 5.37174e-07"/>
+                                                                <joint name="right_ur5e/gripper/left_spring_link_joint" type="hinge" axis="1 -0 0" range="-0.8 0.296706" damping="0.00125" armature="0.001" stiffness="0.050000000000000003" springref="-25.620000000000001"/>
+                                                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/spring_link" name="right_ur5e/gripper/geom_18" class="right_ur5e/gripper/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/gripper/black"/>
+                                                                <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/spring_link" name="right_ur5e/gripper/geom_19" class="right_ur5e/gripper/collision" group="3"/>
+                                                                <body name="right_ur5e/gripper/left_follower" gravcomp="1" pos="-0 0.107454 0.0145185" quat="0.935013 -0.354613 0 -0">
+                                                                    <inertial pos="0.000119314 0.0339244 -0.021841" mass="0.026150300000000001" fullinertia="1.59132e-05 3.17071e-06 1.54593e-05 -5.58953e-08 -2.54169e-08 -3.19508e-06"/>
+                                                                    <joint name="right_ur5e/gripper/left_follower_joint" type="hinge" pos="-0 0.005 -0.0175" axis="1 -0 0" range="-0.8757 0.8757" armature="0.001"/>
+                                                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/follower" name="right_ur5e/gripper/geom_20" class="right_ur5e/gripper/visual" group="2" contype="0" conaffinity="0" material="right_ur5e/gripper/black"/>
+                                                                    <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/follower" name="right_ur5e/gripper/geom_21" class="right_ur5e/gripper/collision" group="3"/>
+                                                                    <geom pos="-0 0.0457554 -0.0272203" quat="1 -0 0 -0" type="box" size="0.0135 0.0325 0.00375" name="right_ur5e/gripper/geom_23" class="right_ur5e/gripper/pad_box1" group="3" priority="1" friction="0.7" solref="0.004 1" solimp="0.95 0.99 0.001" mass="0" rgba="0.55 0.55 0.55 1"/>
+                                                                    <body name="right_ur5e/gripper/left_pad" gravcomp="1" pos="-0 0.012 -0.0276" quat="0.707107 -0.707107 0 -0">
+                                                                        <inertial pos="-0 -0.0025 0.0185" mass="0.0035000000000000001" diaginertia="3.64583e-07 4.73958e-07 1.23958e-07"/>
+                                                                        <geom pos="-0 -0 -0" quat="1 -0 0 -0" type="mesh" mesh="right_ur5e/gripper/pad" name="right_ur5e/gripper/geom_22" class="right_ur5e/gripper/visual" group="2" contype="0" conaffinity="0"/>
+                                                                    </body>
+                                                                </body>
+                                                            </body>
+                                                        </body>
+                                                    </body>
+                                                </body>
+                                            </body>
+                                        </body>
+                                    </body>
+                                </body>
+                            </body>
+                        </body>
+                    </body>
+                </body>
+            </body>
+        </body>
+    </worldbody>
+    <option integrator="implicitfast" cone="elliptic" impratio="10"/>
+    <statistic extent="3.5" center="0 0 1"/>
+    <actuator>
+        <position name="left_linear_actuator_position" joint="left_arm_linear_vention" ctrlrange="0 0.5" kp="50000" kv="0" group="0"/>
+        <position name="right_linear_actuator_position" joint="right_arm_linear_vention" ctrlrange="0 0.5" kp="50000" kv="0" group="0"/>
+        <motor name="left_linear_actuator_motor" joint="left_arm_linear_vention" ctrlrange="0 0.5" group="0"/>
+        <motor name="right_linear_actuator_motor" joint="right_arm_linear_vention" ctrlrange="0 0.5" group="0"/>
+        <position name="left_ur5e/shoulder_pan_position" joint="left_ur5e/shoulder_pan_joint" forcerange="-300 300" kp="3000" kv="101" group="1"/>
+        <position name="left_ur5e/shoulder_lift_position" joint="left_ur5e/shoulder_lift_joint" forcerange="-300 300" kp="3000" kv="101" group="1"/>
+        <position name="left_ur5e/elbow_position" joint="left_ur5e/elbow_joint" forcerange="-300 300" kp="3000" kv="101" group="1"/>
+        <position name="left_ur5e/wrist_1_position" joint="left_ur5e/wrist_1_joint" forcerange="-56 56" kp="500" kv="11" group="1"/>
+        <position name="left_ur5e/wrist_2_position" joint="left_ur5e/wrist_2_joint" forcerange="-56 56" kp="500" kv="11" group="1"/>
+        <position name="left_ur5e/wrist_3_position" joint="left_ur5e/wrist_3_joint" forcerange="-56 56" kp="500" kv="11" group="1"/>
+        <motor name="left_ur5e/shoulder_pan_motor" joint="left_ur5e/shoulder_pan_joint" forcerange="-300 300" group="0"/>
+        <motor name="left_ur5e/shoulder_lift_motor" joint="left_ur5e/shoulder_lift_joint" forcerange="-300 300" group="0"/>
+        <motor name="left_ur5e/elbow_motor" joint="left_ur5e/elbow_joint" forcerange="-300 300" group="0"/>
+        <motor name="left_ur5e/wrist_1_motor" joint="left_ur5e/wrist_1_joint" forcerange="-56 56" group="0"/>
+        <motor name="left_ur5e/wrist_2_motor" joint="left_ur5e/wrist_2_joint" forcerange="-56 56" group="0"/>
+        <motor name="left_ur5e/wrist_3_motor" joint="left_ur5e/wrist_3_joint" forcerange="-56 56" group="0"/>
+        <velocity name="left_ur5e/shoulder_pan_velocity" joint="left_ur5e/shoulder_pan_joint" forcerange="-300 300" kv="100" group="0"/>
+        <velocity name="left_ur5e/shoulder_lift_velocity" joint="left_ur5e/shoulder_lift_joint" forcerange="-300 300" kv="100" group="0"/>
+        <velocity name="left_ur5e/elbow_velocity" joint="left_ur5e/elbow_joint" forcerange="-300 300" kv="100" group="0"/>
+        <velocity name="left_ur5e/wrist_1_velocity" joint="left_ur5e/wrist_1_joint" forcerange="-56 56" kv="100" group="0"/>
+        <velocity name="left_ur5e/wrist_2_velocity" joint="left_ur5e/wrist_2_joint" forcerange="-56 56" kv="100" group="0"/>
+        <velocity name="left_ur5e/wrist_3_velocity" joint="left_ur5e/wrist_3_joint" forcerange="-56 56" kv="100" group="0"/>
+        <general name="left_ur5e/gripper/fingers_actuator_general" tendon="left_ur5e/gripper/split" ctrlrange="0 255" forcerange="-5 5" gainprm="0.313725 0 0" biasprm="0 -100 -10" group="0"/>
+        <position name="right_ur5e/shoulder_pan_position" joint="right_ur5e/shoulder_pan_joint" forcerange="-300 300" kp="3000" kv="101" group="2"/>
+        <position name="right_ur5e/shoulder_lift_position" joint="right_ur5e/shoulder_lift_joint" forcerange="-300 300" kp="3000" kv="101" group="2"/>
+        <position name="right_ur5e/elbow_position" joint="right_ur5e/elbow_joint" forcerange="-300 300" kp="3000" kv="101" group="2"/>
+        <position name="right_ur5e/wrist_1_position" joint="right_ur5e/wrist_1_joint" forcerange="-56 56" kp="500" kv="11" group="2"/>
+        <position name="right_ur5e/wrist_2_position" joint="right_ur5e/wrist_2_joint" forcerange="-56 56" kp="500" kv="11" group="2"/>
+        <position name="right_ur5e/wrist_3_position" joint="right_ur5e/wrist_3_joint" forcerange="-56 56" kp="500" kv="11" group="2"/>
+        <motor name="right_ur5e/shoulder_pan_motor" joint="right_ur5e/shoulder_pan_joint" forcerange="-300 300" group="0"/>
+        <motor name="right_ur5e/shoulder_lift_motor" joint="right_ur5e/shoulder_lift_joint" forcerange="-300 300" group="0"/>
+        <motor name="right_ur5e/elbow_motor" joint="right_ur5e/elbow_joint" forcerange="-300 300" group="0"/>
+        <motor name="right_ur5e/wrist_1_motor" joint="right_ur5e/wrist_1_joint" forcerange="-56 56" group="0"/>
+        <motor name="right_ur5e/wrist_2_motor" joint="right_ur5e/wrist_2_joint" forcerange="-56 56" group="0"/>
+        <motor name="right_ur5e/wrist_3_motor" joint="right_ur5e/wrist_3_joint" forcerange="-56 56" group="0"/>
+        <velocity name="right_ur5e/shoulder_pan_velocity" joint="right_ur5e/shoulder_pan_joint" forcerange="-300 300" kv="100" group="0"/>
+        <velocity name="right_ur5e/shoulder_lift_velocity" joint="right_ur5e/shoulder_lift_joint" forcerange="-300 300" kv="100" group="0"/>
+        <velocity name="right_ur5e/elbow_velocity" joint="right_ur5e/elbow_joint" forcerange="-300 300" kv="100" group="0"/>
+        <velocity name="right_ur5e/wrist_1_velocity" joint="right_ur5e/wrist_1_joint" forcerange="-56 56" kv="100" group="0"/>
+        <velocity name="right_ur5e/wrist_2_velocity" joint="right_ur5e/wrist_2_joint" forcerange="-56 56" kv="100" group="0"/>
+        <velocity name="right_ur5e/wrist_3_velocity" joint="right_ur5e/wrist_3_joint" forcerange="-56 56" kv="100" group="0"/>
+        <general name="right_ur5e/gripper/fingers_actuator_general" tendon="right_ur5e/gripper/split" ctrlrange="0 255" forcerange="-5 5" gainprm="0.313725 0 0" biasprm="0 -100 -10" group="0"/>
+        <velocity name="left_linear_actuator_velocity" joint="left_arm_linear_vention" ctrlrange="0 0.5" kv="10" group="0"/>
+        <velocity name="right_linear_actuator_velocity" joint="right_arm_linear_vention" ctrlrange="0 0.5" kv="10" group="0"/>
+    </actuator>
+    <sensor>
+        <force name="left_ur5e/ft_sensor_force" site="left_ur5e/ft_sensor_site" noise="3.5"/>
+        <torque name="left_ur5e/ft_sensor_torque" site="left_ur5e/ft_sensor_site" noise="0.20000000000000001"/>
+        <force name="right_ur5e/ft_sensor_force" site="right_ur5e/ft_sensor_site" noise="3.5"/>
+        <torque name="right_ur5e/ft_sensor_torque" site="right_ur5e/ft_sensor_site" noise="0.20000000000000001"/>
+    </sensor>
+    <contact>
+        <exclude body1="vention_base" body2="left_arm_vention_base"/>
+        <exclude body1="vention_base" body2="right_arm_vention_base"/>
+        <exclude body1="left_ur5e/base" body2="left_ur5e/shoulder_link"/>
+        <exclude body1="left_ur5e/shoulder_link" body2="left_ur5e/upper_arm_link"/>
+        <exclude body1="left_ur5e/upper_arm_link" body2="left_ur5e/forearm_link"/>
+        <exclude body1="left_ur5e/forearm_link" body2="left_ur5e/wrist_1_link"/>
+        <exclude body1="left_ur5e/wrist_1_link" body2="left_ur5e/wrist_2_link"/>
+        <exclude body1="left_ur5e/wrist_2_link" body2="left_ur5e/wrist_3_link"/>
+        <exclude body1="left_ur5e/gripper/base" body2="left_ur5e/gripper/left_driver"/>
+        <exclude body1="left_ur5e/gripper/base" body2="left_ur5e/gripper/right_driver"/>
+        <exclude body1="left_ur5e/gripper/base" body2="left_ur5e/gripper/left_spring_link"/>
+        <exclude body1="left_ur5e/gripper/base" body2="left_ur5e/gripper/right_spring_link"/>
+        <exclude body1="left_ur5e/gripper/left_driver" body2="left_ur5e/gripper/left_spring_link"/>
+        <exclude body1="left_ur5e/gripper/right_driver" body2="left_ur5e/gripper/right_spring_link"/>
+        <exclude body1="left_ur5e/gripper/right_coupler" body2="left_ur5e/gripper/right_follower"/>
+        <exclude body1="left_ur5e/gripper/left_coupler" body2="left_ur5e/gripper/left_follower"/>
+        <exclude body1="left_ur5e/gripper/right_coupler" body2="left_ur5e/gripper/right_spring_link"/>
+        <exclude body1="left_ur5e/gripper/left_coupler" body2="left_ur5e/gripper/left_spring_link"/>
+        <exclude body1="left_ur5e/gripper/left_follower" body2="left_ur5e/gripper/right_follower"/>
+        <exclude body1="left_ur5e/gripper/right_spring_link" body2="left_ur5e/gripper/left_spring_link"/>
+        <exclude body1="left_ur5e/gripper/right_spring_link" body2="left_ur5e/gripper/left_follower"/>
+        <exclude body1="left_ur5e/gripper/right_follower" body2="left_ur5e/gripper/left_spring_link"/>
+        <exclude body1="right_ur5e/base" body2="right_ur5e/shoulder_link"/>
+        <exclude body1="right_ur5e/shoulder_link" body2="right_ur5e/upper_arm_link"/>
+        <exclude body1="right_ur5e/upper_arm_link" body2="right_ur5e/forearm_link"/>
+        <exclude body1="right_ur5e/forearm_link" body2="right_ur5e/wrist_1_link"/>
+        <exclude body1="right_ur5e/wrist_1_link" body2="right_ur5e/wrist_2_link"/>
+        <exclude body1="right_ur5e/wrist_2_link" body2="right_ur5e/wrist_3_link"/>
+        <exclude body1="right_ur5e/gripper/base" body2="right_ur5e/gripper/left_driver"/>
+        <exclude body1="right_ur5e/gripper/base" body2="right_ur5e/gripper/right_driver"/>
+        <exclude body1="right_ur5e/gripper/base" body2="right_ur5e/gripper/left_spring_link"/>
+        <exclude body1="right_ur5e/gripper/base" body2="right_ur5e/gripper/right_spring_link"/>
+        <exclude body1="right_ur5e/gripper/left_driver" body2="right_ur5e/gripper/left_spring_link"/>
+        <exclude body1="right_ur5e/gripper/right_driver" body2="right_ur5e/gripper/right_spring_link"/>
+        <exclude body1="right_ur5e/gripper/right_coupler" body2="right_ur5e/gripper/right_follower"/>
+        <exclude body1="right_ur5e/gripper/left_coupler" body2="right_ur5e/gripper/left_follower"/>
+        <exclude body1="right_ur5e/gripper/right_coupler" body2="right_ur5e/gripper/right_spring_link"/>
+        <exclude body1="right_ur5e/gripper/left_coupler" body2="right_ur5e/gripper/left_spring_link"/>
+        <exclude body1="right_ur5e/gripper/left_follower" body2="right_ur5e/gripper/right_follower"/>
+        <exclude body1="right_ur5e/gripper/right_spring_link" body2="right_ur5e/gripper/left_spring_link"/>
+        <exclude body1="right_ur5e/gripper/right_spring_link" body2="right_ur5e/gripper/left_follower"/>
+        <exclude body1="right_ur5e/gripper/right_follower" body2="right_ur5e/gripper/left_spring_link"/>
+        <exclude body1="vention_base" body2="left_ur5e/upper_arm_link"/>
+        <exclude body1="vention_base" body2="left_ur5e/shoulder_link"/>
+        <exclude body1="vention_base" body2="right_ur5e/upper_arm_link"/>
+        <exclude body1="vention_base" body2="right_ur5e/shoulder_link"/>
+    </contact>
+    <equality>
+        <connect name="left_ur5e/gripper//unnamed_equality_0" body1="left_ur5e/gripper/right_follower" body2="left_ur5e/gripper/right_coupler" anchor="0 0 0" solref="0.005 1" solimp="0.95 0.99 0.001"/>
+        <connect name="left_ur5e/gripper//unnamed_equality_1" body1="left_ur5e/gripper/left_follower" body2="left_ur5e/gripper/left_coupler" anchor="0 0 0" solref="0.005 1" solimp="0.95 0.99 0.001"/>
+        <joint name="left_ur5e/gripper//unnamed_equality_2" joint1="left_ur5e/gripper/right_driver_joint" joint2="left_ur5e/gripper/left_driver_joint" solref="0.005 1" solimp="0.95 0.99 0.001" polycoef="0 1 0 0 0"/>
+        <connect name="right_ur5e/gripper//unnamed_equality_0" body1="right_ur5e/gripper/right_follower" body2="right_ur5e/gripper/right_coupler" anchor="0 0 0" solref="0.005 1" solimp="0.95 0.99 0.001"/>
+        <connect name="right_ur5e/gripper//unnamed_equality_1" body1="right_ur5e/gripper/left_follower" body2="right_ur5e/gripper/left_coupler" anchor="0 0 0" solref="0.005 1" solimp="0.95 0.99 0.001"/>
+        <joint name="right_ur5e/gripper//unnamed_equality_2" joint1="right_ur5e/gripper/right_driver_joint" joint2="right_ur5e/gripper/left_driver_joint" solref="0.005 1" solimp="0.95 0.99 0.001" polycoef="0 1 0 0 0"/>
+    </equality>
+    <tendon>
+        <fixed name="left_ur5e/gripper/split">
+            <joint joint="left_ur5e/gripper/right_driver_joint" coef="-0.5"/>
+            <joint joint="left_ur5e/gripper/left_driver_joint" coef="-0.5"/>
+        </fixed>
+        <fixed name="right_ur5e/gripper/split">
+            <joint joint="right_ur5e/gripper/right_driver_joint" coef="-0.5"/>
+            <joint joint="right_ur5e/gripper/left_driver_joint" coef="-0.5"/>
+        </fixed>
+    </tendon>
+    <keyframe>
+        <key name="ready" qpos="0.25 -2.58913 -2.16013 1.87168 -2.834 -0.869091 -0.0617836 -0.801346 -0.004767 -0.811446 0.85757 -0.801332 -0.004101 -0.812167 0.857001 0.25 2.53121 -1.02533 -1.86576 -0.201651 0.915008 -0.061374 -0.801346 -0.004767 -0.811446 0.85757 -0.801332 -0.004101 -0.812167 0.857001" ctrl="0.25 0.25 -2.58913 -2.16013 1.87168 -2.834 -0.869091 -0.0617836 0 2.53121 -1.02533 -1.86576 -0.201651 0.915008 -0.061374 0"/>
+        <key name="home" qpos="0.25 -2.58913 -2.16013 1.87168 -2.834 -0.869091 -0.0617836 -0.801346 -0.004767 -0.811446 0.85757 -0.801332 -0.004101 -0.812167 0.857001 0.25 2.53121 -1.02533 -1.86576 -0.201651 0.915008 -0.061374 -0.801346 -0.004767 -0.811446 0.85757 -0.801332 -0.004101 -0.812167 0.857001" ctrl="0.25 0.25 -2.58913 -2.16013 1.87168 -2.834 -0.869091 -0.0617836 0 2.53121 -1.02533 -1.86576 -0.201651 0.915008 -0.061374 0"/>
+    </keyframe>
+</mujoco>

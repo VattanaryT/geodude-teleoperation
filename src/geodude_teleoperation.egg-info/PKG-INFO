@@ -8,6 +8,6 @@ Requires-Dist: viser
 Requires-Dist: trimesh
 Requires-Dist: rtree
 Requires-Dist: pyspacemouse
-Requires-Dist: diffused_fields @ file:///home/tloew/coding/diffused_fields
+Requires-Dist: diffused_fields @ git+https://github.com/loewt/diffused_fields
 Provides-Extra: viz
 Requires-Dist: gafropy[viz]; extra == "viz"

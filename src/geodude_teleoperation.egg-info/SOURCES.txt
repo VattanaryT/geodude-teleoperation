@@ -10,3 +10,4 @@ src/geodude_teleoperation.egg-info/SOURCES.txt
 src/geodude_teleoperation.egg-info/dependency_links.txt
 src/geodude_teleoperation.egg-info/requires.txt
 src/geodude_teleoperation.egg-info/top_level.txt
+tests/test_orientation_field.py

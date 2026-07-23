@@ -7,16 +7,9 @@ dependencies = [
     "numpy",
     "viser",
     "trimesh",
-    # trimesh's ray-triangle intersector (used by mesh_fixture.scan_top_view for the
-    # top-view scan) needs this for its bounding-volume tree; trimesh doesn't declare it
-    # as a hard dependency itself even though intersects_location() fails without it.
     "rtree",
     "pyspacemouse",
-    # NOTE: points at the local diffused_fields checkout for development (this repo and
-    # diffused_fields are being developed together right now). Was previously a fork
-    # (github.com/loewt/diffused_fields); swap back to a proper git/registry ref before
-    # distributing this package to anyone without that checkout.
-    "diffused_fields @ file:///home/tloew/coding/src/diffused_fields",
+    "diffused_fields @ git+https://github.com/loewt/diffused_fields",
 ]
 
 [project.optional-dependencies]

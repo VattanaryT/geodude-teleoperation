@@ -4,7 +4,7 @@ viser
 trimesh
 rtree
 pyspacemouse
-diffused_fields @ file:///home/tloew/coding/diffused_fields
+diffused_fields @ git+https://github.com/loewt/diffused_fields
 
 [viz]
 gafropy[viz]

@@ -1,0 +1,984 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot name="geodude">
+    <gafro:meshdir>assets</gafro:meshdir>
+    <gafro:kinematic_chain name="left_ur5e/endeffector_link" tip="left_ur5e/endeffector_link"/>
+    <gafro:kinematic_chain name="right_ur5e/endeffector_link" tip="right_ur5e/endeffector_link"/>
+    <gafro:task_space name="ee" chains="left_ur5e/endeffector_link"/>
+    <gafro:task_space name="eer" chains="right_ur5e/endeffector_link"/>
+    <gafro:task_space name="ee0" chains="left_ur5e/endeffector_link"/>
+    <gafro:task_space name="ee1" chains="right_ur5e/endeffector_link"/>
+    <link name="left_arm_vention_base">
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <box size="0.225 0.02 0.225"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <box size="0.225 0.02 0.225"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="left_ur5e/"/>
+    <link name="left_ur5e/base">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <mass value="4"/>
+            <inertia ixx="0.0044333315599999999" ixy="-0" ixz="0" iyy="0.0044333315599999999" iyz="-0" izz="0.0071999999999999998"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="base_0-d5328a99917358d9aa384f12743fe73698461d1c.obj" scale="1 1 1"/>
+            </geometry>
+        </visual>
+    </link>
+    <link name="left_ur5e/endeffector_link"/>
+    <link name="left_ur5e/forearm_link">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0 -0 0.19600000000000001"/>
+            <mass value="2.2749999999999999"/>
+            <inertia ixx="0.031179599999999998" ixy="-0" ixz="0" iyy="0.031179599999999998" iyz="-0" izz="0.0040949999999999997"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="forearm_0-7994229075bdd0e4a5c860ca174278ee8eda8229.obj" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="1.5707963267948963 0 0" xyz="-0 0.079999999999999988 -0"/>
+            <geometry/>
+        </collision>
+    </link>
+    <link name="left_ur5e/gripper/"/>
+    <link name="left_ur5e/gripper/base">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0 -2.7039400000000011e-05 0.035467500000000006"/>
+            <mass value="0.77744100000000005"/>
+            <inertia ixx="0.00026028500000000002" ixy="-0" ixz="0" iyy="0.00022538032086477912" iyz="2.2215835046169693e-07" izz="0.00015270867913522081"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="base-89a0661a7293371ffe78c9605d5b7ccef2a78430.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="base-89a0661a7293371ffe78c9605d5b7ccef2a78430.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="left_ur5e/gripper/base_mount">
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="base_mount-492692230394a1ebdce431c652d89a9c9a4211b5.stl" scale="0.001 0.001 0.001"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="base_mount-492692230394a1ebdce431c652d89a9c9a4211b5.stl" scale="0.001 0.001 0.001"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="left_ur5e/gripper/left_coupler">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="0.00016387500000000004 0.045840400000000017 -0.011780400000000003"/>
+            <mass value="0.031146199999999999"/>
+            <inertia ixx="2.9601604262254569e-05" ixy="1.0975487850624091e-07" ixz="7.4045002384820216e-08" iyy="1.162147171390913e-05" iyz="-1.0876222091595813e-05" izz="2.0750794023836305e-05"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="coupler-e866eb8db5bf2b3f0922658edc8dd3dff1e96529.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="coupler-e866eb8db5bf2b3f0922658edc8dd3dff1e96529.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="left_ur5e/gripper/left_driver">
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="driver-a0c14c2ec91c3e05ccc3e9499456623628d28b1a.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="driver-a0c14c2ec91c3e05ccc3e9499456623628d28b1a.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="left_ur5e/gripper/left_follower">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="0.00011931400000000057 0.028924399999999999 -0.0043409999999999985"/>
+            <mass value="0.026150300000000001"/>
+            <inertia ixx="1.5913229040447478e-05" ixy="-5.5895299695863233e-08" ixz="-2.5416908835217631e-08" iyy="3.1707137466932411e-06" iyz="-3.1950793422868735e-06" izz="1.5459317212859274e-05"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0.0050000000000000001 0.017500000000000002"/>
+            <geometry>
+                <mesh filename="follower-90ac7cc434d804e958140d6f37fcc14bdbf74f5b.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0.0050000000000000001 0.017500000000000002"/>
+            <geometry>
+                <mesh filename="follower-90ac7cc434d804e958140d6f37fcc14bdbf74f5b.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="left_ur5e/gripper/left_pad">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0 -0.0024999999999999996 0.018499999999999996"/>
+            <mass value="0.0035000000000000001"/>
+            <inertia ixx="3.6458299999999976e-07" ixy="-2.4286128663675302e-23" ixz="0" iyy="4.7395799999999978e-07" iyz="-0" izz="1.23958e-07"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="pad-0fb7d7243a94c9e197e05a09dc9b6de5c126cdfc.stl" scale="0.001 0.001 0.001"/>
+            </geometry>
+        </visual>
+    </link>
+    <link name="left_ur5e/gripper/left_spring_link">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="0.0001230120000000022 0.050785099999999986 0.0010396900000000011"/>
+            <mass value="0.027117700000000002"/>
+            <inertia ixx="2.6191060507906588e-05" ixy="2.4360972530605339e-07" ixz="-6.3780960550672482e-09" iyy="2.8270222857685012e-06" iyz="5.3717428044164774e-07" izz="2.8369607206324879e-05"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="spring_link-3730a0af47afa032388b26d12d24919377c589c7.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="spring_link-3730a0af47afa032388b26d12d24919377c589c7.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="left_ur5e/gripper/right_coupler">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="0.00016387500000000004 0.045840400000000017 -0.011780400000000003"/>
+            <mass value="0.031146199999999999"/>
+            <inertia ixx="2.9601604262254569e-05" ixy="1.0975487850624091e-07" ixz="7.4045002384820216e-08" iyy="1.162147171390913e-05" iyz="-1.0876222091595813e-05" izz="2.0750794023836305e-05"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="coupler-e866eb8db5bf2b3f0922658edc8dd3dff1e96529.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="coupler-e866eb8db5bf2b3f0922658edc8dd3dff1e96529.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="left_ur5e/gripper/right_driver">
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="driver-a0c14c2ec91c3e05ccc3e9499456623628d28b1a.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="driver-a0c14c2ec91c3e05ccc3e9499456623628d28b1a.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="left_ur5e/gripper/right_follower">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="0.00011931400000000057 0.028924399999999999 -0.0043409999999999985"/>
+            <mass value="0.026150300000000001"/>
+            <inertia ixx="1.5913229040447478e-05" ixy="-5.5895299695863233e-08" ixz="-2.5416908835217631e-08" iyy="3.1707137466932411e-06" iyz="-3.1950793422868735e-06" izz="1.5459317212859274e-05"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0.0050000000000000001 0.017500000000000002"/>
+            <geometry>
+                <mesh filename="follower-90ac7cc434d804e958140d6f37fcc14bdbf74f5b.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0.0050000000000000001 0.017500000000000002"/>
+            <geometry>
+                <mesh filename="follower-90ac7cc434d804e958140d6f37fcc14bdbf74f5b.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="left_ur5e/gripper/right_pad">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0 -0.0024999999999999996 0.018499999999999996"/>
+            <mass value="0.0035000000000000001"/>
+            <inertia ixx="3.6458299999999976e-07" ixy="-2.4286128663675302e-23" ixz="0" iyy="4.7395799999999978e-07" iyz="-0" izz="1.23958e-07"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="pad-0fb7d7243a94c9e197e05a09dc9b6de5c126cdfc.stl" scale="0.001 0.001 0.001"/>
+            </geometry>
+        </visual>
+    </link>
+    <link name="left_ur5e/gripper/right_spring_link">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="0.0001230120000000022 0.050785099999999986 0.0010396900000000011"/>
+            <mass value="0.027117700000000002"/>
+            <inertia ixx="2.6191060507906588e-05" ixy="2.4360972530605339e-07" ixz="-6.3780960550672482e-09" iyy="2.8270222857685012e-06" iyz="5.3717428044164774e-07" izz="2.8369607206324879e-05"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="spring_link-3730a0af47afa032388b26d12d24919377c589c7.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="spring_link-3730a0af47afa032388b26d12d24919377c589c7.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="left_ur5e/shoulder_link">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <mass value="3.7000000000000002"/>
+            <inertia ixx="0.010267500000000001" ixy="-0" ixz="0" iyy="0.010267500000000001" iyz="-0" izz="0.0066600000000000001"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="shoulder_0-89051b80580d45ef39cb220bf068742b01770552.obj" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0.040000000000000001"/>
+            <geometry/>
+        </collision>
+    </link>
+    <link name="left_ur5e/upper_arm_link">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0 -0 0.21249999999999999"/>
+            <mass value="8.3930000000000007"/>
+            <inertia ixx="0.13388600000000001" ixy="-0" ixz="0" iyy="0.13388600000000001" iyz="-0" izz="0.0151074"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="upperarm_0-16bfdf8d1b19d35ef0adbc4cf29ab0c7edb62dcf.obj" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="1.5707963267948963 0 0" xyz="-0 -0.039999999999999994 -0"/>
+            <geometry/>
+        </collision>
+    </link>
+    <link name="left_ur5e/wrist_1_link">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0 0.127 -0"/>
+            <mass value="1.2190000000000001"/>
+            <inertia ixx="0.0025598999999999999" ixy="-0" ixz="0" iyy="0.0025598999999999999" iyz="-0" izz="0.0021941999999999999"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="wrist1_0-6876ccb9d0084054268dd6aec007e5a61aea6c2d.obj" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="1.5707963267948963 0 0" xyz="-0 0.049999999999999996 -0"/>
+            <geometry/>
+        </collision>
+    </link>
+    <link name="left_ur5e/wrist_2_link">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0 -0 0.10000000000000001"/>
+            <mass value="1.2190000000000001"/>
+            <inertia ixx="0.0025598999999999999" ixy="-0" ixz="0" iyy="0.0025598999999999999" iyz="-0" izz="0.0021941999999999999"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="wrist2_0-fdb3f7bc360f8f37f6be6270c8b507291dc9b01c.obj" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 0.040000000000000001"/>
+            <geometry/>
+        </collision>
+    </link>
+    <link name="left_ur5e/wrist_3_link">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0 0.077168299999999981 -0"/>
+            <mass value="0.18890000000000001"/>
+            <inertia ixx="9.9086299999999946e-05" ixy="-7.3380634901809584e-21" ixz="0" iyy="0.00013213399999999995" iyz="-0" izz="9.90863e-05"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="wrist3-a1fffb4f599e121fb18be40e087b6fd7fb164e59.obj" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="1.5707963267948963 0 0" xyz="-0 0.079999999999999988 -0"/>
+            <geometry>
+                <cylinder radius="0.040000000000000001" length="0.040000000000000001"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="right_arm_vention_base">
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <box size="0.225 0.02 0.225"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <box size="0.225 0.02 0.225"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="right_ur5e/"/>
+    <link name="right_ur5e/base">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <mass value="4"/>
+            <inertia ixx="0.0044333315599999999" ixy="-0" ixz="0" iyy="0.0044333315599999999" iyz="-0" izz="0.0071999999999999998"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="base_0-d5328a99917358d9aa384f12743fe73698461d1c.obj" scale="1 1 1"/>
+            </geometry>
+        </visual>
+    </link>
+    <link name="right_ur5e/endeffector_link"/>
+    <link name="right_ur5e/forearm_link">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0 -0 0.19600000000000001"/>
+            <mass value="2.2749999999999999"/>
+            <inertia ixx="0.031179599999999998" ixy="-0" ixz="0" iyy="0.031179599999999998" iyz="-0" izz="0.0040949999999999997"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="forearm_0-7994229075bdd0e4a5c860ca174278ee8eda8229.obj" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="1.5707963267948963 0 0" xyz="-0 0.079999999999999988 -0"/>
+            <geometry/>
+        </collision>
+    </link>
+    <link name="right_ur5e/gripper/"/>
+    <link name="right_ur5e/gripper/base">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0 -2.7039400000000011e-05 0.035467500000000006"/>
+            <mass value="0.77744100000000005"/>
+            <inertia ixx="0.00026028500000000002" ixy="-0" ixz="0" iyy="0.00022538032086477912" iyz="2.2215835046169693e-07" izz="0.00015270867913522081"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="base-89a0661a7293371ffe78c9605d5b7ccef2a78430.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="base-89a0661a7293371ffe78c9605d5b7ccef2a78430.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="right_ur5e/gripper/base_mount">
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="base_mount-492692230394a1ebdce431c652d89a9c9a4211b5.stl" scale="0.001 0.001 0.001"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="base_mount-492692230394a1ebdce431c652d89a9c9a4211b5.stl" scale="0.001 0.001 0.001"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="right_ur5e/gripper/left_coupler">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="0.00016387500000000004 0.045840400000000017 -0.011780400000000003"/>
+            <mass value="0.031146199999999999"/>
+            <inertia ixx="2.9601604262254569e-05" ixy="1.0975487850624091e-07" ixz="7.4045002384820216e-08" iyy="1.162147171390913e-05" iyz="-1.0876222091595813e-05" izz="2.0750794023836305e-05"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="coupler-e866eb8db5bf2b3f0922658edc8dd3dff1e96529.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="coupler-e866eb8db5bf2b3f0922658edc8dd3dff1e96529.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="right_ur5e/gripper/left_driver">
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="driver-a0c14c2ec91c3e05ccc3e9499456623628d28b1a.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="driver-a0c14c2ec91c3e05ccc3e9499456623628d28b1a.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="right_ur5e/gripper/left_follower">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="0.00011931400000000057 0.028924399999999999 -0.0043409999999999985"/>
+            <mass value="0.026150300000000001"/>
+            <inertia ixx="1.5913229040447478e-05" ixy="-5.5895299695863233e-08" ixz="-2.5416908835217631e-08" iyy="3.1707137466932411e-06" iyz="-3.1950793422868735e-06" izz="1.5459317212859274e-05"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0.0050000000000000001 0.017500000000000002"/>
+            <geometry>
+                <mesh filename="follower-90ac7cc434d804e958140d6f37fcc14bdbf74f5b.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0.0050000000000000001 0.017500000000000002"/>
+            <geometry>
+                <mesh filename="follower-90ac7cc434d804e958140d6f37fcc14bdbf74f5b.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="right_ur5e/gripper/left_pad">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0 -0.0024999999999999996 0.018499999999999996"/>
+            <mass value="0.0035000000000000001"/>
+            <inertia ixx="3.6458299999999976e-07" ixy="-2.4286128663675302e-23" ixz="0" iyy="4.7395799999999978e-07" iyz="-0" izz="1.23958e-07"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="pad-0fb7d7243a94c9e197e05a09dc9b6de5c126cdfc.stl" scale="0.001 0.001 0.001"/>
+            </geometry>
+        </visual>
+    </link>
+    <link name="right_ur5e/gripper/left_spring_link">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="0.0001230120000000022 0.050785099999999986 0.0010396900000000011"/>
+            <mass value="0.027117700000000002"/>
+            <inertia ixx="2.6191060507906588e-05" ixy="2.4360972530605339e-07" ixz="-6.3780960550672482e-09" iyy="2.8270222857685012e-06" iyz="5.3717428044164774e-07" izz="2.8369607206324879e-05"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="spring_link-3730a0af47afa032388b26d12d24919377c589c7.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="spring_link-3730a0af47afa032388b26d12d24919377c589c7.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="right_ur5e/gripper/right_coupler">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="0.00016387500000000004 0.045840400000000017 -0.011780400000000003"/>
+            <mass value="0.031146199999999999"/>
+            <inertia ixx="2.9601604262254569e-05" ixy="1.0975487850624091e-07" ixz="7.4045002384820216e-08" iyy="1.162147171390913e-05" iyz="-1.0876222091595813e-05" izz="2.0750794023836305e-05"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="coupler-e866eb8db5bf2b3f0922658edc8dd3dff1e96529.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="coupler-e866eb8db5bf2b3f0922658edc8dd3dff1e96529.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="right_ur5e/gripper/right_driver">
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="driver-a0c14c2ec91c3e05ccc3e9499456623628d28b1a.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="driver-a0c14c2ec91c3e05ccc3e9499456623628d28b1a.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="right_ur5e/gripper/right_follower">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="0.00011931400000000057 0.028924399999999999 -0.0043409999999999985"/>
+            <mass value="0.026150300000000001"/>
+            <inertia ixx="1.5913229040447478e-05" ixy="-5.5895299695863233e-08" ixz="-2.5416908835217631e-08" iyy="3.1707137466932411e-06" iyz="-3.1950793422868735e-06" izz="1.5459317212859274e-05"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0.0050000000000000001 0.017500000000000002"/>
+            <geometry>
+                <mesh filename="follower-90ac7cc434d804e958140d6f37fcc14bdbf74f5b.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0.0050000000000000001 0.017500000000000002"/>
+            <geometry>
+                <mesh filename="follower-90ac7cc434d804e958140d6f37fcc14bdbf74f5b.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="right_ur5e/gripper/right_pad">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0 -0.0024999999999999996 0.018499999999999996"/>
+            <mass value="0.0035000000000000001"/>
+            <inertia ixx="3.6458299999999976e-07" ixy="-2.4286128663675302e-23" ixz="0" iyy="4.7395799999999978e-07" iyz="-0" izz="1.23958e-07"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="pad-0fb7d7243a94c9e197e05a09dc9b6de5c126cdfc.stl" scale="0.001 0.001 0.001"/>
+            </geometry>
+        </visual>
+    </link>
+    <link name="right_ur5e/gripper/right_spring_link">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="0.0001230120000000022 0.050785099999999986 0.0010396900000000011"/>
+            <mass value="0.027117700000000002"/>
+            <inertia ixx="2.6191060507906588e-05" ixy="2.4360972530605339e-07" ixz="-6.3780960550672482e-09" iyy="2.8270222857685012e-06" iyz="5.3717428044164774e-07" izz="2.8369607206324879e-05"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="spring_link-3730a0af47afa032388b26d12d24919377c589c7.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="spring_link-3730a0af47afa032388b26d12d24919377c589c7.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="right_ur5e/shoulder_link">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <mass value="3.7000000000000002"/>
+            <inertia ixx="0.010267500000000001" ixy="-0" ixz="0" iyy="0.010267500000000001" iyz="-0" izz="0.0066600000000000001"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="shoulder_0-89051b80580d45ef39cb220bf068742b01770552.obj" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0.040000000000000001"/>
+            <geometry/>
+        </collision>
+    </link>
+    <link name="right_ur5e/upper_arm_link">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0 -0 0.21249999999999999"/>
+            <mass value="8.3930000000000007"/>
+            <inertia ixx="0.13388600000000001" ixy="-0" ixz="0" iyy="0.13388600000000001" iyz="-0" izz="0.0151074"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="upperarm_0-16bfdf8d1b19d35ef0adbc4cf29ab0c7edb62dcf.obj" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="1.5707963267948963 0 0" xyz="-0 -0.039999999999999994 -0"/>
+            <geometry/>
+        </collision>
+    </link>
+    <link name="right_ur5e/wrist_1_link">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0 0.127 -0"/>
+            <mass value="1.2190000000000001"/>
+            <inertia ixx="0.0025598999999999999" ixy="-0" ixz="0" iyy="0.0025598999999999999" iyz="-0" izz="0.0021941999999999999"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="wrist1_0-6876ccb9d0084054268dd6aec007e5a61aea6c2d.obj" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="1.5707963267948963 0 0" xyz="-0 0.049999999999999996 -0"/>
+            <geometry/>
+        </collision>
+    </link>
+    <link name="right_ur5e/wrist_2_link">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0 -0 0.10000000000000001"/>
+            <mass value="1.2190000000000001"/>
+            <inertia ixx="0.0025598999999999999" ixy="-0" ixz="0" iyy="0.0025598999999999999" iyz="-0" izz="0.0021941999999999999"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="wrist2_0-fdb3f7bc360f8f37f6be6270c8b507291dc9b01c.obj" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 0.040000000000000001"/>
+            <geometry/>
+        </collision>
+    </link>
+    <link name="right_ur5e/wrist_3_link">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0 0.077168299999999981 -0"/>
+            <mass value="0.18890000000000001"/>
+            <inertia ixx="9.9086299999999946e-05" ixy="-7.3380634901809584e-21" ixz="0" iyy="0.00013213399999999995" iyz="-0" izz="9.90863e-05"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="wrist3-a1fffb4f599e121fb18be40e087b6fd7fb164e59.obj" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="1.5707963267948963 0 0" xyz="-0 0.079999999999999988 -0"/>
+            <geometry>
+                <cylinder radius="0.040000000000000001" length="0.040000000000000001"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="vention_base">
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="vention_frame_visual_model-3ad6025d0633a8c49789e10339a2c0fb6855dd81.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0.47499999999999998 0.38250000000000001"/>
+            <geometry>
+                <box size="1.3 1.2 0.742"/>
+            </geometry>
+        </collision>
+    </link>
+    <joint name="left_arm_linear_vention" type="prismatic">
+        <origin rpy="0 0 3.1415926535897931" xyz="-0.33000000000000002 -0.84799999999999998 1.1200000000000001"/>
+        <parent link="vention_base"/>
+        <child link="left_arm_vention_base"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="0" upper="0.5" velocity="0" effort="0"/>
+    </joint>
+    <joint name="left_ur5e/_fixed" type="fixed">
+        <origin rpy="-1.5707500000000001 0 3.1415926535897931" xyz="-0 -0.030000000000000002 1.7347234759768071e-18"/>
+        <parent link="left_arm_vention_base"/>
+        <child link="left_ur5e/"/>
+    </joint>
+    <joint name="left_ur5e/base_fixed" type="fixed">
+        <origin rpy="0 0 -3.1415926535897931" xyz="-0 -0 -0"/>
+        <parent link="left_ur5e/"/>
+        <child link="left_ur5e/base"/>
+    </joint>
+    <joint name="left_ur5e/elbow_joint" type="revolute">
+        <origin rpy="-0 0 -0" xyz="-0 -0.13100000000000001 0.42499999999999999"/>
+        <parent link="left_ur5e/upper_arm_link"/>
+        <child link="left_ur5e/forearm_link"/>
+        <axis xyz="0 -1 0"/>
+        <limit lower="-3.1415000000000002" upper="3.1415000000000002" velocity="0" effort="0"/>
+    </joint>
+    <joint name="left_ur5e/endeffector_link_fixed" type="fixed">
+        <origin rpy="0 0 -1.5707963267948968" xyz="-0 -0 0.20000000000000004"/>
+        <parent link="left_ur5e/gripper/base_mount"/>
+        <child link="left_ur5e/endeffector_link"/>
+    </joint>
+    <joint name="left_ur5e/gripper/_fixed" type="fixed">
+        <origin rpy="-1.5707963267948963 0 0" xyz="-0 0.099999999999999992 -0"/>
+        <parent link="left_ur5e/wrist_3_link"/>
+        <child link="left_ur5e/gripper/"/>
+    </joint>
+    <joint name="left_ur5e/gripper/base_fixed" type="fixed">
+        <origin rpy="-0 0 -1.5707963267948963" xyz="-0 -0 0.0037999999999999991"/>
+        <parent link="left_ur5e/gripper/base_mount"/>
+        <child link="left_ur5e/gripper/base"/>
+    </joint>
+    <joint name="left_ur5e/gripper/base_mount_fixed" type="fixed">
+        <origin rpy="-0 0 -0" xyz="-0 -0 0.0070000000000000001"/>
+        <parent link="left_ur5e/gripper/"/>
+        <child link="left_ur5e/gripper/base_mount"/>
+    </joint>
+    <joint name="left_ur5e/gripper/left_coupler_joint" type="revolute">
+        <origin rpy="-0 0 -0" xyz="-0 0.01822 0.026001"/>
+        <parent link="left_ur5e/gripper/left_driver"/>
+        <child link="left_ur5e/gripper/left_coupler"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="0" upper="1.5700000000000001" velocity="0" effort="0"/>
+    </joint>
+    <joint name="left_ur5e/gripper/left_driver_joint" type="revolute">
+        <origin rpy="2.2957960713323895 0 0" xyz="-0 -0.030601100000000006 0.054904000000000008"/>
+        <parent link="left_ur5e/gripper/base"/>
+        <child link="left_ur5e/gripper/left_driver"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="-0.80000000000000004" upper="0" velocity="0" effort="0"/>
+    </joint>
+    <joint name="left_ur5e/gripper/left_follower_joint" type="revolute">
+        <origin rpy="-0.72500039130009331 0 -0" xyz="-0 0.099591620440259876 -0.0018958840211760475"/>
+        <parent link="left_ur5e/gripper/left_spring_link"/>
+        <child link="left_ur5e/gripper/left_follower"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="-0.87570000000000003" upper="0.87570000000000003" velocity="0" effort="0"/>
+    </joint>
+    <joint name="left_ur5e/gripper/left_pad_fixed" type="fixed">
+        <origin rpy="-1.5707963267948963 0 -0" xyz="-0 0.0069999999999999975 -0.010099999999999996"/>
+        <parent link="left_ur5e/gripper/left_follower"/>
+        <child link="left_ur5e/gripper/left_pad"/>
+    </joint>
+    <joint name="left_ur5e/gripper/left_spring_link_joint" type="revolute">
+        <origin rpy="2.2957960713323895 0 0" xyz="-0 -0.012700000000000006 0.061420000000000009"/>
+        <parent link="left_ur5e/gripper/base"/>
+        <child link="left_ur5e/gripper/left_spring_link"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="-0.80000000000000004" upper="0.29670597283" velocity="0" effort="0"/>
+    </joint>
+    <joint name="left_ur5e/gripper/right_coupler_joint" type="revolute">
+        <origin rpy="-0 0 -0" xyz="-0 0.01822 0.026001"/>
+        <parent link="left_ur5e/gripper/right_driver"/>
+        <child link="left_ur5e/gripper/right_coupler"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="0" upper="1.5700000000000001" velocity="0" effort="0"/>
+    </joint>
+    <joint name="left_ur5e/gripper/right_driver_joint" type="revolute">
+        <origin rpy="2.2957960713323895 0 3.1415926535897931" xyz="-0 0.030601000000000003 0.054905000000000009"/>
+        <parent link="left_ur5e/gripper/base"/>
+        <child link="left_ur5e/gripper/right_driver"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="-0.80000000000000004" upper="0" velocity="0" effort="0"/>
+    </joint>
+    <joint name="left_ur5e/gripper/right_follower_joint" type="revolute">
+        <origin rpy="-0.72500039130009331 0 -0" xyz="-0 0.099591620440259876 -0.0018958840211760475"/>
+        <parent link="left_ur5e/gripper/right_spring_link"/>
+        <child link="left_ur5e/gripper/right_follower"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="-0.87570000000000003" upper="0.87570000000000003" velocity="0" effort="0"/>
+    </joint>
+    <joint name="left_ur5e/gripper/right_pad_fixed" type="fixed">
+        <origin rpy="-1.5707963267948963 0 -0" xyz="-0 0.0069999999999999975 -0.010099999999999996"/>
+        <parent link="left_ur5e/gripper/right_follower"/>
+        <child link="left_ur5e/gripper/right_pad"/>
+    </joint>
+    <joint name="left_ur5e/gripper/right_spring_link_joint" type="revolute">
+        <origin rpy="2.3038358220473496 -0 3.1415926535897931" xyz="-0 0.012699999999999996 0.061420000000000002"/>
+        <parent link="left_ur5e/gripper/base"/>
+        <child link="left_ur5e/gripper/right_spring_link"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="-0.80000000000000004" upper="0.29670597283" velocity="0" effort="0"/>
+    </joint>
+    <joint name="left_ur5e/shoulder_lift_joint" type="revolute">
+        <origin rpy="-0 1.5707963267948963 -0" xyz="-0 0.13799999999999998 -0"/>
+        <parent link="left_ur5e/shoulder_link"/>
+        <child link="left_ur5e/upper_arm_link"/>
+        <axis xyz="0 -1 0"/>
+        <limit lower="-3.1415000000000002" upper="3.1415000000000002" velocity="0" effort="0"/>
+    </joint>
+    <joint name="left_ur5e/shoulder_pan_joint" type="revolute">
+        <origin rpy="-0 0 -0" xyz="-0 -0 0.16300000000000001"/>
+        <parent link="left_ur5e/base"/>
+        <child link="left_ur5e/shoulder_link"/>
+        <axis xyz="0 0 1"/>
+        <limit lower="-3.1415000000000002" upper="3.1415000000000002" velocity="0" effort="0"/>
+    </joint>
+    <joint name="left_ur5e/wrist_1_joint" type="revolute">
+        <origin rpy="-0 1.5707963267948963 -0" xyz="-0 -0 0.3919999999999999"/>
+        <parent link="left_ur5e/forearm_link"/>
+        <child link="left_ur5e/wrist_1_link"/>
+        <axis xyz="0 -1 0"/>
+        <limit lower="-3.1415000000000002" upper="3.1415000000000002" velocity="0" effort="0"/>
+    </joint>
+    <joint name="left_ur5e/wrist_2_joint" type="revolute">
+        <origin rpy="-0 0 -0" xyz="-0 0.127 -0"/>
+        <parent link="left_ur5e/wrist_1_link"/>
+        <child link="left_ur5e/wrist_2_link"/>
+        <axis xyz="0 0 1"/>
+        <limit lower="-3.1415000000000002" upper="3.1415000000000002" velocity="0" effort="0"/>
+    </joint>
+    <joint name="left_ur5e/wrist_3_joint" type="revolute">
+        <origin rpy="-0 0 -0" xyz="-0 -0 0.10000000000000001"/>
+        <parent link="left_ur5e/wrist_2_link"/>
+        <child link="left_ur5e/wrist_3_link"/>
+        <axis xyz="0 -1 0"/>
+        <limit lower="-3.1415000000000002" upper="3.1415000000000002" velocity="0" effort="0"/>
+    </joint>
+    <joint name="right_arm_linear_vention" type="prismatic">
+        <origin rpy="0 0 3.1415926535897931" xyz="0.33000000000000002 -0.84799999999999998 1.1200000000000001"/>
+        <parent link="vention_base"/>
+        <child link="right_arm_vention_base"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="0" upper="0.5" velocity="0" effort="0"/>
+    </joint>
+    <joint name="right_ur5e/_fixed" type="fixed">
+        <origin rpy="-1.5707500000000001 0 3.1415926535897931" xyz="-0 -0.030000000000000002 1.7347234759768071e-18"/>
+        <parent link="right_arm_vention_base"/>
+        <child link="right_ur5e/"/>
+    </joint>
+    <joint name="right_ur5e/base_fixed" type="fixed">
+        <origin rpy="0 0 -3.1415926535897931" xyz="-0 -0 -0"/>
+        <parent link="right_ur5e/"/>
+        <child link="right_ur5e/base"/>
+    </joint>
+    <joint name="right_ur5e/elbow_joint" type="revolute">
+        <origin rpy="-0 0 -0" xyz="-0 -0.13100000000000001 0.42499999999999999"/>
+        <parent link="right_ur5e/upper_arm_link"/>
+        <child link="right_ur5e/forearm_link"/>
+        <axis xyz="0 -1 0"/>
+        <limit lower="-3.1415000000000002" upper="3.1415000000000002" velocity="0" effort="0"/>
+    </joint>
+    <joint name="right_ur5e/endeffector_link_fixed" type="fixed">
+        <origin rpy="0 0 -1.5707963267948968" xyz="-0 -0 0.20000000000000004"/>
+        <parent link="right_ur5e/gripper/base_mount"/>
+        <child link="right_ur5e/endeffector_link"/>
+    </joint>
+    <joint name="right_ur5e/gripper/_fixed" type="fixed">
+        <origin rpy="-1.5707963267948963 0 0" xyz="-0 0.099999999999999992 -0"/>
+        <parent link="right_ur5e/wrist_3_link"/>
+        <child link="right_ur5e/gripper/"/>
+    </joint>
+    <joint name="right_ur5e/gripper/base_fixed" type="fixed">
+        <origin rpy="-0 0 -1.5707963267948963" xyz="-0 -0 0.0037999999999999991"/>
+        <parent link="right_ur5e/gripper/base_mount"/>
+        <child link="right_ur5e/gripper/base"/>
+    </joint>
+    <joint name="right_ur5e/gripper/base_mount_fixed" type="fixed">
+        <origin rpy="-0 0 -0" xyz="-0 -0 0.0070000000000000001"/>
+        <parent link="right_ur5e/gripper/"/>
+        <child link="right_ur5e/gripper/base_mount"/>
+    </joint>
+    <joint name="right_ur5e/gripper/left_coupler_joint" type="revolute">
+        <origin rpy="-0 0 -0" xyz="-0 0.01822 0.026001"/>
+        <parent link="right_ur5e/gripper/left_driver"/>
+        <child link="right_ur5e/gripper/left_coupler"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="0" upper="1.5700000000000001" velocity="0" effort="0"/>
+    </joint>
+    <joint name="right_ur5e/gripper/left_driver_joint" type="revolute">
+        <origin rpy="2.2957960713323895 0 0" xyz="-0 -0.030601100000000006 0.054904000000000008"/>
+        <parent link="right_ur5e/gripper/base"/>
+        <child link="right_ur5e/gripper/left_driver"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="-0.80000000000000004" upper="0" velocity="0" effort="0"/>
+    </joint>
+    <joint name="right_ur5e/gripper/left_follower_joint" type="revolute">
+        <origin rpy="-0.72500039130009331 0 -0" xyz="-0 0.099591620440259876 -0.0018958840211760475"/>
+        <parent link="right_ur5e/gripper/left_spring_link"/>
+        <child link="right_ur5e/gripper/left_follower"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="-0.87570000000000003" upper="0.87570000000000003" velocity="0" effort="0"/>
+    </joint>
+    <joint name="right_ur5e/gripper/left_pad_fixed" type="fixed">
+        <origin rpy="-1.5707963267948963 0 -0" xyz="-0 0.0069999999999999975 -0.010099999999999996"/>
+        <parent link="right_ur5e/gripper/left_follower"/>
+        <child link="right_ur5e/gripper/left_pad"/>
+    </joint>
+    <joint name="right_ur5e/gripper/left_spring_link_joint" type="revolute">
+        <origin rpy="2.2957960713323895 0 0" xyz="-0 -0.012700000000000006 0.061420000000000009"/>
+        <parent link="right_ur5e/gripper/base"/>
+        <child link="right_ur5e/gripper/left_spring_link"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="-0.80000000000000004" upper="0.29670597283" velocity="0" effort="0"/>
+    </joint>
+    <joint name="right_ur5e/gripper/right_coupler_joint" type="revolute">
+        <origin rpy="-0 0 -0" xyz="-0 0.01822 0.026001"/>
+        <parent link="right_ur5e/gripper/right_driver"/>
+        <child link="right_ur5e/gripper/right_coupler"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="0" upper="1.5700000000000001" velocity="0" effort="0"/>
+    </joint>
+    <joint name="right_ur5e/gripper/right_driver_joint" type="revolute">
+        <origin rpy="2.2957960713323895 0 3.1415926535897931" xyz="-0 0.030601000000000003 0.054905000000000009"/>
+        <parent link="right_ur5e/gripper/base"/>
+        <child link="right_ur5e/gripper/right_driver"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="-0.80000000000000004" upper="0" velocity="0" effort="0"/>
+    </joint>
+    <joint name="right_ur5e/gripper/right_follower_joint" type="revolute">
+        <origin rpy="-0.72500039130009331 0 -0" xyz="-0 0.099591620440259876 -0.0018958840211760475"/>
+        <parent link="right_ur5e/gripper/right_spring_link"/>
+        <child link="right_ur5e/gripper/right_follower"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="-0.87570000000000003" upper="0.87570000000000003" velocity="0" effort="0"/>
+    </joint>
+    <joint name="right_ur5e/gripper/right_pad_fixed" type="fixed">
+        <origin rpy="-1.5707963267948963 0 -0" xyz="-0 0.0069999999999999975 -0.010099999999999996"/>
+        <parent link="right_ur5e/gripper/right_follower"/>
+        <child link="right_ur5e/gripper/right_pad"/>
+    </joint>
+    <joint name="right_ur5e/gripper/right_spring_link_joint" type="revolute">
+        <origin rpy="2.3038358220473496 -0 3.1415926535897931" xyz="-0 0.012699999999999996 0.061420000000000002"/>
+        <parent link="right_ur5e/gripper/base"/>
+        <child link="right_ur5e/gripper/right_spring_link"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="-0.80000000000000004" upper="0.29670597283" velocity="0" effort="0"/>
+    </joint>
+    <joint name="right_ur5e/shoulder_lift_joint" type="revolute">
+        <origin rpy="-0 1.5707963267948963 -0" xyz="-0 0.13799999999999998 -0"/>
+        <parent link="right_ur5e/shoulder_link"/>
+        <child link="right_ur5e/upper_arm_link"/>
+        <axis xyz="0 -1 0"/>
+        <limit lower="-3.1415000000000002" upper="3.1415000000000002" velocity="0" effort="0"/>
+    </joint>
+    <joint name="right_ur5e/shoulder_pan_joint" type="revolute">
+        <origin rpy="-0 0 -0" xyz="-0 -0 0.16300000000000001"/>
+        <parent link="right_ur5e/base"/>
+        <child link="right_ur5e/shoulder_link"/>
+        <axis xyz="0 0 1"/>
+        <limit lower="-3.1415000000000002" upper="3.1415000000000002" velocity="0" effort="0"/>
+    </joint>
+    <joint name="right_ur5e/wrist_1_joint" type="revolute">
+        <origin rpy="-0 1.5707963267948963 -0" xyz="-0 -0 0.3919999999999999"/>
+        <parent link="right_ur5e/forearm_link"/>
+        <child link="right_ur5e/wrist_1_link"/>
+        <axis xyz="0 -1 0"/>
+        <limit lower="-3.1415000000000002" upper="3.1415000000000002" velocity="0" effort="0"/>
+    </joint>
+    <joint name="right_ur5e/wrist_2_joint" type="revolute">
+        <origin rpy="-0 0 -0" xyz="-0 0.127 -0"/>
+        <parent link="right_ur5e/wrist_1_link"/>
+        <child link="right_ur5e/wrist_2_link"/>
+        <axis xyz="0 0 1"/>
+        <limit lower="-3.1415000000000002" upper="3.1415000000000002" velocity="0" effort="0"/>
+    </joint>
+    <joint name="right_ur5e/wrist_3_joint" type="revolute">
+        <origin rpy="-0 0 -0" xyz="-0 -0 0.10000000000000001"/>
+        <parent link="right_ur5e/wrist_2_link"/>
+        <child link="right_ur5e/wrist_3_link"/>
+        <axis xyz="0 -1 0"/>
+        <limit lower="-3.1415000000000002" upper="3.1415000000000002" velocity="0" effort="0"/>
+    </joint>
+</robot>

@@ -1,0 +1,188 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot name="ufactory_lite6">
+    <gafro:meshdir>assets</gafro:meshdir>
+    <gafro:kinematic_chain name="link6" tip="link6"/>
+    <gafro:kinematic_chain name="lite6_ee" tip="lite6_ee"/>
+    <gafro:task_space name="ee" chains="lite6_ee"/>
+    <link name="link1">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0.00035999999999999986 0.041950000000000001 -0.0025000000000000018"/>
+            <mass value="1.411"/>
+            <inertia ixx="0.0014516370479116878" ixy="1.2399951213438295e-05" ixz="6.6999051667868601e-06" iyy="0.00088729998612081351" iyz="0.00012549984363230664" izz="0.0013199279659674987"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="link1.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="link1.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="link2">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="0.17899999999999999 3.4694469519536142e-18 0.058400000000000007"/>
+            <mass value="1.3400000000000001"/>
+            <inertia ixx="0.0015854001024178633" ixy="-6.7680981885982808e-06" ixz="0.0011513637776023361" iyy="0.0056096971453658854" iyz="1.1404870612185744e-06" izz="0.0048499927522162485"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="link2.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="link2.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="link3">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="0.071999999999999995 -0.035699999999999996 -0.00099999999999999959"/>
+            <mass value="0.95299999999999996"/>
+            <inertia ixx="0.00088609910740533593" ixy="-0.00039286809994388503" ixz="-7.0659826460468247e-05" iyy="0.001578497925021069" iyz="-2.4449583012658684e-05" izz="0.001846769967573594"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="link3.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="link3.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="link4">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0.002 -0.028500000000000008 -0.081300000000000011"/>
+            <mass value="1.284"/>
+            <inertia ixx="0.0037050016556066274" ixy="-1.9999704901142425e-06" ixz="-7.1700125201425053e-06" iyy="0.003045499661567256" iyz="-0.00093187745018896077" izz="0.0015412986828261166"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="link4.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="link4.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="link5">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="5.4210108624275222e-20 0.0099999999999999967 0.0019000000000000002"/>
+            <mass value="0.80400000000000005"/>
+            <inertia ixx="0.00056680023864784086" ixy="5.9999829606848488e-07" ixz="5.3000906155823113e-06" iyy="0.0005077001328740125" iyz="-4.7998464033219884e-07" izz="0.00052999962847814644"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="link5.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="link5.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="link6">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-3.3881317890172014e-19 -0.0019400000000000003 -0.010200000000000001"/>
+            <mass value="0.13"/>
+            <inertia ixx="7.7260048409477438e-05" ixy="9.9999237472632168e-07" ixz="-4.0002964780335438e-07" iyy="8.5664981073757944e-05" iyz="-6.0001486099890181e-07" izz="0.00014813987051676464"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="link6.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="link6.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="link_base">
+        <inertial>
+            <origin rpy="-0 0 -0" xyz="-0.0082954499999999994 3.2635700000000003e-05 0.063119499999999995"/>
+            <mass value="1.65394"/>
+            <inertia ixx="0" ixy="-0" ixz="0" iyy="0" iyz="-0" izz="0"/>
+        </inertial>
+        <visual>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="link_base.stl" scale="1 1 1"/>
+            </geometry>
+        </visual>
+        <collision>
+            <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+            <geometry>
+                <mesh filename="link_base.stl" scale="1 1 1"/>
+            </geometry>
+        </collision>
+    </link>
+    <link name="lite6_ee"/>
+    <joint name="joint1" type="revolute">
+        <origin rpy="-0 0 -0" xyz="-0 -0 0.24349999999999999"/>
+        <parent link="link_base"/>
+        <child link="link1"/>
+        <axis xyz="0 0 1"/>
+        <limit lower="-6.2831900000000003" upper="6.2831900000000003" velocity="0" effort="0"/>
+    </joint>
+    <joint name="joint2" type="revolute">
+        <origin rpy="-1.5707963267948966 -1.5707963267948966 0" xyz="-0 -0 -0"/>
+        <parent link="link1"/>
+        <child link="link2"/>
+        <axis xyz="0 0 1"/>
+        <limit lower="-2.6179899999999998" upper="2.6179899999999998" velocity="0" effort="0"/>
+    </joint>
+    <joint name="joint3" type="revolute">
+        <origin rpy="3.1415853071858217 1.4419411475486562e-12 1.5708005694372709" xyz="0.20019999999999996 -1.3877787807814457e-17 5.2939559203393771e-23"/>
+        <parent link="link2"/>
+        <child link="link3"/>
+        <axis xyz="0 0 1"/>
+        <limit lower="-0.061087000000000002" upper="5.2359900000000001" velocity="0" effort="0"/>
+    </joint>
+    <joint name="joint4" type="revolute">
+        <origin rpy="1.5708005694372709 0 0" xyz="0.086999999999999994 -0.22761000000000001 -0"/>
+        <parent link="link3"/>
+        <child link="link4"/>
+        <axis xyz="0 0 1"/>
+        <limit lower="-6.2831900000000003" upper="6.2831900000000003" velocity="0" effort="0"/>
+    </joint>
+    <joint name="joint5" type="revolute">
+        <origin rpy="1.5707963267948963 0 0" xyz="-0 -0 -0"/>
+        <parent link="link4"/>
+        <child link="link5"/>
+        <axis xyz="0 0 1"/>
+        <limit lower="-2.1642000000000001" upper="2.1642000000000001" velocity="0" effort="0"/>
+    </joint>
+    <joint name="joint6" type="revolute">
+        <origin rpy="-1.5707963267948963 0 -0" xyz="-0 0.062499999999999986 -0"/>
+        <parent link="link5"/>
+        <child link="link6"/>
+        <axis xyz="0 0 1"/>
+        <limit lower="-6.2831900000000003" upper="6.2831900000000003" velocity="0" effort="0"/>
+    </joint>
+    <joint name="lite6_ee_joint" type="fixed">
+        <origin rpy="-0 0 -0" xyz="-0 -0 -0"/>
+        <parent link="link6"/>
+        <child link="lite6_ee"/>
+    </joint>
+</robot>

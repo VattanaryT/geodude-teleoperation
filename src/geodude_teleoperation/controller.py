@@ -87,23 +87,24 @@ class TeleoperationController(gafropy.control.VelocityController):
         factor = _adaptive_linear_scale(
             self._distance, self._min_twist_scaling_factor, self._max_twist_scaling_factor)
 
-        angular = twist.get_angular()
-        linear = 0.25 * factor * twist.get_linear()
-        increment = gafropy.Motor.exp(
-            angular[0], angular[1], angular[2], linear[0], linear[1], linear[2])
-        reference = ee.multiply(increment)
-
         if self.vf is not None:
-            query_translator = reference.get_translator()
-            query_position = np.array(
-                [query_translator.x(), query_translator.y(), query_translator.z()])
-            reference = self.vf.project(reference)
-            self._distance = self.vf.get_distance(query_position)
+            translator = ee.get_translator()
+            position = translator.to_translation_vector()
+            reference = self.vf.project(ee)
+            self._distance = self.vf.get_distance(position)
 
-        if ee.to_array()[0] > 0.0 and reference.to_array()[0] < 0.0:
-            reference = reference.negate()
-        elif ee.to_array()[0] < 0.0 and reference.to_array()[0] > 0.0:
-            reference = reference.negate()
+            twist = twist.transform(reference).transform(ee.reverse())
+            angular = twist.get_angular()
+            linear = 0.25 * factor * twist.get_linear()
+            increment = gafropy.Motor.exp(
+                angular[0], angular[1], angular[2], linear[0], linear[1], linear[2])
+            reference = ee.multiply(increment)
+            reference = self.vf.project(reference)
+
+        # if ee.to_array()[0] > 0.0 and reference.to_array()[0] < 0.0:
+        #     reference = reference.negate()
+        # elif ee.to_array()[0] < 0.0 and reference.to_array()[0] > 0.0:
+        #     reference = reference.negate()
 
         self.get_objective().set_target(reference)
 
@@ -153,10 +154,6 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         if speed > self._max_joint_velocity:
             qdot = qdot * (self._max_joint_velocity / speed)
 
-        print("---")
-        print(error)
-        print(qdot)
-
         return qdot
 
     def set_virtual_fixture(self, vf):
@@ -180,9 +177,9 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         if self.vf is not None:
             reference = self.vf.project(reference)
 
-        if ee.to_array()[0] > 0.0 and reference.to_array()[0] < 0.0:
-            reference = reference.negate()
-        elif ee.to_array()[0] < 0.0 and reference.to_array()[0] > 0.0:
-            reference = reference.negate()
+        # if ee.to_array()[0] > 0.0 and reference.to_array()[0] < 0.0:
+        #     reference = reference.negate()
+        # elif ee.to_array()[0] < 0.0 and reference.to_array()[0] > 0.0:
+        #     reference = reference.negate()
 
         self.get_objective().set_target(reference)
