@@ -1,11 +1,9 @@
 import gafropy
 import numpy as np
-from diffused_fields.diffusion.pointcloud_quaternion_diffusion import (
-    PointcloudQuaternionDiffusion,
-)
-from diffused_fields.diffusion.walk_on_spheres import WalkOnSpheresDiffusion
 from diffused_fields.manifold._rotor_interop import as_scipy_rotation
 from diffused_fields.manifold.pointcloud import Pointcloud
+from diffused_fields.problem import DiffusionProblem
+from diffused_fields.solver import LaplacianSolver, WalkOnSpheresSolver, farthest_from_boundary_vertex
 from scipy.spatial.transform import Rotation
 
 
@@ -32,40 +30,6 @@ def _nlerp_matrices(old, new, t):
     return Rotation.from_quat(q).as_matrix()
 
 
-class WalkOnSpheresVirtualFixture:
-
-    def __init__(self, wos, smoothing=0.75):
-        self._wos = wos
-        self._last_basis = np.eye(3)
-        self._has_last = False
-        self._smoothing = smoothing
-
-    def get_distance(self, position):
-        distances, _ = self._wos.boundaries[0].get_closest_points(
-            np.asarray(position)[np.newaxis, :])
-        return float(np.asarray(distances).reshape(-1)[0])
-
-    def project(self, proposed_reference):
-        translator, position = _motor_position(proposed_reference)
-
-        batch_points = self._wos.get_batch_from_point(position)
-        try:
-            local_basis, _, _ = self._wos.diffuse_rotations(batch_points)
-        except ValueError:
-            local_basis = self._last_basis if self._has_last else np.eye(3)
-
-        if self._has_last and self._smoothing > 0:
-            local_basis = _nlerp_matrices(
-                self._last_basis, local_basis, 1 - self._smoothing)
-        self._last_basis = local_basis
-        self._has_last = True
-
-        approach_basis = _orient_approach_into_surface(local_basis)
-        rotor = gafropy.Rotor.from_matrix(approach_basis)
-        corrected = gafropy.Motor(translator, rotor)
-        return corrected
-
-
 def _subsample_boundary(pointcloud, num_points, seed):
     n = min(num_points, len(pointcloud.vertices))
     if n >= len(pointcloud.vertices):
@@ -83,26 +47,59 @@ class OrientationField:
     def __init__(self, pointcloud, key_direction, source_vertex=None,
                  diffusion_scalar=100, smoothing=0.75, num_boundary_points=3000,
                  boundary_seed=0, **wos_kwargs):
-        diffusion = PointcloudQuaternionDiffusion(
-            pointcloud, diffusion_scalar=diffusion_scalar)
+        vertex = source_vertex if source_vertex is not None else farthest_from_boundary_vertex(pointcloud)
+        if not hasattr(pointcloud, "normals"):
+            pointcloud.get_normals()
 
-        tangent_field = diffusion.diffuse_key_direction_as_tangent_field(
-            key_direction, vertex=source_vertex)
-        pointcloud.get_bases_from_tangent_vector_and_normal(tangent_field)
+        direction = np.asarray(key_direction, dtype=float)
+        normal = pointcloud.normals[vertex]
+        tangent = direction - np.dot(direction, normal) * normal
+        tangent_norm = np.linalg.norm(tangent)
+        if tangent_norm < 1e-9:
+            raise ValueError(
+                "OrientationField: key_direction is parallel to the surface "
+                "normal at the source vertex -- no tangential component left to diffuse"
+            )
+        tangent = tangent / tangent_norm
+
+        solver = LaplacianSolver(diffusion_scalar=diffusion_scalar)
+        tangent_problem = DiffusionProblem(
+            pointcloud, source_vertices=[vertex], source_values=tangent[np.newaxis, :])
+        tangent_field = solver.solve_vector(tangent_problem)
+        pointcloud.get_bases_from_tangent_vector_and_normal(tangent_field.values)
 
         wos_boundary = _subsample_boundary(
             pointcloud, num_boundary_points, boundary_seed)
         wos_kwargs.setdefault(
             "convergence_threshold", pointcloud.get_mean_edge_length() * 2)
-        wos = WalkOnSpheresDiffusion(boundaries=[wos_boundary], **wos_kwargs)
+        wos_solver = WalkOnSpheresSolver(**wos_kwargs)
 
         self._pointcloud = pointcloud
-        self._diffusion = diffusion
-        self._wos_fixture = WalkOnSpheresVirtualFixture(
-            wos, smoothing=smoothing)
+        self._solver = solver
+        self._field = wos_solver.solve_quaternion(DiffusionProblem(wos_boundary))
+        self._smoothing = smoothing
+        self._last_basis = np.eye(3)
+        self._has_last = False
 
     def get_distance(self, position):
-        return self._wos_fixture.get_distance(position)
+        distances, _ = self._field.manifold.get_closest_points(
+            np.asarray(position)[np.newaxis, :])
+        return float(np.asarray(distances).reshape(-1)[0])
 
     def project(self, proposed_reference):
-        return self._wos_fixture.project(proposed_reference)
+        translator, position = _motor_position(proposed_reference)
+
+        try:
+            local_basis = as_scipy_rotation(self._field(position)).as_matrix()
+        except ValueError:
+            local_basis = self._last_basis if self._has_last else np.eye(3)
+
+        if self._has_last and self._smoothing > 0:
+            local_basis = _nlerp_matrices(
+                self._last_basis, local_basis, 1 - self._smoothing)
+        self._last_basis = local_basis
+        self._has_last = True
+
+        approach_basis = _orient_approach_into_surface(local_basis)
+        rotor = gafropy.Rotor.from_matrix(approach_basis)
+        return gafropy.Motor(translator, rotor)

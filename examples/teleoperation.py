@@ -115,7 +115,7 @@ def main():
 
     vf = OrientationField(
         object_surface, key_direction=key_direction,
-        batch_size=256, max_iterations=48, convergence_threshold=0.01)
+        batch_size=256, max_iterations=48, convergence_threshold=0.001)
 
     controller.set_virtual_fixture(vf)
     controller.set_task_space(task_space)

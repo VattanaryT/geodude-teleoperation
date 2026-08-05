@@ -57,9 +57,9 @@ class TeleoperationController(gafropy.control.VelocityController):
         self._distance = 0.0
         self._interface = None
 
-    def compute_control_command(self, task_space_state, state):
-        error = np.asarray(task_space_state.get_error())
-        jacobian = np.asarray(task_space_state.get_jacobian())
+    def compute_control_command(self, objective_state, state):
+        error = np.asarray(objective_state.get_error())
+        jacobian = np.asarray(objective_state.get_jacobian())
 
         j_inverse = np.linalg.inv(
             jacobian.T @ jacobian + self._damping**2 * np.eye(jacobian.shape[1]))
@@ -128,11 +128,11 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         self._interface = None
         self.vf = None
 
-    def compute_control_command(self, task_space_state, state):
-        error = np.asarray(task_space_state.get_error())
-        error_derivative = np.asarray(task_space_state.get_error_derivative())
+    def compute_control_command(self, objective_state, state):
+        error = np.asarray(objective_state.get_error())
+        error_derivative = np.asarray(objective_state.get_error_derivative())
         jacobian_derivative = np.asarray(
-            task_space_state.get_jacobian_derivative())
+            objective_state.get_jacobian_derivative())
         velocity = np.asarray(state.get_velocity())
 
         wrench_net = -self._stiffness @ error - self._damping @ error_derivative
@@ -140,7 +140,7 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
 
         bias = jacobian_derivative @ velocity[1:7]
 
-        jacobian = np.asarray(task_space_state.get_jacobian())
+        jacobian = np.asarray(objective_state.get_jacobian())
         # joint_acceleration = np.linalg.lstsq(
         #     jacobian, task_acceleration - bias, rcond=None)[0]
 

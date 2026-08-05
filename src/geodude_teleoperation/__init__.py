@@ -7,10 +7,7 @@ from geodude_teleoperation.mesh_fixture import (
     read_ascii_pcd,
 )
 from geodude_teleoperation.spacemouse import SpaceMouseTeleop
-from geodude_teleoperation.virtual_fixture import (
-    OrientationField,
-    WalkOnSpheresVirtualFixture,
-)
+from geodude_teleoperation.virtual_fixture import OrientationField
 
 __all__ = [
     "TeleoperationController",
@@ -18,7 +15,6 @@ __all__ = [
     "SpaceMouseTeleop",
     "KeyboardTeleop",
     "OrientationField",
-    "WalkOnSpheresVirtualFixture",
     "compute_resting_orientation",
     "load_object_pointcloud",
     "load_points",
