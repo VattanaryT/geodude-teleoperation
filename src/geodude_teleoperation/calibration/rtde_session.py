@@ -1,11 +1,11 @@
-"""Thin RTDE wrapper for TCP / payload / FT apply and wrench sampling."""
+"""Thin RTDE wrapper for FT zero and wrench sampling."""
 
 from __future__ import annotations
 
 import time
-from typing import Any, Optional
+from typing import Any
 
-from geodude_teleoperation.calibration.io import validate_payload, validate_tcp_pose, validate_wrench
+from geodude_teleoperation.calibration.io import validate_wrench
 
 
 def _import_rtde():
@@ -14,7 +14,7 @@ def _import_rtde():
         from rtde_receive import RTDEReceiveInterface
     except ImportError as exc:
         raise ImportError(
-            "ur_rtde is required for robot apply / FT sampling; "
+            "ur_rtde is required for FT sampling / zeroing; "
             "install with: pip install 'geodude-teleoperation[ur]'"
         ) from exc
     return RTDEControlInterface, RTDEReceiveInterface
@@ -54,14 +54,6 @@ class RtdeSession:
                     pass
         self._control = None
         self._receive = None
-
-    def set_tcp(self, pose: list[float]) -> None:
-        pose = validate_tcp_pose(pose)
-        self._require_control().setTcp(pose)
-
-    def set_payload(self, mass_kg: float, cog: list[float]) -> None:
-        mass_kg, cog = validate_payload(mass_kg, cog)
-        self._require_control().setPayload(mass_kg, cog)
 
     def zero_ft_sensor(self) -> None:
         self._require_control().zeroFtSensor()

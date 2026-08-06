@@ -1,4 +1,4 @@
-"""YAML IO and validators for UR TCP / payload / FT calibration."""
+"""YAML IO for arm calibration records (pendant TCP/payload + FT metadata)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ VALID_ARMS = ("left", "right")
 
 def default_calib_dir() -> Path:
     """Repo-root ``calibration/`` (parent of ``src/``)."""
-    # .../geodude-teleoperation/src/geodude_teleoperation/calibration/io.py
     return Path(__file__).resolve().parents[3] / "calibration"
 
 
@@ -32,23 +31,6 @@ def parse_float_list(text: str, expected_len: int) -> list[float]:
         return [float(p) for p in parts]
     except ValueError as exc:
         raise ValueError(f"non-numeric value in list: {text!r}") from exc
-
-
-def validate_tcp_pose(pose: list[float]) -> list[float]:
-    values = [float(v) for v in pose]
-    if len(values) != 6:
-        raise ValueError(f"tcp pose must have length 6 [x,y,z,rx,ry,rz], got {len(values)}")
-    return values
-
-
-def validate_payload(mass_kg: float, cog: list[float]) -> tuple[float, list[float]]:
-    mass = float(mass_kg)
-    if mass <= 0.0:
-        raise ValueError(f"payload mass_kg must be > 0, got {mass}")
-    cog_vals = [float(v) for v in cog]
-    if len(cog_vals) != 3:
-        raise ValueError(f"payload cog must have length 3, got {len(cog_vals)}")
-    return mass, cog_vals
 
 
 def validate_wrench(wrench: list[float]) -> list[float]:

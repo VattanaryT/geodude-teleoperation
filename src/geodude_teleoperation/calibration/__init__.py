@@ -1,4 +1,4 @@
-"""UR TCP / payload / FT calibration tools."""
+"""UR FT sensor tools (TCP/payload come from the teach pendant)."""
 
 from geodude_teleoperation.calibration.io import (
     arm_yaml_path,
@@ -7,8 +7,6 @@ from geodude_teleoperation.calibration.io import (
     merge_section,
     parse_float_list,
     save_arm_calib,
-    validate_payload,
-    validate_tcp_pose,
     validate_wrench,
 )
 
@@ -19,7 +17,5 @@ __all__ = [
     "merge_section",
     "parse_float_list",
     "save_arm_calib",
-    "validate_payload",
-    "validate_tcp_pose",
     "validate_wrench",
 ]

@@ -7,8 +7,7 @@ from geodude_teleoperation.calibration.io import (
     merge_section,
     parse_float_list,
     save_arm_calib,
-    validate_payload,
-    validate_tcp_pose,
+    validate_wrench,
 )
 
 
@@ -21,42 +20,38 @@ def test_parse_float_list_bad_len():
         parse_float_list("1,2", 3)
 
 
-def test_validate_tcp_pose_ok():
-    assert validate_tcp_pose([0, 0, 0.1, 0, 0, 0]) == [0.0, 0.0, 0.1, 0.0, 0.0, 0.0]
+def test_validate_wrench_ok():
+    assert validate_wrench([0, 0, 1, 0, 0, 0]) == [0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
 
 
-def test_validate_tcp_pose_bad_len():
+def test_validate_wrench_bad_len():
     with pytest.raises(ValueError):
-        validate_tcp_pose([0, 0, 0.1])
-
-
-def test_validate_payload_rejects_nonpositive_mass():
-    with pytest.raises(ValueError):
-        validate_payload(0.0, [0, 0, 0])
-
-
-def test_validate_payload_ok():
-    mass, cog = validate_payload(0.98, [0.01, -0.02, 0.05])
-    assert mass == 0.98
-    assert cog == [0.01, -0.02, 0.05]
+        validate_wrench([0, 0, 1])
 
 
 def test_merge_preserves_other_sections(tmp_path: Path):
     path = tmp_path / "right.yaml"
     data = {
         "arm": "right",
-        "tcp": {"pose": [0.0] * 6, "frame": "tool0", "source": "manual"},
+        "tcp": {"pose": [0.0] * 6, "frame": "tool0", "source": "pendant"},
+        "payload": {"mass_kg": 0.49, "cog": [0.019, -0.033, 0.03]},
     }
     save_arm_calib(path, data)
     loaded = load_arm_calib(path)
     merged = merge_section(
         loaded,
         "right",
-        "payload",
-        {"mass_kg": 0.98, "cog": [0.01, 0.0, 0.05], "source": "manual"},
+        "ft_sensor",
+        {
+            "zeroed_at": "2026-08-06T00:00:00-07:00",
+            "bias_wrench": [0.0] * 6,
+            "sample_count": 10,
+            "note": "",
+        },
     )
     save_arm_calib(path, merged)
     again = load_arm_calib(path)
     assert again["tcp"]["pose"] == [0.0] * 6
-    assert again["payload"]["mass_kg"] == 0.98
+    assert again["payload"]["mass_kg"] == 0.49
+    assert again["ft_sensor"]["sample_count"] == 10
     assert "updated_at" in again

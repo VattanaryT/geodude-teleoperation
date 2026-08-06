@@ -13,15 +13,7 @@ from geodude_teleoperation.calibration import rtde_session as rs
 class FakeControl:
     def __init__(self, ip: str):
         self.ip = ip
-        self.tcp = None
-        self.payload = None
         self.zeroed = False
-
-    def setTcp(self, pose):
-        self.tcp = list(pose)
-
-    def setPayload(self, mass, cog):
-        self.payload = (float(mass), list(cog))
 
     def zeroFtSensor(self):
         self.zeroed = True
@@ -54,13 +46,9 @@ def fake_ur_rtde(monkeypatch):
     return FakeControl, FakeReceive
 
 
-def test_set_tcp_payload_zero(fake_ur_rtde):
+def test_zero_ft(fake_ur_rtde):
     with rs.RtdeSession("192.168.1.20") as session:
-        session.set_tcp([0.0, 0.0, 0.15, 0.0, 0.0, 0.0])
-        session.set_payload(0.98, [0.01, 0.0, 0.05])
         session.zero_ft_sensor()
-        assert session._control.tcp[2] == 0.15
-        assert session._control.payload[0] == 0.98
         assert session._control.zeroed is True
 
 
