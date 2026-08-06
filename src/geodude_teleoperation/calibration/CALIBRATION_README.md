@@ -1,87 +1,94 @@
-# Force/torque calibration (pendant for TCP / payload)
+# Calibration tools (pendant TCP / payload)
 
-TCP and payload are calibrated on the **UR teach pendant**. This package only
-helps with the **force/torque sensor**: sample bias, optionally `zeroFtSensor()`,
-and record results under `calibration/<arm>.yaml`.
+TCP and payload are calibrated on the **UR teach pendant**. This package provides:
 
-Pendant TCP/payload values may still be stored in that YAML by hand (as on
-`right.yaml`) for documentation — this tool does not set them on the robot.
+1. **FT sensor** zero / bias recording  
+2. **Tag extrinsics** validation from `ee_object_calib_recorder` marks (multi-view + tip-contact)
 
 ## Setup
 
 ```bash
-pip install 'geodude-teleoperation[ur]'   # ur-rtde for live FT
-```
-
-```bash
+pip install 'geodude-teleoperation[ur]'   # only needed for live FT
 PYTHONPATH=src python -m geodude_teleoperation.calibration --help
-# or: geodude-calibrate --help
 ```
 
-## Workflow
+---
 
-1. Set TCP + payload on the pendant (already done for right).
-2. Hold the arm still in free space (tool mounted).
-3. Sample and zero FT; confirm residual wrench is near zero and responds to a light push.
+## FT sensor
 
 ```bash
-cd /path/to/geodude-teleoperation
-
 PYTHONPATH=src python -m geodude_teleoperation.calibration ft \
   --arm right --ip 192.168.1.2 --samples 100 --apply --yes \
   --note "still; tool mounted"
-
-PYTHONPATH=src python -m geodude_teleoperation.calibration show --arm right
 ```
-
-## Commands
 
 | Command | Purpose |
 |---------|---------|
-| `ft` | Average `ActualTCPForce`, write `ft_sensor` to YAML; `--apply` → `zeroFtSensor()` |
+| `ft` | Sample `ActualTCPForce`, write `ft_sensor`; `--apply` → `zeroFtSensor()` |
 | `show` | Print `calibration/<arm>.yaml` |
 
-Shared flags: `--arm {left,right}`, `--calib-dir`, `--ip`.
+---
 
-`ft` extras: `--samples` (default 100), `--note`, `--bias Fx,Fy,Fz,Tx,Ty,Tz` (skip live sample), `--apply`, `--yes`.
+## Tag extrinsics validation
 
-## Sanity checks after zero
+Uses marks from `bimanual` `ee_object_calib_recorder` (`session/marked/<id>/<cam>/`).
 
-| Check | Expect |
-|--------|--------|
-| Still in free space | Force ≈ 0 ± ~1–2 N |
-| Reorient in air | Stays near zero if pendant payload/CoG is good |
-| Light push on tool | Clear force spike; release → near zero |
+**Tip** = EE frame origin in the mark (`ee_frame`, usually `*_tool0` with pendant TCP in that TF). No extra tip offset.
+
+### What it checks
+
+| Mode | Question answered |
+|------|-------------------|
+| `multiview` | Across free-space views, is `T_tag_base` consistent? (tag known wrt EE/base) |
+| `tip-contact` | With tip on the tag, is tip ≈ tag and cam↔tag ≈ cam↔tip? |
+| `both` (default) | Both of the above |
+
+`T_tag_base = T_EE_base @ T_cam_EE @ T_tag_cam` (same as the recorder).
+
+### Operator procedure
+
+1. Record several **free-space** marks where the wrist camera sees the tag (different EE poses).
+2. Optionally record **tip-contact** mark(s): touch TCP tip to tag center, mark.
+3. Run:
+
+```bash
+PYTHONPATH=src python -m geodude_teleoperation.calibration tag-extrinsics \
+  --arm right \
+  --session /path/to/ee_object_calib/<timestamp> \
+  --cam <wrist_cam_name> \
+  --tag-id 0 \
+  --mode both \
+  --contact-marks 0003
+```
+
+Omit `--contact-marks` to score tip-contact on **all** loaded marks (only do that if every mark is a tip-touch).
+
+Thresholds (defaults): `--max-trans 0.005`, `--max-rot 2.0` (deg), `--max-tip-tag 0.005`, `--max-cam 0.01`.
+
+Exit **0** = pass, **2** = fail / bad input. Summary is merged into `calibration/<arm>.yaml` under `tag_extrinsics` (use `--no-save` to skip).
+
+### Interpreting failures
+
+| Failure | Likely cause |
+|---------|----------------|
+| Multi-view Δt / ΔR large | Wrist-cam calib (`T_cam_EE`) or TF / EE frame mismatch |
+| Tip↔tag large at contact | Pendant TCP not aligned with mark `ee_frame`, or tip not on tag center |
+| Cam err large while tip↔tag small | Inconsistent `T_cam_EE` vs tag detection |
+
+---
 
 ## YAML
 
-`ft` merges only the `ft_sensor` block (and optional `robot_ip`). Existing
-`tcp` / `payload` keys are left alone.
-
-```yaml
-ft_sensor:
-  zeroed_at: "..."
-  bias_wrench: [Fx, Fy, Fz, Tx, Ty, Tz]
-  sample_count: 100
-  note: "still; tool mounted"
-```
-
-## Exit codes
-
-| Code | Meaning |
-|------|---------|
-| 0 | Success |
-| 2 | Validation error |
-| 1 | RTDE / import / connection failure |
+`ft` / `tag-extrinsics` merge only their sections. Existing `tcp` / `payload` keys are preserved.
 
 ## Module layout
 
 | File | Role |
 |------|------|
-| `cli.py` | `ft` / `show` entrypoint |
+| `cli.py` | `ft` / `show` / `tag-extrinsics` |
+| `tag_extrinsics.py` | Multi-view + tip-contact scoring |
 | `io.py` | YAML load/save/merge |
-| `rtde_session.py` | `zeroFtSensor` / wrench average |
-| `ft_sensor.py` | section builder + helpers |
+| `rtde_session.py` / `ft_sensor.py` | FT hardware helpers |
 
 ## Tests
 
