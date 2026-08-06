@@ -9,6 +9,7 @@ dependencies = [
     "trimesh",
     "rtree",
     "pyspacemouse",
+    "pyyaml",
     "diffused_fields @ git+https://github.com/loewt/diffused_fields",
 ]
 
@@ -16,6 +17,12 @@ dependencies = [
 viz = [
     "gafropy[viz]",
 ]
+ur = [
+    "ur-rtde",
+]
+
+[project.scripts]
+geodude-calibrate = "geodude_teleoperation.calibration.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
