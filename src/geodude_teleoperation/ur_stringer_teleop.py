@@ -376,8 +376,37 @@ def run_mujoco(args: argparse.Namespace) -> int:
 
 
 def run_rtde(args: argparse.Namespace) -> int:
-    print("error: RTDE backend not implemented until Task 9", file=sys.stderr)
-    return 1
+    import numpy as np
+
+    from geodude_teleoperation.contact_wos_vf import ContactWosOrientationField
+    from geodude_teleoperation.controller import TeleoperationController
+    from geodude_teleoperation.frames import load_T_tag0_base, warn_tip_offset_xy
+    from geodude_teleoperation.rtde_control_loop import run_rtde_loop
+    from geodude_teleoperation.teleop_state import TeleopState
+
+    tip_offset = np.asarray(args.tip_offset, dtype=float)
+    warning = warn_tip_offset_xy(tip_offset)
+    if warning is not None:
+        print(warning)
+
+    T_tag0_base = load_T_tag0_base(args.T_tag0_base)
+    pcloud, wos = _load_field_bundle(args)
+
+    vf = ContactWosOrientationField(
+        pcloud,
+        wos,
+        tip_offset=tip_offset,
+        contact_threshold=args.contact_threshold,
+        T_tag0_base=T_tag0_base,
+        query_radius=args.query_radius,
+        fit_mode=args.fit_mode,
+    )
+
+    controller = TeleoperationController(max_joint_velocity=args.max_joint_velocity)
+    controller.set_virtual_fixture(vf)
+
+    state = TeleopState()
+    return run_rtde_loop(args, (pcloud, wos), vf, controller, state)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
