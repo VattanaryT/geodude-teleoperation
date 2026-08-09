@@ -11,8 +11,9 @@ Kinematics v1 (Task 9):
   one-time warning; TCP-based VF queries still run.
 
 Live TF lookup is deferred to Task 10; until then use ``--T-tag0-base`` (identity
-default, same as MuJoCo). If ``--base-frame`` / ``--tag0-frame`` are set without a
-working TF helper, ``tf_ok=False`` and motion is refused.
+default, same as MuJoCo). If ``--base-frame`` / ``--tag0-frame`` are set but live TF
+is unavailable or stale, fall back to fixed ``--T-tag0-base`` (warn once).
+``tf_ok=False`` only when neither live TF nor fixed ``T`` is usable.
 """
 
 from __future__ import annotations
@@ -147,11 +148,15 @@ def ee_motor_from_tcp_pose(tcp_pose: Sequence[float]):
     return _FallbackMotor(_Translator(), R)
 
 
+_live_tf_fallback_warned = False
+
+
 def resolve_T_tag0_base(args) -> tuple[np.ndarray, bool, float]:
     """Resolve ``T_tag0_base`` for this tick (Task 10 TF stub deferred).
 
     Returns ``(T, tf_ok, tf_age_ms)``. ``T`` is always defined (never dangling).
     """
+    global _live_tf_fallback_warned
     from geodude_teleoperation.frames import load_T_tag0_base
 
     try:
@@ -161,7 +166,10 @@ def resolve_T_tag0_base(args) -> tuple[np.ndarray, bool, float]:
     except ImportError:
         has_lookup = False
 
-    if has_lookup and args.base_frame and args.tag0_frame:
+    live_tf_requested = bool(args.base_frame and args.tag0_frame)
+    live_tf_failed = False
+
+    if has_lookup and live_tf_requested:
         from geodude_teleoperation.frames import lookup_T_tag0_base_tf
 
         max_age_s = getattr(args, "tf_max_age_s", 0.5)
@@ -170,11 +178,29 @@ def resolve_T_tag0_base(args) -> tuple[np.ndarray, bool, float]:
         )
         if T is not None:
             return np.asarray(T, dtype=float), True, float(age_ms or 0.0)
+        live_tf_failed = True
+    elif live_tf_requested:
+        live_tf_failed = True
 
-    if args.base_frame and args.tag0_frame:
+    try:
+        T = load_T_tag0_base(args.T_tag0_base)
+    except (ValueError, OSError, KeyError) as exc:
+        if not _live_tf_fallback_warned and live_tf_failed:
+            print(
+                "warning: live TF unavailable and fixed T_tag0_base failed "
+                f"({exc}); refusing motion (speedJ(0))",
+                file=sys.stderr,
+            )
+            _live_tf_fallback_warned = True
         return np.eye(4, dtype=float), False, float("nan")
 
-    T = load_T_tag0_base(args.T_tag0_base)
+    if live_tf_failed and not _live_tf_fallback_warned:
+        print(
+            "warning: live TF unavailable; using fixed T_tag0_base",
+            file=sys.stderr,
+        )
+        _live_tf_fallback_warned = True
+
     return T, True, 0.0
 
 
@@ -363,7 +389,7 @@ def run_rtde_loop(
             T_tag0_base, tf_ok, tf_age_ms = resolve_T_tag0_base(args)
             if not tf_ok and not tf_warned:
                 print(
-                    "warning: live TF unavailable; refusing motion (speedJ(0))",
+                    "warning: T_tag0_base unavailable; refusing motion (speedJ(0))",
                     file=sys.stderr,
                 )
                 tf_warned = True
