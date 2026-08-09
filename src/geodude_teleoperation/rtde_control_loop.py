@@ -11,10 +11,12 @@ Kinematics v1 (Task 9):
   one-time warning; TCP-based VF queries still run.
 
 Live TF via ``lookup_T_tag0_base_tf`` when ROS tf2 is available; otherwise fall
-back to fixed ``--T-tag0-base`` (warn once). If ``--base-frame`` / ``--tag0-frame``
-are set but live lookup fails, ``tf_age_ms`` is ``nan``. ``tf_ok=False`` only when
-neither live TF nor fixed ``T`` is usable. Calibrate mode may show ``tag_vs_tf_mm``
-when live TF and AprilTag chain inputs are both available (enable stays manual).
+back to an explicit ``--T-tag0-base`` file (warn once, ``tf_ok=True``). If live TF
+is requested but unavailable and ``--T-tag0-base`` was not provided (implicit
+identity), ``T`` is identity but ``tf_ok=False`` so motion is refused.
+``tf_age_ms`` is ``nan`` when live lookup fails. Calibrate mode may show
+``tag_vs_tf_mm`` when live TF and AprilTag chain inputs are both available
+(enable stays manual).
 """
 
 from __future__ import annotations
@@ -312,12 +314,23 @@ def resolve_T_tag0_base(args, *, buffer=None) -> tuple[np.ndarray, bool, float]:
             _live_tf_fallback_warned = True
         return np.eye(4, dtype=float), False, float("nan")
 
-    if live_tf_failed and not _live_tf_fallback_warned:
-        print(
-            "warning: live TF unavailable; using fixed T_tag0_base",
-            file=sys.stderr,
-        )
-        _live_tf_fallback_warned = True
+    if live_tf_failed:
+        if args.T_tag0_base is None:
+            if not _live_tf_fallback_warned:
+                print(
+                    "warning: live TF unavailable and no fixed T_tag0_base; "
+                    "refusing motion (speedJ(0))",
+                    file=sys.stderr,
+                )
+                _live_tf_fallback_warned = True
+            return T, False, tf_age_ms
+
+        if not _live_tf_fallback_warned:
+            print(
+                "warning: live TF unavailable; using fixed T_tag0_base",
+                file=sys.stderr,
+            )
+            _live_tf_fallback_warned = True
 
     return T, True, tf_age_ms if live_tf_requested else 0.0
 
@@ -449,6 +462,7 @@ def run_rtde_loop(
         print(tip_warning)
 
     kin = None if args.dry_run else _GafropyKinematicsBridge.try_create()
+    kin_ok = kin is not None
     kin_warned = False
     tf_warned = False
     apriltag_warned = False
@@ -571,31 +585,34 @@ def run_rtde_loop(
                             file=sys.stderr,
                         )
                         kin_warned = True
+                    kin_ok = False
                     ee = ee_motor_from_tcp_pose(rtde_state["tcp_pose"])
             else:
                 ee = ee_motor_from_tcp_pose(rtde_state["tcp_pose"])
 
             vf.update_from_state(ee, T_tag0_base)
 
-            if state.vf_enabled and state.motion_enabled and not args.dry_run and kin is not None:
+            if state.vf_enabled and state.motion_enabled and not args.dry_run and kin_ok:
                 projected = vf.project(ee)
                 controller.get_objective().set_target(projected)
 
             twist = pending_twist["twist"]
+            fresh_command = False
             if twist is not None:
                 pending_twist["twist"] = None
                 if state.commands_allowed(
                     dry_run=args.dry_run, fault=fault, tf_ok=tf_ok
                 ):
-                    if kin is not None:
+                    if kin_ok:
                         controller.update_command(twist)
+                        fresh_command = True
 
             qdot = np.zeros(6, dtype=float)
             qdot_norm = 0.0
             allowed = state.commands_allowed(
                 dry_run=args.dry_run, fault=fault, tf_ok=tf_ok
             )
-            if allowed and not args.dry_run and kin is not None and session.control_open:
+            if allowed and not args.dry_run and kin_ok and session.control_open:
                 try:
                     qdot = kin.compute_qdot(controller)
                     qdot = apply_watchdog(
@@ -622,7 +639,8 @@ def run_rtde_loop(
                         watchdog_s=watchdog_s,
                     )
                     session.speedj(send_qdot, args.rtde_accel)
-                    last_command_time = now
+                    if fresh_command:
+                        last_command_time = now
                 except RuntimeError:
                     pass
 

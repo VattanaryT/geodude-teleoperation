@@ -129,6 +129,35 @@ def test_watchdog_zeros(fake_ur_rtde, monkeypatch):
     session.close()
 
 
+def test_watchdog_not_refreshed_by_zero_speedj_ticks():
+    """Gated speedJ(0) ticks must not reset the watchdog clock."""
+    last_command_time = 0.0
+    watchdog_s = 0.5
+    fresh_command = False
+
+    for now in (0.1, 0.2, 0.3, 0.4, 0.5, 0.6):
+        send_qdot = np.zeros(6)
+        send_qdot = rcl.apply_watchdog(
+            send_qdot,
+            last_command_time=last_command_time,
+            now=now,
+            watchdog_s=watchdog_s,
+        )
+        assert np.allclose(send_qdot, 0.0)
+        if fresh_command:
+            last_command_time = now
+        fresh_command = False
+
+    assert rcl.watchdog_is_stale(last_command_time, 0.6, watchdog_s=watchdog_s)
+    qdot = rcl.apply_watchdog(
+        np.ones(6),
+        last_command_time=last_command_time,
+        now=0.6,
+        watchdog_s=watchdog_s,
+    )
+    assert np.allclose(qdot, 0.0)
+
+
 def test_resolve_T_fixed_identity():
     args = MagicMock()
     args.base_frame = None
@@ -149,6 +178,24 @@ def test_resolve_T_live_tf_unavailable():
     args.T_tag0_base = None
     T, tf_ok, tf_age_ms = rcl.resolve_T_tag0_base(args)
     assert np.allclose(T, np.eye(4))
+    assert tf_ok is False
+    assert np.isnan(tf_age_ms)
+
+
+def test_resolve_T_live_tf_fallback_explicit_file(tmp_path):
+    rcl._live_tf_fallback_warned = False
+    rcl._ros_tf_unavailable_warned = False
+    fixed = np.eye(4)
+    fixed[:3, 3] = [0.1, 0.2, 0.3]
+    path = tmp_path / "T_tag0_base.npy"
+    np.save(path, fixed)
+
+    args = MagicMock()
+    args.base_frame = "base"
+    args.tag0_frame = "tag_0"
+    args.T_tag0_base = path
+    T, tf_ok, tf_age_ms = rcl.resolve_T_tag0_base(args)
+    assert np.allclose(T, fixed)
     assert tf_ok is True
     assert np.isnan(tf_age_ms)
 
