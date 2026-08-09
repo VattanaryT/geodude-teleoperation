@@ -83,13 +83,6 @@ class DuckMotor:
         return Rotation.from_matrix(self._R)
 
 
-def _make_motor(p, R=None):
-    gafropy = pytest.importorskip("gafropy")
-    translator = gafropy.Translator(p[0], p[1], p[2])
-    rotor = gafropy.Rotor.from_matrix(np.eye(3) if R is None else R)
-    return gafropy.Motor(translator, rotor)
-
-
 def test_tip_tag0_query_path_pure_numpy():
     """Tip → tag_0 → field query without gafropy."""
     pc = _planar_cloud()
@@ -116,7 +109,6 @@ def test_tip_tag0_query_path_pure_numpy():
 
 
 def test_get_distance_is_abs_cached():
-    gafropy = pytest.importorskip("gafropy")
     pc = _planar_cloud()
     vf = ContactWosOrientationField(
         pc,
@@ -127,7 +119,7 @@ def test_get_distance_is_abs_cached():
         fit_mode="plane",
         query_radius=0.05,
     )
-    ee_above = _make_motor(np.array([0.0, 0.0, 0.02]))
+    ee_above = DuckMotor(np.array([0.0, 0.0, 0.02]))
     vf.update_from_state(ee_above)
     d = vf.get_distance(np.array([0, 0, 0.02]))
     assert d >= 0
@@ -135,7 +127,6 @@ def test_get_distance_is_abs_cached():
 
 
 def test_continuity_flip(monkeypatch):
-    pytest.importorskip("gafropy")
     pc = _planar_cloud()
     vf = ContactWosOrientationField(
         pc,
@@ -165,7 +156,7 @@ def test_continuity_flip(monkeypatch):
         _fake_query,
     )
 
-    ee = _make_motor(np.array([0.0, 0.0, 0.02]))
+    ee = DuckMotor(np.array([0.0, 0.0, 0.02]))
     vf.update_from_state(ee)
     R_after_first = vf.status["R_field_base"].copy()
     vf.update_from_state(ee)
@@ -178,7 +169,6 @@ def test_continuity_flip(monkeypatch):
 
 
 def test_project_keeps_translation():
-    gafropy = pytest.importorskip("gafropy")
     pc = _planar_cloud()
     vf = ContactWosOrientationField(
         pc,
@@ -190,11 +180,13 @@ def test_project_keeps_translation():
         query_radius=0.05,
     )
     p = np.array([0.05, -0.03, 0.04])
-    ee = _make_motor(p)
+    ee = DuckMotor(p)
     vf.update_from_state(ee)
     projected = vf.project(ee)
     tr = projected.get_translator()
     assert np.allclose([tr.x(), tr.y(), tr.z()], p, atol=1e-9)
+    R_proj = projected.get_rotor().as_matrix()
+    assert np.allclose(R_proj, vf.status["R_field_base"], atol=1e-9)
 
 
 def test_set_T_tag0_base_updates_query_frame():

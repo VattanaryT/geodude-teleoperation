@@ -57,6 +57,32 @@ def _tcp_pose_from_motor(ee_motor) -> tuple[np.ndarray, np.ndarray]:
     return p_tcp, R_tcp
 
 
+class _FallbackMotor:
+    """Minimal motor when gafropy is unavailable (CI / tests)."""
+
+    def __init__(self, translator, R: np.ndarray):
+        self._translator = translator
+        self._R = np.asarray(R, dtype=float).reshape(3, 3)
+
+    def get_translator(self):
+        return self._translator
+
+    def get_rotor(self):
+        return Rotation.from_matrix(self._R)
+
+
+def _motor_with_field_orientation(proposed_reference, R_field_base: np.ndarray):
+    """Keep proposed translator; replace orientation with R_field_base."""
+    translator = proposed_reference.get_translator()
+    try:
+        import gafropy
+
+        rotor = gafropy.Rotor.from_matrix(R_field_base)
+        return gafropy.Motor(translator, rotor)
+    except ImportError:
+        return _FallbackMotor(translator, R_field_base)
+
+
 @dataclass
 class VFStatus:
     signed_d: float
@@ -107,6 +133,7 @@ class ContactWosOrientationField:
 
         self._last_R_tag0: np.ndarray | None = None
         self._last_R_field_base: np.ndarray | None = None
+        self._last_ee_motor = None
         self._cache_warm = False
         self._status: VFStatus | None = None
 
@@ -163,24 +190,26 @@ class ContactWosOrientationField:
             query_ms=query_ms,
             R_field_base=R_field_base,
         )
+        self._last_ee_motor = ee_motor
         self._cache_warm = True
 
     def get_distance(self, position) -> float:
-        """Return cached abs(signed_d) from the last tip query (no re-query)."""
-        del position  # matches controller call site; distance comes from cache
-        if self._status is None:
-            return 0.0
+        """Return cached abs(signed_d) from the last tip query."""
+        if not self._cache_warm:
+            if self._last_ee_motor is not None:
+                self.update_from_state(self._last_ee_motor)
+            else:
+                return float("nan")
+        assert self._status is not None
         return abs(self._status.signed_d)
 
     def project(self, proposed_reference):
-        import gafropy
-
         if not self._cache_warm:
             self.update_from_state(proposed_reference)
         assert self._last_R_field_base is not None
-        translator = proposed_reference.get_translator()
-        rotor = gafropy.Rotor.from_matrix(self._last_R_field_base)
-        return gafropy.Motor(translator, rotor)
+        return _motor_with_field_orientation(
+            proposed_reference, self._last_R_field_base
+        )
 
     @property
     def status(self) -> dict[str, Any]:
