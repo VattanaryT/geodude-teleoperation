@@ -5,6 +5,8 @@ requires-python = ">=3.10"
 dependencies = [
     "gafropy",
     "numpy",
+    "scipy",
+    "open3d",
     "viser",
     "trimesh",
     "rtree",
