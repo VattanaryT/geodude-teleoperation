@@ -1,5 +1,25 @@
-import gafropy
 import numpy as np
+
+try:
+    import gafropy
+    _VelocityControllerBase = gafropy.control.VelocityController
+except ImportError:
+    gafropy = None
+
+    class _VelocityControllerBase:
+        pass
+
+
+def qdot_from_error(error, jacobian, *, gain, damping, max_joint_velocity):
+    error = np.asarray(error)
+    jacobian = np.asarray(jacobian)
+    j_inverse = np.linalg.inv(
+        jacobian.T @ jacobian + damping**2 * np.eye(jacobian.shape[1]))
+    qdot = -gain * j_inverse @ jacobian.T @ error
+    speed = np.linalg.norm(qdot)
+    if speed > max_joint_velocity:
+        qdot = qdot * (max_joint_velocity / speed)
+    return qdot
 
 
 def _adaptive_linear_scale(distance, min_factor, max_factor, offset=0.01, scale_range=0.075):
@@ -22,7 +42,7 @@ def _adaptive_linear_scale(distance, min_factor, max_factor, offset=0.01, scale_
     return min(max_factor, max(min_factor, factor))
 
 
-class TeleoperationController(gafropy.control.VelocityController):
+class TeleoperationController(_VelocityControllerBase):
     """Direct proportional-velocity teleoperation toward a composed, fixture-corrected
     reference pose -- shares AdmittanceTeleoperationController's target-composition pattern
     exactly (see its docstring for the full rationale), differing only in the control law
@@ -60,17 +80,13 @@ class TeleoperationController(gafropy.control.VelocityController):
     def compute_control_command(self, task_space_state, state):
         error = np.asarray(task_space_state.get_error())
         jacobian = np.asarray(task_space_state.get_jacobian())
-
-        j_inverse = np.linalg.inv(
-            jacobian.T @ jacobian + self._damping**2 * np.eye(jacobian.shape[1]))
-
-        qdot = -self._gain * j_inverse @ jacobian.T @ error
-
-        speed = np.linalg.norm(qdot)
-        if speed > self._max_joint_velocity:
-            qdot = qdot * (self._max_joint_velocity / speed)
-
-        return qdot
+        return qdot_from_error(
+            error,
+            jacobian,
+            gain=self._gain,
+            damping=self._damping,
+            max_joint_velocity=self._max_joint_velocity,
+        )
 
     def set_virtual_fixture(self, vf):
         self.vf = vf
@@ -109,7 +125,7 @@ class TeleoperationController(gafropy.control.VelocityController):
         self.get_objective().set_target(reference)
 
 
-class AdmittanceTeleoperationController(gafropy.control.VelocityController):
+class AdmittanceTeleoperationController(_VelocityControllerBase):
 
     def __init__(self, inertia=None, damping=None, stiffness=None, dt=0.001,
                  max_joint_velocity=1.0, min_twist_scaling_factor=1.0,
