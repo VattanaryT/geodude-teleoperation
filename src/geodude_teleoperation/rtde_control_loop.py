@@ -10,10 +10,11 @@ Kinematics v1 (Task 9):
   Without gafropy or if joint sync fails, motion is refused (``speedJ(0)``) with a
   one-time warning; TCP-based VF queries still run.
 
-Live TF lookup is deferred to Task 10; until then use ``--T-tag0-base`` (identity
-default, same as MuJoCo). If ``--base-frame`` / ``--tag0-frame`` are set but live TF
-is unavailable or stale, fall back to fixed ``--T-tag0-base`` (warn once).
-``tf_ok=False`` only when neither live TF nor fixed ``T`` is usable.
+Live TF via ``lookup_T_tag0_base_tf`` when ROS tf2 is available; otherwise fall
+back to fixed ``--T-tag0-base`` (warn once). If ``--base-frame`` / ``--tag0-frame``
+are set but live lookup fails, ``tf_age_ms`` is ``nan``. ``tf_ok=False`` only when
+neither live TF nor fixed ``T`` is usable. Calibrate mode may show ``tag_vs_tf_mm``
+when live TF and AprilTag chain inputs are both available (enable stays manual).
 """
 
 from __future__ import annotations
@@ -149,38 +150,155 @@ def ee_motor_from_tcp_pose(tcp_pose: Sequence[float]):
 
 
 _live_tf_fallback_warned = False
+_ros_tf_unavailable_warned = False
 
 
-def resolve_T_tag0_base(args) -> tuple[np.ndarray, bool, float]:
-    """Resolve ``T_tag0_base`` for this tick (Task 10 TF stub deferred).
+class _RosTfContext:
+    """Optional ROS tf2 buffer for live ``T_tag0_base`` lookup."""
+
+    def __init__(self):
+        self.buffer = None
+        self._node = None
+        self._listener = None
+        try:
+            import rclpy
+            from tf2_ros import Buffer, TransformListener
+        except ImportError:
+            return
+        try:
+            if not rclpy.ok():
+                rclpy.init()
+            self._node = rclpy.create_node("geodude_stringer_teleop_tf")
+            self.buffer = Buffer()
+            self._listener = TransformListener(self.buffer, self._node)
+        except Exception:
+            self.buffer = None
+            self._node = None
+            self._listener = None
+
+    def spin_once(self) -> None:
+        if self._node is None:
+            return
+        try:
+            import rclpy
+
+            rclpy.spin_once(self._node, timeout_sec=0.0)
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        if self._node is None:
+            return
+        try:
+            self._node.destroy_node()
+        except Exception:
+            pass
+
+
+class _RosCameraContext:
+    """Optional latest RGB + intrinsics for AprilTag cross-check."""
+
+    def __init__(self, args):
+        self.rgb = None
+        self.camera_matrix = None
+        self.dist_coeffs = None
+        self._node = None
+        topic = getattr(args, "camera_rgb_topic", None)
+        info_topic = getattr(args, "camera_info_topic", None)
+        if not topic or not info_topic:
+            return
+        try:
+            import rclpy
+            from cv_bridge import CvBridge
+            from sensor_msgs.msg import CameraInfo, Image
+        except ImportError:
+            return
+        try:
+            if not rclpy.ok():
+                rclpy.init()
+            self._node = rclpy.create_node("geodude_stringer_teleop_cam")
+            self._bridge = CvBridge()
+            self._lock = __import__("threading").Lock()
+            self.rgb = None
+            self.camera_matrix = None
+            self.dist_coeffs = None
+
+            def on_rgb(msg: Image) -> None:
+                try:
+                    rgb = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+                except Exception:
+                    return
+                with self._lock:
+                    self.rgb = np.asarray(rgb)
+
+            def on_info(msg: CameraInfo) -> None:
+                k = msg.k
+                camera_matrix = np.array(
+                    [[float(k[0]), 0.0, float(k[2])], [0.0, float(k[4]), float(k[5])], [0.0, 0.0, 1.0]],
+                    dtype=np.float64,
+                )
+                dist = np.array(msg.d, dtype=np.float64) if msg.d else np.zeros(5)
+                with self._lock:
+                    self.camera_matrix = camera_matrix
+                    self.dist_coeffs = dist
+
+            self._node.create_subscription(Image, str(topic), on_rgb, 10)
+            self._node.create_subscription(CameraInfo, str(info_topic), on_info, 10)
+        except Exception:
+            self.rgb = None
+            self.camera_matrix = None
+            self.dist_coeffs = None
+            self._node = None
+
+    def snapshot(self):
+        if self._node is None:
+            return None, None, None
+        try:
+            import rclpy
+
+            rclpy.spin_once(self._node, timeout_sec=0.0)
+        except Exception:
+            pass
+        with self._lock:
+            return self.rgb, self.camera_matrix, self.dist_coeffs
+
+    def close(self) -> None:
+        if self._node is None:
+            return
+        try:
+            self._node.destroy_node()
+        except Exception:
+            pass
+
+
+def resolve_T_tag0_base(args, *, buffer=None) -> tuple[np.ndarray, bool, float]:
+    """Resolve ``T_tag0_base`` for this tick.
 
     Returns ``(T, tf_ok, tf_age_ms)``. ``T`` is always defined (never dangling).
     """
-    global _live_tf_fallback_warned
-    from geodude_teleoperation.frames import load_T_tag0_base
-
-    try:
-        from geodude_teleoperation.frames import lookup_T_tag0_base_tf  # noqa: F401
-
-        has_lookup = True
-    except ImportError:
-        has_lookup = False
+    global _live_tf_fallback_warned, _ros_tf_unavailable_warned
+    from geodude_teleoperation.frames import load_T_tag0_base, lookup_T_tag0_base_tf
 
     live_tf_requested = bool(args.base_frame and args.tag0_frame)
     live_tf_failed = False
+    tf_age_ms = 0.0
 
-    if has_lookup and live_tf_requested:
-        from geodude_teleoperation.frames import lookup_T_tag0_base_tf
-
+    if live_tf_requested:
         max_age_s = getattr(args, "tf_max_age_s", 0.5)
-        T, age_ms = lookup_T_tag0_base_tf(
-            None, args.base_frame, args.tag0_frame, max_age_s
+        T_live, age_ms = lookup_T_tag0_base_tf(
+            buffer, args.base_frame, args.tag0_frame, max_age_s
         )
-        if T is not None:
-            return np.asarray(T, dtype=float), True, float(age_ms or 0.0)
+        if T_live is not None:
+            return np.asarray(T_live, dtype=float), True, float(age_ms or 0.0)
         live_tf_failed = True
-    elif live_tf_requested:
-        live_tf_failed = True
+        tf_age_ms = float("nan")
+        if buffer is None and not _ros_tf_unavailable_warned:
+            print(
+                "warning: live TF requested but ROS tf2 unavailable; "
+                "tf_age_ms=nan",
+                file=sys.stderr,
+            )
+            _ros_tf_unavailable_warned = True
 
     try:
         T = load_T_tag0_base(args.T_tag0_base)
@@ -201,7 +319,17 @@ def resolve_T_tag0_base(args) -> tuple[np.ndarray, bool, float]:
         )
         _live_tf_fallback_warned = True
 
-    return T, True, 0.0
+    return T, True, tf_age_ms if live_tf_requested else 0.0
+
+
+def lookup_live_T_tag0_base(args, *, buffer=None) -> tuple[np.ndarray | None, float | None]:
+    """Return live TF ``T_tag0_base`` when lookup succeeds (for cross-check)."""
+    if not (args.base_frame and args.tag0_frame):
+        return None, None
+    from geodude_teleoperation.frames import lookup_T_tag0_base_tf
+
+    max_age_s = getattr(args, "tf_max_age_s", 0.5)
+    return lookup_T_tag0_base_tf(buffer, args.base_frame, args.tag0_frame, max_age_s)
 
 
 def watchdog_is_stale(last_command_time: float, now: float, *, watchdog_s: float) -> bool:
@@ -323,6 +451,10 @@ def run_rtde_loop(
     kin = None if args.dry_run else _GafropyKinematicsBridge.try_create()
     kin_warned = False
     tf_warned = False
+    apriltag_warned = False
+
+    tf_ctx = _RosTfContext() if (args.base_frame and args.tag0_frame) else None
+    cam_ctx = _RosCameraContext(args) if getattr(args, "calib_meta", None) else None
 
     if not args.dry_run and kin is not None:
         import gafropy as ga
@@ -382,17 +514,50 @@ def run_rtde_loop(
             t0 = time.perf_counter()
             now = time.monotonic()
 
+            if tf_ctx is not None:
+                tf_ctx.spin_once()
+
             rtde_state = session.read_state()
             fault = bool(rtde_state["fault"])
             q = rtde_state["q"]
 
-            T_tag0_base, tf_ok, tf_age_ms = resolve_T_tag0_base(args)
+            tf_buffer = tf_ctx.buffer if tf_ctx is not None else None
+            T_tag0_base, tf_ok, tf_age_ms = resolve_T_tag0_base(args, buffer=tf_buffer)
             if not tf_ok and not tf_warned:
                 print(
                     "warning: T_tag0_base unavailable; refusing motion (speedJ(0))",
                     file=sys.stderr,
                 )
                 tf_warned = True
+
+            tag_vs_tf_mm = None
+            if state.mode == "calibrate":
+                from geodude_teleoperation.tag_crosscheck import resolve_tag_vs_tf_mm
+
+                T_tag_tf, _ = lookup_live_T_tag0_base(args, buffer=tf_buffer)
+                rgb, camera_matrix, dist_coeffs = (
+                    cam_ctx.snapshot() if cam_ctx is not None else (None, None, None)
+                )
+                tag_vs_tf_mm = resolve_tag_vs_tf_mm(
+                    args,
+                    T_tag_tf=T_tag_tf,
+                    tcp_pose=rtde_state["tcp_pose"],
+                    rgb=rgb,
+                    camera_matrix=camera_matrix,
+                    dist_coeffs=dist_coeffs,
+                )
+                if (
+                    getattr(args, "calib_meta", None)
+                    and T_tag_tf is not None
+                    and tag_vs_tf_mm is None
+                    and not apriltag_warned
+                ):
+                    print(
+                        "warning: AprilTag cross-check unavailable "
+                        "(missing camera feed or tag detection)",
+                        file=sys.stderr,
+                    )
+                    apriltag_warned = True
 
             if kin is not None:
                 try:
@@ -466,6 +631,7 @@ def run_rtde_loop(
                 vf.status,
                 qdot_norm=qdot_norm if not args.dry_run else 0.0,
                 tf_age_ms=tf_age_ms,
+                tag_vs_tf_mm=tag_vs_tf_mm,
             )
             print(line, flush=True)
 
@@ -479,5 +645,9 @@ def run_rtde_loop(
         session.close()
         if kin is not None:
             kin.shutdown()
+        if tf_ctx is not None:
+            tf_ctx.close()
+        if cam_ctx is not None:
+            cam_ctx.close()
 
     return 0

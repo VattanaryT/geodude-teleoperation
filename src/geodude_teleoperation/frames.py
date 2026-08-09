@@ -48,3 +48,55 @@ def warn_tip_offset_xy(tip_offset: np.ndarray) -> str | None:
             f"(got {tip.tolist()})"
         )
     return None
+
+
+def transform_msg_to_matrix(transform) -> np.ndarray:
+    """Build 4x4 rigid transform from a geometry_msgs/TransformStamped-like message."""
+    tr = transform.transform.translation
+    q = transform.transform.rotation
+    x, y, z, w = float(q.x), float(q.y), float(q.z), float(q.w)
+    xx, yy, zz = x * x, y * y, z * z
+    xy, xz, yz = x * y, x * z, y * z
+    wx, wy, wz = w * x, w * y, w * z
+    R = np.array(
+        [
+            [1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)],
+            [2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)],
+            [2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)],
+        ],
+        dtype=np.float64,
+    )
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = R
+    T[:3, 3] = [float(tr.x), float(tr.y), float(tr.z)]
+    return T
+
+
+def lookup_T_tag0_base_tf(
+    buffer,
+    base_frame: str,
+    tag0_frame: str,
+    max_age_s: float,
+) -> tuple[np.ndarray | None, float | None]:
+    """Look up ``T_tag0_base`` from TF. Returns ``(T, age_ms)`` or ``(None, None)``."""
+    if buffer is None or not base_frame or not tag0_frame:
+        return None, None
+    try:
+        import rclpy
+    except ImportError:
+        return None, None
+
+    try:
+        when = rclpy.time.Time()
+        timeout = rclpy.duration.Duration(seconds=0.1)
+        t = buffer.lookup_transform(str(base_frame), str(tag0_frame), when, timeout=timeout)
+        T = transform_msg_to_matrix(t)
+        stamp = t.header.stamp
+        stamp_ns = int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+        now_ns = int(rclpy.clock.Clock().now().nanoseconds)
+        age_s = max(0.0, (now_ns - stamp_ns) * 1e-9)
+        if age_s > float(max_age_s):
+            return None, None
+        return T, age_s * 1000.0
+    except Exception:
+        return None, None

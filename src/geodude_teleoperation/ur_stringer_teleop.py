@@ -174,6 +174,39 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Live TF tag_0 frame (rtde)",
     )
     parser.add_argument(
+        "--calib-meta",
+        type=Path,
+        default=None,
+        help="ee_object_calib mark meta JSON with T_cam_EE (AprilTag cross-check)",
+    )
+    parser.add_argument(
+        "--camera-rgb-topic",
+        default=None,
+        help="Wrist RGB image topic for AprilTag cross-check (rtde calibrate)",
+    )
+    parser.add_argument(
+        "--camera-info-topic",
+        default=None,
+        help="CameraInfo topic matching --camera-rgb-topic",
+    )
+    parser.add_argument(
+        "--tag-id",
+        type=int,
+        default=0,
+        help="Origin AprilTag id for cross-check (default 0)",
+    )
+    parser.add_argument(
+        "--tag-size-m",
+        type=float,
+        default=0.04,
+        help="AprilTag edge length in metres (cross-check)",
+    )
+    parser.add_argument(
+        "--tag-family",
+        default="tag36h11",
+        help="AprilTag dictionary family (cross-check)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="No control interface / no motion commands",

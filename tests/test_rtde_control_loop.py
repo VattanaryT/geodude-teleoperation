@@ -142,6 +142,7 @@ def test_resolve_T_fixed_identity():
 
 def test_resolve_T_live_tf_unavailable():
     rcl._live_tf_fallback_warned = False
+    rcl._ros_tf_unavailable_warned = False
     args = MagicMock()
     args.base_frame = "base"
     args.tag0_frame = "tag_0"
@@ -149,7 +150,7 @@ def test_resolve_T_live_tf_unavailable():
     T, tf_ok, tf_age_ms = rcl.resolve_T_tag0_base(args)
     assert np.allclose(T, np.eye(4))
     assert tf_ok is True
-    assert tf_age_ms == 0.0
+    assert np.isnan(tf_age_ms)
 
 
 def test_ee_motor_from_tcp_pose():
