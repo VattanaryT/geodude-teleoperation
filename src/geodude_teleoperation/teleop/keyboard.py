@@ -35,10 +35,18 @@ _KEY_TWIST = {
 
 KEYBOARD_HELP = """\
 Keyboard teleoperation:
+  Blade order [e12,e13,e23, e1i,e2i,e3i] = [angular, linear]
   w/s: +x/-x    a/d: -y/+y    y/x: -z/+z   (linear)
   n/m: e12 +/-  j/k: e13 +/-  u/i: e23 +/-  (angular)
+  With VF on: twist axes are field / R_field (not TCP body); each keypress
+  re-locks orientation to R_field. Idle (no keys) holds current TCP pose.
   Enter: enable motion (calibrate → teleop)
   t: toggle teleoperation    v: toggle virtual fixture    q: quit
+
+In-contact mode (--in-contact):
+  Enter: Align tool-Z → n* first, then Force seeks/holds Fd along n*.
+  w/s a/d: tangent slide in VF local frame (R_motion x/y), not tool body.
+  y/x and angular ignored.  f: freeze/unfreeze n*    t: pause    q: quit
 """
 
 
@@ -50,6 +58,8 @@ def dispatch_key(key: str, *, step, enable_key="\n") -> tuple[str, object]:
         return ("button", 0)
     if key == "v":
         return ("button", 1)
+    if key == "f":
+        return ("button", 2)
     if key == "q":
         return ("quit", None)
     mapping = _KEY_TWIST.get(key)
@@ -61,6 +71,29 @@ def dispatch_key(key: str, *, step, enable_key="\n") -> tuple[str, object]:
     return ("twist", coeffs)
 
 
+def is_contact_tangent_key(key: str) -> bool:
+    """True for field-tangent linear keys used in --in-contact mode."""
+    return key in ("w", "s", "a", "d")
+
+
+def contact_field_linear_from_twist_coeffs(coeffs) -> np.ndarray:
+    """Extract field-frame linear [lx, ly, lz] from blade-order twist array."""
+    arr = np.asarray(coeffs, dtype=float).reshape(6)
+    return arr[3:6].copy()
+
+
+def make_twist(payload):
+    """Build gafropy.Twist when available; otherwise NumpyTwist (same blade order)."""
+    try:
+        import gafropy
+
+        return gafropy.Twist.from_array(payload)
+    except ImportError:
+        from geodude_teleoperation.se3 import NumpyTwist
+
+        return NumpyTwist.from_array(payload)
+
+
 class KeyboardTeleop:
     def __init__(self, step=0.01):
         self._step = step
@@ -70,6 +103,8 @@ class KeyboardTeleop:
         self._on_button = None
         self._on_enable = None
         self._enable_key = "\n"
+        self.last_key = ""
+        self.last_twist_coeffs: np.ndarray | None = None
 
     def start(self, on_twist, on_button=None, on_enable=None, enable_key="\n"):
         """on_twist(twist: gafropy.Twist) is called once per movement keypress
@@ -90,8 +125,6 @@ class KeyboardTeleop:
             self._thread = None
 
     def _run(self):
-        import gafropy
-
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
         try:
@@ -124,7 +157,11 @@ class KeyboardTeleop:
                             self._on_button(payload)
                         continue
                     if kind == "twist":
-                        self._on_twist(gafropy.Twist.from_array(payload))
+                        self.last_key = key
+                        self.last_twist_coeffs = np.asarray(payload, dtype=float).copy()
+                        self._on_twist(make_twist(payload))
+                    else:
+                        self.last_key = key if kind != "ignore" else self.last_key
                 except Exception:
                     # Without this, an exception here (e.g. a numerical issue in the
                     # controller) kills this background thread silently -- keypresses

@@ -1,0 +1,32 @@
+{
+  "name": "T_left_base_vention",
+  "meaning": "Pose of left UR RTDE base (left_base) expressed in vention_frame",
+  "formula": "p_vention = T @ p_left_rtde",
+  "source": "Same rotation as T_right_base_vention; translation from known left_base\u2192vention_frame (-0.33, -0.828, 1.65)",
+  "matrix": [
+    [
+      0.9999999999964795,
+      1.229324325168273e-10,
+      2.6535897905052e-06,
+      -0.33
+    ],
+    [
+      -2.653589793352736e-06,
+      4.6326794879821256e-05,
+      0.9999999989233934,
+      -0.828
+    ],
+    [
+      1.224644680250834e-16,
+      -0.9999999989269142,
+      4.632679488002891e-05,
+      1.65
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ]
+}

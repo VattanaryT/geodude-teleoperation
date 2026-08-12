@@ -1,0 +1,24 @@
+{
+  "object_name": "stringer_layup",
+  "display_name": "stringer layup",
+  "arm": "right",
+  "pcd_frame": "tag_0",
+  "n_vertices": 19390,
+  "voxel_size": 0.004,
+  "source_vertices": [
+    16717,
+    3274
+  ],
+  "source_positions": [
+    [
+      -0.40338975,
+      0.09453375,
+      0.08862274999999999
+    ],
+    [
+      0.029497999999999996,
+      0.085664,
+      0.064053
+    ]
+  ]
+}

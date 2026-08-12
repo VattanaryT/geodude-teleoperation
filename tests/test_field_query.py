@@ -2,7 +2,7 @@ import numpy as np
 import open3d as o3d
 import pytest
 from diffused_fields.manifold import Pointcloud
-from geodude_teleoperation.field_query import query_basis_surface, query_field_basis
+from geodude_teleoperation.field.field_query import query_basis_surface, query_field_basis
 
 
 @pytest.fixture(autouse=True)

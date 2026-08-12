@@ -1,4 +1,8 @@
-from geodude_teleoperation.teleop_state import TeleopState, format_status_line
+from geodude_teleoperation.teleop.teleop_state import (
+    TeleopState,
+    format_status_line,
+    should_emit_status,
+)
 
 
 def test_enable_defaults_teleop_active():
@@ -34,3 +38,10 @@ def test_status_line_has_flags():
     )
     assert "motion_enabled=1" in line
     assert "teleop_active=1" in line
+
+
+def test_should_emit_status_throttles():
+    assert should_emit_status(float("-inf"), 0.0, status_hz=5.0) is True
+    assert should_emit_status(0.0, 0.1, status_hz=5.0) is False
+    assert should_emit_status(0.0, 0.2, status_hz=5.0) is True
+    assert should_emit_status(0.0, 0.01, status_hz=0.0) is True

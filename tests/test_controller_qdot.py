@@ -1,5 +1,5 @@
 import numpy as np
-from geodude_teleoperation.controller import qdot_from_error
+from geodude_teleoperation.teleop.controller import qdot_from_error
 
 
 def test_qdot_scales_and_clamps():

@@ -22,10 +22,13 @@ viz = [
 ur = [
     "ur-rtde",
 ]
+plot = [
+    "matplotlib>=3.8",
+]
 
 [project.scripts]
 geodude-calibrate = "geodude_teleoperation.calibration.cli:main"
-geodude-ur-stringer-teleop = "geodude_teleoperation.ur_stringer_teleop:main"
+geodude-ur-stringer-teleop = "geodude_teleoperation.teleop.ur_stringer_teleop:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

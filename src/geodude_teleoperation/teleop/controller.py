@@ -10,16 +10,38 @@ except ImportError:
         pass
 
 
-def qdot_from_error(error, jacobian, *, gain, damping, max_joint_velocity):
-    error = np.asarray(error)
+def qdot_from_error(
+    error,
+    jacobian,
+    *,
+    gain,
+    damping,
+    max_joint_velocity,
+    return_diag: bool = False,
+):
+    error = np.asarray(error, dtype=float).reshape(-1)
     jacobian = np.asarray(jacobian)
     j_inverse = np.linalg.inv(
         jacobian.T @ jacobian + damping**2 * np.eye(jacobian.shape[1]))
-    qdot = -gain * j_inverse @ jacobian.T @ error
-    speed = np.linalg.norm(qdot)
-    if speed > max_joint_velocity:
-        qdot = qdot * (max_joint_velocity / speed)
-    return qdot
+    qdot_raw = -gain * j_inverse @ jacobian.T @ error
+    speed_raw = float(np.linalg.norm(qdot_raw))
+    clipped = speed_raw > float(max_joint_velocity) + 1e-12
+    qdot = qdot_raw
+    if clipped:
+        qdot = qdot_raw * (float(max_joint_velocity) / speed_raw)
+    if not return_diag:
+        return qdot
+    e = error.reshape(-1)
+    e_pos = float(np.linalg.norm(e[:3])) if e.size >= 3 else float(np.linalg.norm(e))
+    e_rot = float(np.linalg.norm(e[3:6])) if e.size >= 6 else 0.0
+    return qdot, {
+        "err_pos_m": e_pos,
+        "err_rot_rad": e_rot,
+        "err_norm": float(np.linalg.norm(e)),
+        "qdot_unclipped_norm": speed_raw,
+        "qdot_clipped": clipped,
+        "qdot_raw": np.asarray(qdot_raw, dtype=float).reshape(6).copy(),
+    }
 
 
 def _adaptive_linear_scale(distance, min_factor, max_factor, offset=0.01, scale_range=0.075):
@@ -65,7 +87,7 @@ class TeleoperationController(_VelocityControllerBase):
     the twist itself is interpreted in.
     """
 
-    def __init__(self, gain=16.0, damping=0.05, max_joint_velocity=1.0,
+    def __init__(self, gain=4.0, damping=0.05, max_joint_velocity=5.0,
                  min_twist_scaling_factor=1.0, max_twist_scaling_factor=10.0):
         super().__init__()
         self.vf = None

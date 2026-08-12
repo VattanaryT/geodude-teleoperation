@@ -31,6 +31,14 @@ def _format_signed_d(signed_d: float) -> str:
     return f"{signed_d:+.4f}"
 
 
+def should_emit_status(last_emit: float, now: float, *, status_hz: float) -> bool:
+    """Throttle status-line prints. ``status_hz <= 0`` → every tick."""
+    hz = float(status_hz)
+    if hz <= 0.0:
+        return True
+    return (float(now) - float(last_emit)) >= (1.0 / hz)
+
+
 def format_status_line(
     state: TeleopState,
     vf_status: Mapping[str, Any],

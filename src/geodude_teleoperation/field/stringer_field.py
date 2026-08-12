@@ -7,18 +7,19 @@ import numpy as np
 import open3d as o3d
 import yaml
 
-from diffused_fields.core.config import Config
 from diffused_fields.diffusion import PointcloudScalarDiffusion, WalkOnSpheresDiffusion
 from diffused_fields.manifold import Pointcloud
+
+from geodude_teleoperation.paths import pointclouds_config_path
 
 _DEFAULTS = {"voxel_size": 0.004, "normal_orientation": 1}
 
 
 def config_defaults(object_name: str = "stringer_layup") -> dict:
-    """Load voxel_size / normal_orientation from diffused_fields pointclouds.yaml."""
+    """Load voxel_size / normal_orientation from local ``config/pointclouds.yaml``."""
     defaults = dict(_DEFAULTS)
     try:
-        cfg_path = Config.get_pointclouds_config_path()
+        cfg_path = pointclouds_config_path()
         if not cfg_path.exists():
             return defaults
         with cfg_path.open() as f:
@@ -43,12 +44,30 @@ def load_stringer_pointcloud(
     raw = o3d.io.read_point_cloud(str(ply))
     if len(raw.points) == 0:
         raise RuntimeError(f"Empty point cloud: {ply}")
-    pcloud = Pointcloud(
-        vertices=np.asarray(raw.points),
+    return pointcloud_from_points(
+        np.asarray(raw.points),
         voxel_size=voxel_size,
         normal_orientation=normal_orientation,
     )
-    pcloud.object_name = "stringer_layup"
+
+
+def pointcloud_from_points(
+    points: np.ndarray,
+    voxel_size: float,
+    normal_orientation: int,
+    *,
+    object_name: str = "stringer_layup",
+) -> Pointcloud:
+    """Wrap Nx3 points as a Pointcloud (Pointcloud applies ``voxel_size``)."""
+    pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    if pts.size == 0:
+        raise RuntimeError("Empty point cloud")
+    pcloud = Pointcloud(
+        vertices=pts,
+        voxel_size=voxel_size,
+        normal_orientation=normal_orientation,
+    )
+    pcloud.object_name = object_name
     return pcloud
 
 
@@ -112,9 +131,20 @@ def compute_orientation_field(
     field_flow: str = "length",
     end_line_fraction: float = 0.06,
     swap_end_lines: bool = False,
-    diffusion_scalar: float = 2000.0,
+    diffusion_scalar: float = 5000.0,
 ) -> PointcloudScalarDiffusion:
-    """Build scalar diffusion BC and compute local orientation bases."""
+    """Build scalar diffusion BC and compute local orientation bases.
+
+    Defaults match ``diffused_fields_robotics/scripts/stringer_layup_ee_teleop.py``
+    (``diffusion_scalar=5000``, end_lines + length→ends bands).
+
+    ``diffusion_scalar`` is dimensionless diffusion time τ in units of ``h²``
+    (squared mean edge length): ``dt = diffusion_scalar * mean_edge_length**2``.
+    That keeps field smoothness independent of point-cloud density.
+
+    Startup builds the Laplacian / heat operator and surface bases once; WoS
+    queries remain in the real-time control loop via ``build_wos``.
+    """
     sd = PointcloudScalarDiffusion(pcloud, diffusion_scalar=diffusion_scalar)
     if field_mode == "boundary":
         sd.source_vertices = []

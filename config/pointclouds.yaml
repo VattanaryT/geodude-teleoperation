@@ -1,0 +1,13 @@
+# Local stringer layup defaults (operator worktree).
+# Prefer this file over a sibling diffused_fields checkout.
+
+stringer_layup:
+  voxel_size: 0.004
+  normal_orientation: 1
+  scalar_diffusion:
+    source_vertices: [16717, 3274]
+
+stringer_layup_mesh:
+  normal_orientation: 1
+  scalar_diffusion:
+    source_vertices: [16717, 3274]

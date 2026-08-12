@@ -3,7 +3,7 @@ import open3d as o3d
 import pytest
 from pathlib import Path
 from diffused_fields.manifold import Pointcloud
-from geodude_teleoperation.stringer_field import (
+from geodude_teleoperation.field.stringer_field import (
     compute_orientation_field,
     load_stringer_pointcloud,
     validate_field_prints,
