@@ -1,8 +1,8 @@
-# UR stringer keyboard teleop
+# UR stringer keyboard / SpaceMouse teleop
 
-Right UR5e keyboard teleop against the stringer layup field.
+Right UR5e keyboard teleop against the stringer layup field. Optional SpaceMouse analog 6-DOF (`--spacemouse` / `control.spacemouse`) runs **in addition** to keyboard — key bindings do not change.
 
-**Config:** edit [`config/SSoT_dof.yaml`](config/SSoT_dof.yaml) for robot IP, paths, diffusion / WoS / VF, and control defaults. CLI is mainly for session toggles (`--backend`, `--dry-run`, `--viz`, `--in-contact`, …).
+**Config:** edit [`config/SSoT_dof.yaml`](config/SSoT_dof.yaml) for robot IP, paths, diffusion / WoS / VF, and control defaults. Per-key notes: [`config/SSoT_dof.md`](config/SSoT_dof.md). CLI is mainly for session toggles (`--backend`, `--dry-run`, `--viz`, `--in-contact`, …).
 
 Local data defaults live under `data/processed/`. Install `diffused_fields` as a package (no sibling checkout on `PYTHONPATH` for config/viz).
 
@@ -68,34 +68,54 @@ Avoid a sourced ROS overlay that puts an old `diffused_fields` (Python 3.10) ahe
 
 ## Config (`SSoT_dof.yaml`)
 
+| File | Role |
+| --- | --- |
+| [`config/SSoT_dof.yaml`](config/SSoT_dof.yaml) | Default scratch (omit `--config`) |
+| [`config/SSoT_dof_keyboard_dryrun.yaml`](config/SSoT_dof_keyboard_dryrun.yaml) | Snapshot of keyboard dry-run + Polyscope tuning |
+| [`config/SSoT_dof_spacemouse_dryrun.yaml`](config/SSoT_dof_spacemouse_dryrun.yaml) | Snapshot of SpaceMouse dry-run (device scales / deadzone / hz / signs) |
+
+```bash
+# replay saved keyboard dry-run
+geodude-ur-stringer-teleop --config config/SSoT_dof_keyboard_dryrun.yaml \
+  --backend rtde --dry-run --viz
+
+# replay saved SpaceMouse dry-run (keyboard still works)
+geodude-ur-stringer-teleop --config config/SSoT_dof_spacemouse_dryrun.yaml \
+  --backend rtde --dry-run --viz
+```
+
 | Section | Typical knobs | Mode |
 | --- | --- | --- |
 | `robot` | `ip` (required for RTDE) | both |
 | `paths` | `ply`, `T_tag0_base`, mounts, offsets (`null` → package defaults) | both |
 | `pointcloud` / `field` / `wos` | voxel, diffusion, WoS stop radius | both |
 | `query` / `vf` | contact band, fit; R_field smoothing & relock | both (VF); free-space pose-ref uses relock heavily |
-| `control` | rates, `keyboard_step`, `max_joint_velocity`, `rtde_accel`, `pose_gain`, `max_linear_speed`, `max_angular_speed`, `max_twist_scale`, `tip_offset` | both |
+| `control` | rates, `keyboard_step`, `spacemouse` (+ `linear_scale` / `angular_scale` / `deadzone` / `hz` / `axis_sign` / `path`), general UR limits (`max_joint_velocity`, `rtde_accel`, `max_linear_speed`, `max_angular_speed`), Enter lock (`orient_lock_on_enable`, `startup_*`, `orient_lock_tol_deg`), `pose_gain`, `max_twist_scale`, `tip_offset` | both |
 | `line_tracking` / `tactile` | soft standoff / normal FF | **free-space only** (forced off in-contact) |
 | `in_contact` | DualLoop caps, align tolerances, `force_sign` | **in-contact only** |
 | `tactile.desired_normal_force` | also `Fd` for DualLoop | in-contact force target |
 
-Override file: `--config /path/to/other.yaml`.
+Knob-by-knob notes: [`config/SSoT_dof.md`](config/SSoT_dof.md).
 
 ## Safety
 
-Calibrate (motion off) → check prints → **Enter** to enable → teleop.  
-`t` / `v` toggle teleop-active / VF only. `q` quits.
+Calibrate (motion off) → check prints → **Enter** to enable → after lock settles **Enter again** to approve teleop.  
+`t` / `v` toggle teleop-active / VF only. `f` freezes VF (free-space) or `n*` (in-contact). `q` quits. **Ctrl+C** must `speedStop` the UR (last `speedJ` otherwise keeps running).
 
 | Key | Free-space | In-contact |
 | --- | --- | --- |
-| Enter | Enable motion | Enable + arm DualLoop (bias F/T, seek `Fd` along `n*`) |
+| Enter | Enable + lock TCP orientation to `R_field` (live: startup ramp). **Enter again** after settle to approve teleop | Enable + arm DualLoop (bias F/T, seek `Fd` along `n*`) |
 | `t` / `v` | Pause teleop / toggle VF | Pause teleop / toggle VF |
 | `w/s a/d` | Field ±x / ±y | Tangent slide ⊥ `n*` |
 | `y/x` | Field ±z (normal) | Ignored (Force owns normal) |
-| `f` | — | Freeze / unfreeze `n*` |
+| `f` | Freeze / unfreeze VF queries (`R_motion`) | Freeze / unfreeze `n*` |
 | `q` | Quit | Quit |
 
 With `--viz`, use these keys in the **Polyscope window** (not only the terminal).
+
+`--viz --viz-latency` (or `viz.latency_table: true`) opens a **Latency** table: loop ms vs `1000/hz`, WoS `query`, relock age, SpaceMouse age, viz publish→draw. `!` means loop or query is slower than the target tick.
+
+**SpaceMouse** (`--spacemouse` or `control.spacemouse: true`): analog 6-DOF on the same twist path. Button 0 = Enter (enable), button 1 = `t` (pause). `v` / `f` / `q` stay on the keyboard. In-contact: tangent xy only. If the device fails to open, teleop stays keyboard-only. Tune feel in [`config/SSoT_dof_spacemouse_dryrun.yaml`](config/SSoT_dof_spacemouse_dryrun.yaml) (`spacemouse_linear_scale`, `_angular_scale`, `_deadzone`, `_hz`, `_axis_sign`, `_path`).
 
 ## Free-space
 
@@ -105,6 +125,9 @@ Set `robot.ip` in `config/SSoT_dof.yaml`, leave `in_contact.enabled: false`, the
 
 ```bash
 geodude-ur-stringer-teleop --backend rtde --dry-run --viz
+# SpaceMouse dry-run snapshot (keyboard still works; Latency table on):
+geodude-ur-stringer-teleop --config config/SSoT_dof_spacemouse_dryrun.yaml \
+  --backend rtde --dry-run --viz
 ```
 
 1. Calibrate: tip tracks the **real** RTDE TCP (pendant OK).
@@ -124,9 +147,11 @@ Same receive-only RTDE; without Enter, tip only follows the pendant. After Enter
 ```bash
 # either set session.dry_run: false in SSoT_dof.yaml, or:
 geodude-ur-stringer-teleop --backend rtde --no-dry-run --viz
+# SpaceMouse live snapshot (UR limits + Enter orientation lock):
+geodude-ur-stringer-teleop --config config/SSoT_dof_spacemouse_rtde.yaml --viz
 ```
 
-Calibrate → focus the **Polyscope window** → **Enter** (enable) → `w/s a/d x/y` move tip along the **field** frame (±x/±y/±z). One keypress ≈ `keyboard_step` × adaptive scale (capped by `max_twist_scale`); speed/accel clamps live under `control.*` in SSoT. Keep limits conservative on first live runs.
+Calibrate → focus the **Polyscope window** → **Enter** (enable + rotate TCP **in place** to frozen `R_field`) → wait for settle → **Enter again** to approve teleop → `w/s a/d x/y` move tip along the **field** frame (±x/±y/±z). VF stays frozen after approve (no WoS relock) until `f`. Live Enter uses `startup_*` vel/accel (linear speed 0 during lock/hold) then general limits after approve. One keypress ≈ `keyboard_step` × adaptive scale (capped by `max_twist_scale`).
 
 Optional free-space layers (SSoT or CLI): `--line-tracking`, `--tactile` (not with `--in-contact`).
 
@@ -152,7 +177,11 @@ Design: [`docs/superpowers/specs/2026-08-10-in-contact-keyboard-teleop-design.md
 
 ## Layout
 
-- `config/SSoT_dof.yaml` — **source of truth** (IP, paths, field/WoS/VF, control, mode knobs)
+- `config/SSoT_dof.yaml` — default scratch SSoT
+- `config/SSoT_dof_keyboard_dryrun.yaml` — saved keyboard dry-run tuning
+- `config/SSoT_dof_spacemouse_dryrun.yaml` — saved SpaceMouse dry-run tuning
+- `config/SSoT_dof_spacemouse_rtde.yaml` — saved SpaceMouse live RTDE tuning
+- `config/SSoT_dof.md` — hyperparameter notes
 - `src/geodude_teleoperation/{field,viz,teleop,rtde}/` — library code
 - `data/processed/` — PLY / crop_meta / laser
 - `scripts/` — thin wrappers

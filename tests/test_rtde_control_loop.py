@@ -18,10 +18,18 @@ class FakeControl:
     def __init__(self, ip: str):
         self.ip = ip
         self.speedj_calls: list[tuple[list[float], float, float]] = []
+        self.speed_stop_calls: list[tuple] = []
+        self.stopj_calls: list[list[float]] = []
         FakeControl.instances.append(self)
 
     def speedJ(self, qdot, accel, dt):
         self.speedj_calls.append((list(qdot), float(accel), float(dt)))
+
+    def speedStop(self, *args):
+        self.speed_stop_calls.append(args)
+
+    def stopJ(self, acc):
+        self.stopj_calls.append(list(acc))
 
     def disconnect(self):
         pass
@@ -108,9 +116,61 @@ def test_close_live_zeros_then_disconnects(fake_ur_rtde):
     FakeControl, FakeReceive = fake_ur_rtde
     session = rcl.open("192.168.1.20", dry_run=False)
     session.close()
-    calls = FakeControl.instances[0].speedj_calls
-    assert calls
-    assert np.allclose(calls[-1][0], [0.0] * 6)
+    ctrl = FakeControl.instances[0]
+    assert ctrl.speed_stop_calls or ctrl.stopj_calls or ctrl.speedj_calls
+    if ctrl.speedj_calls:
+        assert np.allclose(ctrl.speedj_calls[-1][0], [0.0] * 6)
+
+
+def test_stop_motion_calls_speedStop(fake_ur_rtde):
+    FakeControl, FakeReceive = fake_ur_rtde
+    session = rcl.open("192.168.1.20", dry_run=False)
+    session.speedj([0.2] * 6, 0.5)
+    session.stop_motion()
+    ctrl = FakeControl.instances[0]
+    assert ctrl.speed_stop_calls, "Ctrl+C must speedStop, not rely on last speedJ"
+    session.close()
+
+
+def test_zero_speed_stops_without_latching_shutdown(fake_ur_rtde):
+    FakeControl, FakeReceive = fake_ur_rtde
+    session = rcl.open("192.168.1.20", dry_run=False)
+    session.speedj([0.2] * 6, 0.5)
+    session.zero_speed()
+    ctrl = FakeControl.instances[0]
+    assert ctrl.speed_stop_calls
+    n = len(ctrl.speedj_calls)
+    session.speedj([0.3] * 6, 0.5)
+    assert len(ctrl.speedj_calls) == n + 1
+    session.close()
+
+
+def test_request_rtde_shutdown_stops_active_session(fake_ur_rtde):
+    FakeControl, FakeReceive = fake_ur_rtde
+    session = rcl.open("192.168.1.20", dry_run=False)
+    session.speedj([0.3] * 6, 0.5)
+    rcl.request_rtde_shutdown()
+    ctrl = FakeControl.instances[0]
+    assert ctrl.speed_stop_calls
+    n_before = len(ctrl.speedj_calls)
+    session.speedj([0.4] * 6, 0.5)
+    assert len(ctrl.speedj_calls) == n_before
+    session.close()
+
+
+def test_rtde_loop_should_continue_stops_on_shutdown_or_viz_close():
+    assert rcl.rtde_loop_should_continue(
+        keyboard_running=True, shutdown=False, viz_open=None
+    )
+    assert not rcl.rtde_loop_should_continue(
+        keyboard_running=True, shutdown=True, viz_open=True
+    )
+    assert not rcl.rtde_loop_should_continue(
+        keyboard_running=True, shutdown=False, viz_open=False
+    )
+    assert not rcl.rtde_loop_should_continue(
+        keyboard_running=False, shutdown=False, viz_open=True
+    )
 
 
 def test_watchdog_zeros(fake_ur_rtde, monkeypatch):
@@ -127,6 +187,100 @@ def test_watchdog_zeros(fake_ur_rtde, monkeypatch):
     assert np.allclose(qdot, 0.0)
 
     session.close()
+
+
+def test_should_run_vf_query_skips_during_orient_lock():
+    assert (
+        rcl.should_run_vf_query(
+            dry_run=False,
+            sim_active=False,
+            now=1.0,
+            last_query_t=0.0,
+            dry_period_s=0.5,
+            orient_locking=True,
+            has_lock_R_star=True,
+        )
+        is False
+    )
+
+
+def test_should_run_vf_query_until_R_star_captured():
+    assert (
+        rcl.should_run_vf_query(
+            dry_run=False,
+            sim_active=False,
+            now=1.0,
+            last_query_t=0.0,
+            dry_period_s=0.5,
+            orient_locking=True,
+            has_lock_R_star=False,
+        )
+        is True
+    )
+
+
+def test_should_run_vf_query_live_idle_still_queries():
+    assert (
+        rcl.should_run_vf_query(
+            dry_run=False,
+            sim_active=False,
+            now=1.0,
+            last_query_t=0.0,
+            dry_period_s=0.5,
+            orient_locking=False,
+            has_lock_R_star=False,
+        )
+        is True
+    )
+
+
+def test_should_run_vf_query_skips_while_awaiting_approve():
+    assert (
+        rcl.should_run_vf_query(
+            dry_run=False,
+            sim_active=False,
+            now=1.0,
+            last_query_t=0.0,
+            dry_period_s=0.5,
+            orient_locking=False,
+            has_lock_R_star=True,
+            awaiting_approve=True,
+        )
+        is False
+    )
+
+
+def test_should_run_vf_query_skips_when_vf_frozen():
+    assert (
+        rcl.should_run_vf_query(
+            dry_run=False,
+            sim_active=False,
+            now=1.0,
+            last_query_t=0.0,
+            dry_period_s=0.5,
+            orient_locking=False,
+            has_lock_R_star=True,
+            vf_frozen=True,
+        )
+        is False
+    )
+
+
+def test_should_run_vf_query_after_approve_unfrozen():
+    assert (
+        rcl.should_run_vf_query(
+            dry_run=False,
+            sim_active=False,
+            now=1.0,
+            last_query_t=0.0,
+            dry_period_s=0.5,
+            orient_locking=False,
+            has_lock_R_star=True,
+            awaiting_approve=False,
+            vf_frozen=False,
+        )
+        is True
+    )
 
 
 def test_watchdog_not_refreshed_by_zero_speedj_ticks():
@@ -288,6 +442,12 @@ def test_ee_motor_from_tcp_pose():
     assert t.x() == pytest.approx(0.1)
     assert t.y() == pytest.approx(0.2)
     assert t.z() == pytest.approx(0.3)
+
+
+def test_should_run_dry_vf_query_ignores_spam():
+    assert rcl.should_run_dry_vf_query(0.0, float("-inf"), 1.0) is True
+    assert rcl.should_run_dry_vf_query(0.2, 0.0, 1.0) is False
+    assert rcl.should_run_dry_vf_query(1.0, 0.0, 1.0) is True
 
 
 def test_resolve_live_kinematics_falls_back_to_numpy(monkeypatch):
@@ -578,6 +738,7 @@ def test_enable_alone_idle_speedj_near_zero(fake_ur_rtde, monkeypatch):
     args.object_offset_t = None
     args.no_object_offset = True
     args.viz = False
+    args.orient_lock_on_enable = False
 
     rcl.run_rtde_loop(
         args,
@@ -593,6 +754,339 @@ def test_enable_alone_idle_speedj_near_zero(fake_ur_rtde, monkeypatch):
     assert after_enable
     norms = [float(np.linalg.norm(c[0])) for c in after_enable]
     assert max(norms) < 1e-3, norms
+
+
+def test_enable_locks_orientation_with_startup_limits(fake_ur_rtde, monkeypatch):
+    """Live Enter snaps T_ref to R_field using startup vel/accel, not general."""
+    import sys
+    import types
+
+    from geodude_teleoperation.teleop.controller import TeleoperationController
+    from geodude_teleoperation.se3 import _DuckMotor
+    from geodude_teleoperation.teleop.teleop_state import TeleopState
+    from geodude_teleoperation.rtde.ur5e_kinematics import forward_kinematics
+    from scipy.spatial.transform import Rotation
+
+    FakeControl, FakeReceive = fake_ur_rtde
+    monkeypatch.setattr(
+        rcl._GafropyKinematicsBridge, "try_create", classmethod(lambda cls: None)
+    )
+
+    q = np.array([0.0, -1.2, 1.4, -1.6, -1.57, 0.0])
+    T_f, _ = forward_kinematics(q)
+    tcp = np.concatenate(
+        [T_f[:3, 3], Rotation.from_matrix(T_f[:3, :3]).as_rotvec()]
+    )
+    R_field = Rotation.from_euler("xyz", [30, -40, 20], degrees=True).as_matrix()
+
+    class _KB:
+        def __init__(self):
+            self._running = __import__("threading").Event()
+            self._running.set()
+            self._n = 0
+
+        def start(self, on_twist, on_button=None, on_enable=None, enable_key="\n"):
+            self._on_enable = on_enable
+            self._running.set()
+
+        def stop(self):
+            self._running.clear()
+
+        def pump(self):
+            self._n += 1
+            if self._n == 1 and self._on_enable is not None:
+                self._on_enable()
+            elif self._n >= 12:
+                self._running.clear()
+
+    kb = _KB()
+    real_sleep = rcl.time.sleep
+
+    class _Recv(FakeReceive):
+        def __init__(self, ip: str):
+            super().__init__(ip)
+            self._q = list(q)
+            self._tcp = list(tcp)
+
+    monkeypatch.setitem(
+        sys.modules, "rtde_receive", types.SimpleNamespace(RTDEReceiveInterface=_Recv)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "rtde_control",
+        types.SimpleNamespace(RTDEControlInterface=FakeControl),
+    )
+
+    class _VF:
+        def __init__(self):
+            self.n_update = 0
+            self.n_update_after_enable = 0
+            self._enabled = False
+
+        def mark_enabled(self):
+            self._enabled = True
+
+        def update_from_state(self, ee, T=None):
+            self.n_update += 1
+            if self._enabled:
+                self.n_update_after_enable += 1
+
+        def project(self, motor):
+            return _DuckMotor(motor.get_translator(), R_field)
+
+        def motion_basis(self):
+            return R_field.copy()
+
+        def get_distance(self, position):
+            return 0.05
+
+        @property
+        def status(self):
+            return {
+                "signed_d": 0.05,
+                "in_contact": False,
+                "tip_nn": 0.05,
+                "used_wos": True,
+                "query_ms": 0.0,
+                "R_field_base": R_field,
+                "R_motion_base": R_field,
+            }
+
+    vf = _VF()
+
+    def _sleep(_dt):
+        kb.pump()
+        if kb._n >= 1:
+            vf.mark_enabled()
+        if kb._running.is_set():
+            real_sleep(0.0)
+
+    monkeypatch.setattr(rcl.time, "sleep", _sleep)
+
+    args = MagicMock()
+    args.dry_run = False
+    args.robot_ip = "192.168.1.20"
+    args.control_hz = 50.0
+    args.status_hz = 0.0
+    args.log_motion = None
+    args.plot_motion = False
+    args.record_mcap = False
+    args.rtde_accel = 1.0
+    args.watchdog_ms = 500.0
+    args.max_joint_velocity = 1.0
+    args.max_linear_speed = 0.05
+    args.max_angular_speed = 0.4
+    args.pose_gain = 4.0
+    args.keyboard_step = 0.01
+    args.tip_offset = (0.0, 0.0, 0.0)
+    args.base_frame = None
+    args.tag0_frame = None
+    args.T_tag0_base = None
+    args.calib_meta = None
+    args.enable_key = "\n"
+    args.no_rtde_base_vention = True
+    args.T_rtde_base_vention = None
+    args.diag_hold_zero = False
+    args.line_tracking = False
+    args.tactile = False
+    args.in_contact = False
+    args.object_offset_t = None
+    args.no_object_offset = True
+    args.viz = False
+    args.orient_lock_on_enable = True
+    args.startup_max_joint_velocity = 0.2
+    args.startup_rtde_accel = 0.25
+    args.startup_max_angular_speed = 0.1
+    args.startup_ramp_s = 30.0
+    args.orient_lock_tol_deg = 2.0
+
+    rcl.run_rtde_loop(
+        args,
+        (None, None),
+        vf,
+        TeleoperationController(max_joint_velocity=1.0, gain=4.0),
+        TeleopState(),
+        keyboard=kb,
+    )
+
+    assert FakeControl.instances
+    calls = FakeControl.instances[0].speedj_calls
+    assert calls
+    nonzero = [c for c in calls if float(np.linalg.norm(c[0])) > 1e-6]
+    assert nonzero, calls
+    norms = [float(np.linalg.norm(c[0])) for c in nonzero]
+    accels = [float(c[1]) for c in nonzero]
+    assert max(norms) > 1e-3, norms
+    assert max(norms) <= 0.2 + 1e-9, norms
+    assert max(accels) < 0.35, accels
+    assert min(accels) >= 0.24, accels
+    # R* already available from motion_basis — no WoS during lock.
+    assert vf.n_update_after_enable == 0, vf.n_update_after_enable
+
+
+def test_second_enter_approves_teleop_vf_stays_frozen(fake_ur_rtde, monkeypatch):
+    """After lock settles, hold still until Enter #2; f pose-holds, VF stays frozen."""
+    import sys
+    import types
+
+    from geodude_teleoperation.teleop.controller import TeleoperationController
+    from geodude_teleoperation.se3 import _DuckMotor
+    from geodude_teleoperation.teleop.teleop_state import TeleopState
+    from geodude_teleoperation.rtde.ur5e_kinematics import forward_kinematics
+    from scipy.spatial.transform import Rotation
+
+    FakeControl, FakeReceive = fake_ur_rtde
+    monkeypatch.setattr(
+        rcl._GafropyKinematicsBridge, "try_create", classmethod(lambda cls: None)
+    )
+
+    q = np.array([0.0, -1.2, 1.4, -1.6, -1.57, 0.0])
+    T_f, _ = forward_kinematics(q)
+    tcp = np.concatenate(
+        [T_f[:3, 3], Rotation.from_matrix(T_f[:3, :3]).as_rotvec()]
+    )
+    R_field = T_f[:3, :3].copy()  # already aligned → settle immediately
+
+    class _KB:
+        def __init__(self):
+            self._running = __import__("threading").Event()
+            self._running.set()
+            self._n = 0
+            self._on_enable = None
+            self._on_button = None
+
+        def start(self, on_twist, on_button=None, on_enable=None, enable_key="\n"):
+            self._on_enable = on_enable
+            self._on_button = on_button
+            self._running.set()
+
+        def stop(self):
+            self._running.clear()
+
+        def pump(self):
+            self._n += 1
+            if self._n == 1 and self._on_enable is not None:
+                self._on_enable()
+            elif self._n == 6 and self._on_enable is not None:
+                self._on_enable()
+            elif self._n == 10 and self._on_button is not None:
+                self._on_button(2)  # f → pose hold, not VF unfreeze
+            elif self._n >= 14:
+                self._running.clear()
+
+    kb = _KB()
+    real_sleep = rcl.time.sleep
+    query_log = []
+
+    class _Recv(FakeReceive):
+        def __init__(self, ip: str):
+            super().__init__(ip)
+            self._q = list(q)
+            self._tcp = list(tcp)
+
+    monkeypatch.setitem(
+        sys.modules, "rtde_receive", types.SimpleNamespace(RTDEReceiveInterface=_Recv)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "rtde_control",
+        types.SimpleNamespace(RTDEControlInterface=FakeControl),
+    )
+
+    class _VF:
+        def __init__(self):
+            self.n_update = 0
+            self._frozen = False
+
+        def set_frozen(self, frozen: bool) -> None:
+            self._frozen = bool(frozen)
+
+        def update_from_state(self, ee, T=None):
+            self.n_update += 1
+            query_log.append(kb._n)
+
+        def project(self, motor):
+            return _DuckMotor(motor.get_translator(), R_field)
+
+        def motion_basis(self):
+            return R_field.copy()
+
+        def get_distance(self, position):
+            return 0.05
+
+        @property
+        def status(self):
+            return {
+                "signed_d": 0.05,
+                "in_contact": False,
+                "tip_nn": 0.05,
+                "used_wos": True,
+                "query_ms": 0.0,
+                "R_field_base": R_field,
+                "R_motion_base": R_field,
+            }
+
+    vf = _VF()
+
+    def _sleep(_dt):
+        kb.pump()
+        if kb._running.is_set():
+            real_sleep(0.0)
+
+    monkeypatch.setattr(rcl.time, "sleep", _sleep)
+
+    args = MagicMock()
+    args.dry_run = False
+    args.robot_ip = "192.168.1.20"
+    args.control_hz = 50.0
+    args.status_hz = 0.0
+    args.log_motion = None
+    args.plot_motion = False
+    args.record_mcap = False
+    args.rtde_accel = 1.0
+    args.watchdog_ms = 500.0
+    args.max_joint_velocity = 1.0
+    args.max_linear_speed = 0.05
+    args.max_angular_speed = 0.4
+    args.pose_gain = 4.0
+    args.keyboard_step = 0.01
+    args.tip_offset = (0.0, 0.0, 0.0)
+    args.base_frame = None
+    args.tag0_frame = None
+    args.T_tag0_base = None
+    args.calib_meta = None
+    args.enable_key = "\n"
+    args.no_rtde_base_vention = True
+    args.T_rtde_base_vention = None
+    args.diag_hold_zero = False
+    args.line_tracking = False
+    args.tactile = False
+    args.in_contact = False
+    args.object_offset_t = None
+    args.no_object_offset = True
+    args.viz = False
+    args.orient_lock_on_enable = True
+    args.startup_max_joint_velocity = 0.2
+    args.startup_rtde_accel = 0.25
+    args.startup_max_angular_speed = 0.1
+    args.startup_ramp_s = 0.0
+    args.orient_lock_tol_deg = 2.0
+
+    rcl.run_rtde_loop(
+        args,
+        (None, None),
+        vf,
+        TeleoperationController(max_joint_velocity=1.0, gain=4.0),
+        TeleopState(),
+        keyboard=kb,
+    )
+
+    # After first Enter / approve / f pose-hold: VF stays frozen (no WoS yank).
+    queries_after_enable = [n for n in query_log if n >= 1]
+    assert queries_after_enable == [], query_log
+    assert vf._frozen is True
+    ctrl = FakeControl.instances[0]
+    assert ctrl.speed_stop_calls, "f / approve must speedStop so last speedJ does not coast"
 
 
 def test_dry_run_sim_moves_viz_tcp_without_speedj(fake_ur_rtde, monkeypatch):

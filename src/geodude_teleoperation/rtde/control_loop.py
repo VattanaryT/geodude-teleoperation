@@ -24,7 +24,10 @@ identity), ``T`` is identity but ``tf_ok=False`` so motion is refused.
 
 from __future__ import annotations
 
+import atexit
+import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Sequence
@@ -35,6 +38,59 @@ from scipy.spatial.transform import Rotation
 ROOT = Path(__file__).resolve().parent.parent.parent
 GEODUDE_MODEL = ROOT / "assets" / "robots" / "geodude" / "geodude.yaml"
 TASK_SPACE_NAME = "right_ee"
+
+_shutdown = threading.Event()
+_active_session: "RtdeTeleopSession | None" = None
+_hooks_installed = False
+_hooks_lock = threading.Lock()
+
+
+def rtde_loop_should_continue(
+    *,
+    keyboard_running: bool,
+    shutdown: bool,
+    viz_open: bool | None,
+) -> bool:
+    """Host loop gate: keyboard quit, SIGINT/atexit, or Polyscope closed."""
+    if not keyboard_running or shutdown:
+        return False
+    if viz_open is False:
+        return False
+    return True
+
+
+def request_rtde_shutdown(session: "RtdeTeleopSession | None" = None) -> None:
+    """Stop UR speedJ immediately (Ctrl+C / viz close / atexit)."""
+    _shutdown.set()
+    s = session if session is not None else _active_session
+    if s is not None:
+        try:
+            s.stop_motion()
+        except Exception:
+            pass
+
+
+def install_rtde_shutdown_hooks() -> None:
+    """SIGINT/SIGTERM/atexit → speedStop so the arm does not keep the last q̇."""
+    global _hooks_installed
+    with _hooks_lock:
+        if _hooks_installed:
+            return
+        _hooks_installed = True
+
+        def _on_signal(signum, frame):
+            request_rtde_shutdown()
+            raise KeyboardInterrupt
+
+        atexit.register(request_rtde_shutdown)
+        try:
+            # SIGINT → KeyboardInterrupt on the main thread (viz). SIGTERM for
+            # kill. Do not override SIGINT here: pytest and Ctrl+C on the viz
+            # thread use KeyboardInterrupt handlers that call request_rtde_shutdown.
+            signal.signal(signal.SIGTERM, _on_signal)
+        except ValueError:
+            # Not the main thread — loop/viz still call request_rtde_shutdown.
+            pass
 
 
 def _import_rtde():
@@ -77,6 +133,7 @@ class RtdeTeleopSession:
         self._dry_run = bool(dry_run)
         self._accel = float(accel)
         self._speedj_time = float(speedj_time)
+        self._stopping = False
 
     @property
     def control_open(self) -> bool:
@@ -100,28 +157,41 @@ class RtdeTeleopSession:
     def speedj(self, qdot: Sequence[float], accel: float) -> None:
         if self._dry_run or self._control is None:
             raise RuntimeError("speedj unavailable in dry-run (receive-only)")
+        if self._stopping:
+            return
         qdot_list = [float(v) for v in qdot]
         self._control.speedJ(qdot_list, float(accel), self._speedj_time)
 
     def stop_motion(self) -> None:
-        """Leave continuous speedJ / DTC cleanly (call before disconnect)."""
+        """Leave continuous speedJ / DTC cleanly (call before disconnect).
+
+        UR ``speedJ`` keeps the last q̇ until a new command. Host exit without
+        ``speedStop`` leaves the arm moving.
+        """
+        self._stopping = True
         if self._dry_run or self._control is None:
             return
+        accel = float(max(abs(self._accel), 1.0))
         for name, args in (
             ("speedStop", ()),
-            ("stopJ", ([0.5] * 6,)),
-            ("speedJ", ([0.0] * 6, float(self._accel), 0.5)),
+            ("speedStop", (accel,)),
+            ("stopJ", ([accel] * 6,)),
+            ("speedJ", ([0.0] * 6, accel, 0.5)),
         ):
             fn = getattr(self._control, name, None)
             if not callable(fn):
                 continue
             try:
                 fn(*args)
-                return
+            except TypeError:
+                continue
             except Exception:
                 continue
 
     def close(self) -> None:
+        global _active_session
+        if _active_session is self:
+            _active_session = None
         self.stop_motion()
         for iface in (self._control, self._receive):
             if iface is None:
@@ -143,10 +213,11 @@ def open(
     accel: float = 0.5,
     speedj_time: float = 0.02,
 ) -> RtdeTeleopSession:
+    global _active_session
     RTDEControlInterface, RTDEReceiveInterface = _import_rtde()
     receive = RTDEReceiveInterface(str(ip))
     control = None if dry_run else RTDEControlInterface(str(ip))
-    return RtdeTeleopSession(
+    session = RtdeTeleopSession(
         ip,
         receive,
         control,
@@ -154,6 +225,11 @@ def open(
         accel=accel,
         speedj_time=speedj_time,
     )
+    if not dry_run:
+        _shutdown.clear()
+        _active_session = session
+        install_rtde_shutdown_hooks()
+    return session
 
 
 def ee_motor_from_tcp_pose(tcp_pose: Sequence[float]):
@@ -449,6 +525,41 @@ def should_refresh_watchdog(
     return bool(control_open)
 
 
+def should_run_dry_vf_query(now: float, last_t: float, period_s: float) -> bool:
+    """Free-space dry-run: WoS only on a wall-clock period, never every WASD tick.
+
+    Holding keys sets ``fresh_command`` each control tick. Querying on that flag
+    made ``query_ms≈2s`` block the Polyscope tip every frame.
+    """
+    return (float(now) - float(last_t)) >= max(0.0, float(period_s))
+
+
+def should_run_vf_query(
+    *,
+    dry_run: bool,
+    sim_active: bool,
+    now: float,
+    last_query_t: float,
+    dry_period_s: float,
+    orient_locking: bool,
+    has_lock_R_star: bool,
+    awaiting_approve: bool = False,
+    vf_frozen: bool = False,
+) -> bool:
+    """Whether to call ``vf.update_from_state`` this tick.
+
+    Live Enter-lock: once ``R*`` is frozen, skip WoS/NN through lock, the
+    post-settle hold, and VF freeze (``f``). A multi-100ms query blocks
+    ``speedJ``, the watchdog zeros q̇, then catch-up looks like oscillation.
+    Dry-run still uses ``dry_query_period_s``.
+    """
+    if has_lock_R_star and (orient_locking or awaiting_approve or vf_frozen):
+        return False
+    if dry_run and sim_active:
+        return should_run_dry_vf_query(now, last_query_t, dry_period_s)
+    return True
+
+
 def flange_tcp_offset_matrix(q: Sequence[float], tcp_pose: Sequence[float]) -> np.ndarray:
     """Fixed flange→TCP SE(3) from a joint/TCP snapshot (for dry-run FK)."""
     from geodude_teleoperation.rtde.ur5e_kinematics import forward_kinematics
@@ -470,28 +581,51 @@ def tcp_pose_from_q_and_offset(
     return matrix_to_tcp_pose(T_flange @ np.asarray(T_flange_tcp, dtype=float))
 
 
-def snap_T_ref_orientation_to_vf(kin, vf) -> bool:
-    """Replace ``kin._T_ref`` rotation with VF ``R_field`` (dry-run viz only).
+def _bool_arg(args, name: str, default: bool) -> bool:
+    val = getattr(args, name, default)
+    return bool(val) if isinstance(val, bool) else bool(default)
 
-    Live speedJ deliberately does not snap on pure linear WASD; dry-run Polyscope
-    can show the field frame on the EE without commanding the robot.
+
+def _float_arg(args, name: str, default: float) -> float:
+    val = getattr(args, name, default)
+    try:
+        x = float(val)
+    except (TypeError, ValueError):
+        return float(default)
+    if not np.isfinite(x):
+        return float(default)
+    return x
+
+
+def vf_lock_rotation(vf) -> np.ndarray | None:
+    """Orientation used for Enter lock / ``snap_T_ref_orientation_to_vf``."""
+    if vf is None:
+        return None
+    if hasattr(vf, "motion_basis"):
+        try:
+            return np.asarray(vf.motion_basis(), dtype=float).reshape(3, 3)
+        except Exception:
+            pass
+    st = getattr(vf, "status", None) or {}
+    raw = st.get("R_field_raw_smoothed")
+    if raw is None:
+        raw = st.get("R_field_base")
+    if raw is None:
+        return None
+    return np.asarray(raw, dtype=float).reshape(3, 3)
+
+
+def snap_T_ref_orientation_to_vf(kin, vf) -> bool:
+    """Replace ``kin._T_ref`` rotation with VF ``R_field`` / ``R_motion``.
+
+    Dry-run: instant viz snap (no ``speedJ``). Live Enter-lock uses the same
+    snap with startup vel/accel so the robot eases in instead of jerking.
+    Pure linear WASD still does not snap on its own.
     """
     T = getattr(kin, "_T_ref", None)
     if T is None:
         return False
-    R = None
-    if hasattr(vf, "motion_basis"):
-        try:
-            R = np.asarray(vf.motion_basis(), dtype=float).reshape(3, 3)
-        except Exception:
-            R = None
-    if R is None:
-        st = getattr(vf, "status", None) or {}
-        raw = st.get("R_field_raw_smoothed")
-        if raw is None:
-            raw = st.get("R_field_base")
-        if raw is not None:
-            R = np.asarray(raw, dtype=float).reshape(3, 3)
+    R = vf_lock_rotation(vf)
     if R is None:
         return False
     T_new = np.asarray(T, dtype=float).reshape(4, 4).copy()
@@ -639,7 +773,6 @@ def run_rtde_loop(
 ) -> int:
     """Host loop at ``args.control_hz`` for RTDE backend."""
     from geodude_teleoperation.frames import warn_tip_offset_xy
-    from geodude_teleoperation.teleop.keyboard import KeyboardTeleop
     from geodude_teleoperation.teleop.motion_trace import MotionTraceLogger, save_and_maybe_plot
     from geodude_teleoperation.teleop.teleop_state import format_status_line, should_emit_status
 
@@ -664,6 +797,14 @@ def run_rtde_loop(
         TactileAgent,
         tactile_config_from_args,
     )
+    from geodude_teleoperation.rtde.orient_lock import (
+        EnableOrientLock,
+        MotionLimits,
+        apply_orient_lock_reference,
+        blend_startup_motion_limits,
+        orientation_error_deg,
+        twist_linear_only,
+    )
     from geodude_teleoperation.teleop.contact_teleop import (
         ContactTeleopBridge,
         config_from_args as contact_cfg_from_args,
@@ -673,6 +814,9 @@ def run_rtde_loop(
     from geodude_teleoperation.teleop.keyboard import (
         contact_field_linear_from_twist_coeffs,
         is_contact_tangent_key,
+    )
+    from geodude_teleoperation.teleop.spacemouse import (
+        contact_tangent_linear_from_spacemouse,
     )
     from geodude_teleoperation.se3 import map_jacobian_to_point, tcp_pose_to_matrix
     from geodude_teleoperation.rtde.ur5e_kinematics import compute_jacobian, forward_kinematics
@@ -853,6 +997,7 @@ def run_rtde_loop(
 
     pending_twist = {"twist": None, "key": ""}
     pending_contact_arm = {"arm": False}
+    sm_twist_t = {"t": None}
     mcap = None
     try:
         from geodude_teleoperation.teleop.teleop_mcap_recorder import recorder_from_args
@@ -862,9 +1007,80 @@ def run_rtde_loop(
         print(f"warning: record-mcap disabled ({exc})", file=sys.stderr)
         mcap = None
     prev_motion_enabled = False
+    orient_lock = EnableOrientLock()
+    prev_orient_locking = False
+    prev_awaiting_approve = False
+    vf_freeze_on = {"v": False}
+    general_limits = MotionLimits(
+        max_joint_velocity=float(args.max_joint_velocity),
+        rtde_accel=float(args.rtde_accel),
+        max_linear_speed=_float_arg(args, "max_linear_speed", 0.05),
+        max_angular_speed=_float_arg(args, "max_angular_speed", 0.4),
+    )
+    startup_limits = MotionLimits(
+        max_joint_velocity=_float_arg(
+            args, "startup_max_joint_velocity", general_limits.max_joint_velocity
+        ),
+        rtde_accel=_float_arg(args, "startup_rtde_accel", general_limits.rtde_accel),
+        max_linear_speed=general_limits.max_linear_speed,
+        max_angular_speed=_float_arg(
+            args, "startup_max_angular_speed", general_limits.max_angular_speed
+        ),
+    )
+    startup_ramp_s = _float_arg(args, "startup_ramp_s", 0.0)
+    orient_lock_tol_deg = _float_arg(args, "orient_lock_tol_deg", 2.0)
+    orient_lock_on_enable = _bool_arg(args, "orient_lock_on_enable", False)
+
+    def _apply_vf_frozen(frozen: bool) -> None:
+        vf_freeze_on["v"] = bool(frozen)
+        orient_lock.vf_frozen = bool(frozen)
+        setter = getattr(vf, "set_frozen", None)
+        if callable(setter):
+            setter(bool(frozen))
 
     def on_enable() -> None:
+        if (
+            not args.dry_run
+            and orient_lock_on_enable
+            and contact_bridge is None
+            and not diag_hold_zero
+            and orient_lock.enabled_at is not None
+        ):
+            if not orient_lock.settled:
+                print(
+                    "info: orientation lock still running — wait to settle, "
+                    "then Enter again to approve teleop",
+                    flush=True,
+                )
+                return
+            if not orient_lock.approved:
+                orient_lock.approve()
+                _apply_vf_frozen(True)
+                print(
+                    "info: teleop approved — VF frozen "
+                    "(press f to unfreeze queries)",
+                    flush=True,
+                )
+                return
+            print("info: teleop already approved", flush=True)
+            return
         state.enable()
+        if (
+            not args.dry_run
+            and orient_lock_on_enable
+            and contact_bridge is None
+            and not diag_hold_zero
+        ):
+            orient_lock.on_enable(time.monotonic())
+            _apply_vf_frozen(True)
+            print(
+                "info: orientation lock in-place → frozen R_field "
+                f"(startup q̇≤{startup_limits.max_joint_velocity:g} rad/s, "
+                f"accel≤{startup_limits.rtde_accel:g} rad/s², "
+                f"ramp={startup_ramp_s:g}s, tol={orient_lock_tol_deg:g}deg); "
+                "press Enter again after settle to approve teleop",
+                flush=True,
+            )
         if args.dry_run:
             print(
                 "info: motion enabled (Enter) — teleop_active=1; "
@@ -891,14 +1107,44 @@ def run_rtde_loop(
                 return
             state.vf_enabled = not state.vf_enabled
             controller.set_virtual_fixture(vf if state.vf_enabled else None)
-        elif index == 2 and contact_bridge is not None:
-            frozen = contact_bridge.toggle_freeze()
-            print(f"info: n* freeze={'ON' if frozen else 'OFF'}", flush=True)
+        elif index == 2:
+            if contact_bridge is not None:
+                frozen = contact_bridge.toggle_freeze()
+                print(f"info: n* freeze={'ON' if frozen else 'OFF'}", flush=True)
+                return
+            if not state.motion_enabled:
+                return
+            if orient_lock.enabled_at is not None:
+                frozen = orient_lock.toggle_vf_freeze()
+            else:
+                frozen = not vf_freeze_on["v"]
+            _apply_vf_frozen(frozen)
+            print(f"info: VF freeze={'ON' if frozen else 'OFF'}", flush=True)
 
-    def on_twist(twist) -> None:
+    def on_twist(twist, *, source: str = "keyboard") -> None:
         if diag_hold_zero:
             return
         if contact_bridge is not None:
+            if source == "spacemouse":
+                coeffs = None
+                if hasattr(twist, "to_array"):
+                    coeffs = twist.to_array()
+                elif hasattr(twist, "get_angular") and hasattr(twist, "get_linear"):
+                    coeffs = np.concatenate(
+                        [
+                            np.asarray(twist.get_angular()),
+                            np.asarray(twist.get_linear()),
+                        ]
+                    )
+                if coeffs is None:
+                    return
+                lin = contact_tangent_linear_from_spacemouse(coeffs)
+                if float(np.linalg.norm(lin[:2])) < 1e-12:
+                    return
+                pending_twist["twist"] = lin
+                pending_twist["key"] = ""
+                sm_twist_t["t"] = time.monotonic()
+                return
             key = getattr(keyboard, "last_key", "") or ""
             if not is_contact_tangent_key(key):
                 return
@@ -913,15 +1159,24 @@ def run_rtde_loop(
             pending_twist["key"] = key
             return
         pending_twist["twist"] = twist
-        pending_twist["key"] = getattr(keyboard, "last_key", "") or ""
+        pending_twist["key"] = (
+            (getattr(keyboard, "last_key", "") or "") if source == "keyboard" else ""
+        )
+        if source == "spacemouse":
+            sm_twist_t["t"] = time.monotonic()
 
-    if keyboard is None:
-        keyboard = KeyboardTeleop(step=args.keyboard_step)
-    keyboard.start(
-        on_twist,
+    from geodude_teleoperation.teleop.inputs import (
+        start_teleop_inputs,
+        stop_teleop_inputs,
+    )
+
+    keyboard, spacemouse = start_teleop_inputs(
+        args,
+        on_twist=lambda tw: on_twist(tw, source="keyboard"),
         on_button=on_button,
         on_enable=on_enable,
-        enable_key=args.enable_key,
+        keyboard=keyboard,
+        on_spacemouse_twist=lambda tw: on_twist(tw, source="spacemouse"),
     )
 
     dt = 1.0 / args.control_hz
@@ -935,10 +1190,14 @@ def run_rtde_loop(
     tcp_sim: np.ndarray | None = None
     T_flange_tcp: np.ndarray | None = None
     last_dry_vf_query_t = float("-inf")
-    dry_vf_period_s = 0.25
+    dry_vf_period_s = float(getattr(args, "vf_dry_query_period_s", 1.0))
 
     try:
-        while keyboard._running.is_set():
+        while rtde_loop_should_continue(
+            keyboard_running=keyboard._running.is_set(),
+            shutdown=_shutdown.is_set(),
+            viz_open=None if live_viz is None else live_viz.viz_open,
+        ):
             t0 = time.perf_counter()
             now = time.monotonic()
 
@@ -1064,6 +1323,55 @@ def run_rtde_loop(
 
             # Apply keyboard twists BEFORE the slow WoS/VF query so dry-run
             # Polyscope tip updates even when query_ms is multi-second.
+            motion_limits = general_limits
+            orient_locking = False
+            hold_still = False
+            if (
+                not args.dry_run
+                and orient_lock.enabled_at is not None
+                and contact_bridge is None
+                and not diag_hold_zero
+                and state.vf_enabled
+                and state.motion_enabled
+            ):
+                R_star = orient_lock.capture_R_star(vf_lock_rotation(vf))
+                if R_star is not None:
+                    ang_err = orientation_error_deg(
+                        tcp_pose_to_matrix(tcp_pose)[:3, :3], R_star
+                    )
+                    orient_locking = orient_lock.locking(
+                        ang_err, orient_lock_tol_deg
+                    )
+                else:
+                    orient_locking = not orient_lock.settled
+                hold_still = orient_lock.motion_hold()
+                if orient_lock.awaiting_approve and not prev_awaiting_approve:
+                    print(
+                        "info: orientation lock settled — press Enter again "
+                        "to approve teleop (VF stays frozen)",
+                        flush=True,
+                    )
+                prev_awaiting_approve = orient_lock.awaiting_approve
+                if prev_orient_locking and not orient_locking and orient_lock.approved:
+                    print(
+                        "info: orientation lock settled; using general UR limits "
+                        f"(q̇≤{general_limits.max_joint_velocity:g} rad/s, "
+                        f"accel≤{general_limits.rtde_accel:g} rad/s²)",
+                        flush=True,
+                    )
+                prev_orient_locking = orient_locking
+                motion_limits = blend_startup_motion_limits(
+                    t_since_enable=orient_lock.t_since_enable(now),
+                    ramp_s=startup_ramp_s,
+                    startup=startup_limits,
+                    general=general_limits,
+                    locking=orient_locking or hold_still,
+                )
+                if orient_lock.R_star is not None:
+                    _apply_vf_frozen(
+                        hold_still or orient_locking or orient_lock.vf_frozen
+                    )
+
             if (
                 contact_bridge is None
                 and not diag_hold_zero
@@ -1072,9 +1380,15 @@ def run_rtde_loop(
                 and use_numpy_kin
             ):
                 kin.ensure_reference_from_tcp()
-                # Dry-run: align EE to R_field immediately (safe — no speedJ).
+                # Dry-run: align EE to live R_field immediately (safe — no speedJ).
+                # Live Enter-lock: freeze R* and pin T_ref to current TCP (in-place).
                 if args.dry_run and sim_active and state.vf_enabled:
                     snap_T_ref_orientation_to_vf(kin, vf)
+                elif (
+                    (orient_locking or hold_still)
+                    and orient_lock.R_star is not None
+                ):
+                    apply_orient_lock_reference(kin, tcp_pose, orient_lock.R_star)
 
             twist = pending_twist["twist"]
             key_this_tick = ""
@@ -1082,6 +1396,8 @@ def run_rtde_loop(
 
             def _apply_twist(twist_obj, *, key: str = "") -> None:
                 nonlocal fresh_command, key_this_tick
+                if orient_locking or hold_still:
+                    twist_obj = twist_linear_only(twist_obj)
                 R_prev = vf_R_field_or_none(vf)
                 if R_prev is None:
                     R_prev = vf_R_field(vf)
@@ -1122,7 +1438,7 @@ def run_rtde_loop(
                 pending_twist["twist"] = None
                 key_this_tick = str(pending_twist.get("key") or "")
                 pending_twist["key"] = ""
-                if math_ok:
+                if math_ok and not orient_locking and not hold_still:
                     _apply_twist(twist, key=key_this_tick)
 
             # Polyscope held WASD/X/Y → one combined step every control tick
@@ -1131,6 +1447,8 @@ def run_rtde_loop(
                 live_viz is not None
                 and math_ok
                 and not diag_hold_zero
+                and not orient_locking
+                and not hold_still
                 and (kin_ok or contact_bridge is not None)
             ):
                 held = live_viz.held_teleop_keys()
@@ -1187,12 +1505,21 @@ def run_rtde_loop(
                     )
 
             # WoS/VF query is expensive (~seconds on dense clouds). In free-space
-            # dry-run, throttle it so WASD→tip stays near control_hz.
-            run_vf_query = True
-            if args.dry_run and sim_active and contact_bridge is None:
-                run_vf_query = bool(fresh_command) or (
-                    (now - last_dry_vf_query_t) >= dry_vf_period_s
-                )
+            # dry-run, throttle it so WASD→tip stays near control_hz. Live
+            # Enter-lock skips once R* is frozen (query hitch → speedJ gap →
+            # oscillation).
+            run_vf_query = should_run_vf_query(
+                dry_run=bool(args.dry_run),
+                sim_active=bool(sim_active),
+                now=now,
+                last_query_t=last_dry_vf_query_t,
+                dry_period_s=dry_vf_period_s,
+                orient_locking=orient_locking,
+                has_lock_R_star=orient_lock.R_star is not None,
+                awaiting_approve=orient_lock.awaiting_approve,
+                vf_frozen=bool(vf_freeze_on["v"] or orient_lock.vf_frozen)
+                and orient_lock.R_star is not None,
+            )
             if run_vf_query:
                 vf.update_from_state(ee, T_tag0_base)
                 last_dry_vf_query_t = now
@@ -1215,6 +1542,14 @@ def run_rtde_loop(
                         except Exception:
                             pass
                         ee = ee_motor_from_tcp_pose(tcp_pose)
+                elif (
+                    (orient_locking or hold_still)
+                    and orient_lock.R_star is not None
+                    and use_numpy_kin
+                    and kin is not None
+                    and contact_bridge is None
+                ):
+                    apply_orient_lock_reference(kin, tcp_pose, orient_lock.R_star)
 
             T_tcp = tcp_pose_to_matrix(tcp_pose)
             R_tcp = T_tcp[:3, :3]
@@ -1341,16 +1676,10 @@ def run_rtde_loop(
                         qdot = kin.compute_qdot(
                             gain=float(getattr(controller, "_gain", 4.0)),
                             damping=float(getattr(controller, "_damping", 0.05)),
-                            max_joint_velocity=float(args.max_joint_velocity),
+                            max_joint_velocity=float(motion_limits.max_joint_velocity),
                             vf=vf if state.vf_enabled else None,
-                            max_linear_speed=float(
-                                getattr(args, "max_linear_speed", 0.05) or 0.0
-                            )
-                            or None,
-                            max_angular_speed=float(
-                                getattr(args, "max_angular_speed", 0.4) or 0.0
-                            )
-                            or None,
+                            max_linear_speed=float(motion_limits.max_linear_speed),
+                            max_angular_speed=float(motion_limits.max_angular_speed),
                         )
                         control_diag = dict(getattr(kin, "last_control_diag", {}) or {})
                     elif kin_ok:
@@ -1364,11 +1693,11 @@ def run_rtde_loop(
                         watchdog_s=watchdog_s,
                     )
                     speed = float(np.linalg.norm(qdot))
-                    if speed > args.max_joint_velocity:
+                    if speed > motion_limits.max_joint_velocity:
                         # Outer clamp (qdot_from_error already clamps; flag if still over).
                         control_diag["qdot_clipped"] = True
                         control_diag.setdefault("qdot_unclipped_norm", speed)
-                        qdot = qdot * (args.max_joint_velocity / speed)
+                        qdot = qdot * (motion_limits.max_joint_velocity / speed)
                     qdot_norm = float(np.linalg.norm(qdot))
                 except Exception:
                     qdot = np.zeros(6, dtype=float)
@@ -1423,7 +1752,7 @@ def run_rtde_loop(
                             now=now,
                             watchdog_s=watchdog_s,
                         )
-                    session.speedj(send_qdot, args.rtde_accel)
+                    session.speedj(send_qdot, motion_limits.rtde_accel)
                     qdot_norm = float(np.linalg.norm(send_qdot))
                 except RuntimeError:
                     pass
@@ -1456,6 +1785,22 @@ def run_rtde_loop(
                 print(line, flush=True)
 
             elapsed = time.perf_counter() - t0
+            if live_viz is not None:
+                sm_age = None
+                if sm_twist_t["t"] is not None:
+                    sm_age = (time.monotonic() - sm_twist_t["t"]) * 1000.0
+                relock_s = float(status.get("dt_since_relock_s", float("nan")))
+                relock_ms = (
+                    relock_s * 1000.0 if np.isfinite(relock_s) else float("nan")
+                )
+                live_viz.publish_latency(
+                    loop_ms=elapsed * 1000.0,
+                    query_ms=float(status.get("query_ms", float("nan"))),
+                    relock_age_ms=relock_ms,
+                    relock_reason=str(status.get("relock_reason", "") or ""),
+                    sm_age_ms=sm_age,
+                    target_dt_ms=1000.0 / max(float(args.control_hz), 1e-6),
+                )
             active_motion_log = motion_log
             if mcap is not None and getattr(mcap, "motion_log", None) is not None:
                 active_motion_log = mcap.motion_log
@@ -1580,7 +1925,7 @@ def run_rtde_loop(
         except Exception:
             pass
     finally:
-        keyboard.stop()
+        stop_teleop_inputs(keyboard, spacemouse)
         try:
             session.stop_motion()
         except Exception:

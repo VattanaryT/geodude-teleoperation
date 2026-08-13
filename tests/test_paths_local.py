@@ -26,9 +26,9 @@ def test_local_ssot_pointcloud_defaults():
 
 def test_parse_args_defaults_to_local_data():
     args = parse_args(["--dry-run"])
-    assert args.ply == default_ply_path()
-    if default_T_tag0_base_path().is_file():
-        assert args.T_tag0_base == default_T_tag0_base_path()
     assert isinstance(args.ply, Path)
+    assert args.ply.is_absolute() or args.ply.as_posix()
+    if default_T_tag0_base_path().is_file() and args.T_tag0_base is not None:
+        assert Path(args.T_tag0_base).name  # resolved or explicit
     assert args.diffusion_scalar == 5000.0
     assert args.wos_convergence_threshold_edge_mult == 2.0

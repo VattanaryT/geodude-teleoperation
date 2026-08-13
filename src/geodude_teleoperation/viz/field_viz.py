@@ -15,7 +15,46 @@ import numpy as np
 
 from geodude_teleoperation.frames import transform_points
 from geodude_teleoperation.tag_crosscheck import load_T_cam_EE
-from geodude_teleoperation.viz.live_state import LiveVizState
+from geodude_teleoperation.viz.live_state import LiveVizState, latency_table_rows
+
+
+def draw_latency_imgui(imgui, live_viz: LiveVizState) -> None:
+    """Second Polyscope ImGui window: loop / WoS / relock / SpaceMouse / viz age."""
+    if imgui is None or not getattr(live_viz, "show_latency_table", False):
+        return
+    begin = getattr(imgui, "Begin", None)
+    end = getattr(imgui, "End", None)
+    text = getattr(imgui, "TextUnformatted", None)
+    if begin is None or end is None or text is None:
+        return
+    opened = bool(begin("Latency", True))
+    try:
+        if not opened:
+            return
+        snap = live_viz.latency_snapshot()
+        if not snap:
+            text("waiting for RTDE ticks…")
+            return
+        rows = latency_table_rows(snap, now_mono=time.monotonic())
+        begin_table = getattr(imgui, "BeginTable", None)
+        end_table = getattr(imgui, "EndTable", None)
+        if begin_table is not None and end_table is not None and begin_table(
+            "latency_rows", 2
+        ):
+            next_row = getattr(imgui, "TableNextRow", lambda: None)
+            next_col = getattr(imgui, "TableNextColumn", lambda: None)
+            for name, val, warn in rows:
+                next_row()
+                next_col()
+                text(str(name))
+                next_col()
+                text(f"{val}{'  !' if warn else ''}")
+            end_table()
+        else:
+            for name, val, warn in rows:
+                text(f"{name}: {val}{'  !' if warn else ''}")
+    finally:
+        end()
 
 # Lazily used; tests monkeypatch these names on this module.
 ps = None  # type: ignore
@@ -1077,9 +1116,10 @@ def _run_live_rtde_markers(
                     f"(Shift+j/l i/k u/o, Shift+r reset, Shift+p save)"
                 )
             imgui.TextUnformatted(
-                "teleop (this window): Enter enable · hold w/s a/d x/y move · "
-                "t/v pause/VF · f freeze-n* · q quit"
+                "teleop (this window): Enter enable · Enter again approve · "
+                "hold w/s a/d x/y move · t/v pause/VF · f freeze VF/n* · q quit"
             )
+            draw_latency_imgui(imgui, live_viz)
 
         if live_viz.loop_done.is_set():
             return
@@ -1103,7 +1143,12 @@ def _run_live_rtde_markers(
     print(
         "[viz] live RTDE + offsets: j/l i/k u/o object; Shift+same laser; "
         "Enter/w/s/a/d/x/y/t/v/f/q teleop in this window; "
-        "p / Shift+p save; close window to drop viz (q quits teleop)",
+        "p / Shift+p save; close window to drop viz (q quits teleop)"
+        + (
+            "; Latency table ON"
+            if getattr(live_viz, "show_latency_table", False)
+            else ""
+        ),
         flush=True,
     )
     ps.set_user_callback(callback)

@@ -54,7 +54,7 @@ _LAZY_ATTRS = {
         "geodude_teleoperation.teleop.controller",
         "AdmittanceTeleoperationController",
     ),
-    "SpaceMouseTeleop": ("geodude_teleoperation.spacemouse", "SpaceMouseTeleop"),
+    "SpaceMouseTeleop": ("geodude_teleoperation.teleop.spacemouse", "SpaceMouseTeleop"),
     "KeyboardTeleop": ("geodude_teleoperation.teleop.keyboard", "KeyboardTeleop"),
     "OrientationField": ("geodude_teleoperation.virtual_fixture", "OrientationField"),
     "WalkOnSpheresVirtualFixture": (

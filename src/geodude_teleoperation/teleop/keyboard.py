@@ -40,8 +40,11 @@ Keyboard teleoperation:
   n/m: e12 +/-  j/k: e13 +/-  u/i: e23 +/-  (angular)
   With VF on: twist axes are field / R_field (not TCP body); each keypress
   re-locks orientation to R_field. Idle (no keys) holds current TCP pose.
-  Enter: enable motion (calibrate → teleop)
-  t: toggle teleoperation    v: toggle virtual fixture    q: quit
+  Enter: enable motion (calibrate → teleop); live RTDE also locks
+  TCP orientation to R_field with a startup vel/accel ramp.
+  Live: Enter again after lock settles to approve teleop.
+  t: toggle teleoperation    v: toggle virtual fixture
+  f: freeze/unfreeze VF (free-space) or n* (in-contact)    q: quit
 
 With --viz (live Polyscope): Enter / w/s/a/d/x/y / t/v/f / q also work in the
   Polyscope window (stdin is unused while the GUI has focus). Object offset

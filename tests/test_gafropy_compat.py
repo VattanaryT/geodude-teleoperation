@@ -32,4 +32,7 @@ def test_gafropy_importable_true(monkeypatch):
         return R()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    assert gafropy_compat.gafropy_importable() is True
+    try:
+        assert gafropy_compat.gafropy_importable() is True
+    finally:
+        gafropy_compat.clear_gafropy_importable_cache()

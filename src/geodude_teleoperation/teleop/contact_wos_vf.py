@@ -231,6 +231,15 @@ class ContactWosOrientationField:
         self._last_ee_motor = None
         self._cache_warm = False
         self._status: VFStatus | None = None
+        self._frozen = False
+
+    def set_frozen(self, frozen: bool) -> None:
+        """When True, ``update_from_state`` keeps ``R_motion`` (no WoS relock)."""
+        self._frozen = bool(frozen)
+
+    @property
+    def frozen(self) -> bool:
+        return self._frozen
 
     def set_T_tag0_base(self, T: np.ndarray) -> None:
         self._T_tag0_base = np.asarray(T, dtype=float).reshape(4, 4)
@@ -282,6 +291,28 @@ class ContactWosOrientationField:
         p_tcp, R_tcp = _tcp_pose_from_motor(ee_motor)
         p_tip_tag0 = tip_tag0_from_tcp(p_tcp, R_tcp, self._tip_offset, self._T_tag0_base)
         self._last_tip_tag0 = p_tip_tag0.copy()
+
+        if self._frozen and self._cache_warm and self._status is not None:
+            dist = 0.0
+            if self._tip_at_relock is not None:
+                dist = float(np.linalg.norm(p_tip_tag0 - self._tip_at_relock))
+            dt = float(now - self._last_relock_t) if self._last_relock_t else 0.0
+            self._last_ee_motor = ee_motor
+            prev = self._status
+            self._status = VFStatus(
+                signed_d=prev.signed_d,
+                in_contact=prev.in_contact,
+                tip_nn=prev.tip_nn,
+                used_wos=prev.used_wos,
+                query_ms=0.0,
+                R_field_base=np.asarray(prev.R_field_base, dtype=float).copy(),
+                R_motion_base=np.asarray(prev.R_motion_base, dtype=float).copy(),
+                relocked=False,
+                tip_delta_m=dist,
+                dt_since_relock_s=dt,
+                relock_reason="frozen",
+            )
+            return
 
         if not self._cache_warm:
             do_query, reason, tip_delta_m, dt_relock = True, "cold", 0.0, 0.0

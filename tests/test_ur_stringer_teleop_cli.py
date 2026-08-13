@@ -116,6 +116,22 @@ def test_viz_frame_default_vention(tmp_path):
     assert args.viz_frame == "vention"
 
 
+def test_viz_latency_cli_and_ssot(tmp_path):
+    args = _parse(tmp_path)
+    assert args.viz_latency is False
+    args = _parse(tmp_path, ["--viz", "--viz-latency"])
+    assert args.viz_latency is True
+    validate_args(args)
+    args = _parse(
+        tmp_path,
+        ["--viz", "--no-viz-latency"],
+        viz={"latency_table": True},
+    )
+    assert args.viz_latency is False
+    args = _parse(tmp_path, ["--viz"], viz={"latency_table": True})
+    assert args.viz_latency is True
+
+
 def test_motion_log_and_diag_flags(tmp_path):
     args = _parse(
         tmp_path,
@@ -203,6 +219,42 @@ def test_in_contact_flag(tmp_path):
     validate_args(args)
     assert args.in_contact is True
     assert abs(args.desired_normal_force - 5.0) < 1e-12
+
+
+def test_spacemouse_cli_and_ssot(tmp_path):
+    args = _parse(tmp_path)
+    assert args.spacemouse is False
+    validate_args(args)
+
+    args = _parse(tmp_path, ["--spacemouse"])
+    assert args.spacemouse is True
+    validate_args(args)
+
+    args = _parse(
+        tmp_path,
+        ["--no-spacemouse"],
+        control={"spacemouse": True},
+    )
+    assert args.spacemouse is False
+
+    args = _parse(tmp_path, control={"spacemouse": True})
+    assert args.spacemouse is True
+
+    args = _parse(
+        tmp_path,
+        control={
+            "spacemouse": True,
+            "spacemouse_linear_scale": 0.01,
+            "spacemouse_hz": 40.0,
+            "spacemouse_axis_sign": [-1, 1, 1, 1, 1, 1],
+            "spacemouse_path": "/dev/hidraw4",
+        },
+    )
+    assert args.spacemouse_linear_scale == 0.01
+    assert args.spacemouse_hz == 40.0
+    assert args.spacemouse_axis_sign == (-1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+    assert args.spacemouse_path == "/dev/hidraw4"
+    validate_args(args)
 
 
 def test_in_contact_exclusive_with_tactile(tmp_path):

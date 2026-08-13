@@ -1,0 +1,165 @@
+# =============================================================================
+# Snapshot: SpaceMouse live RTDE (2026-08-13)
+# =============================================================================
+# Live free-space SpaceMouse. Keyboard still works.
+# Tune device feel (scales / deadzone / hz / axis signs / HID path) and
+# UR motion limits here. Enter locks TCP orientation to R_field with a
+# startup vel/accel ramp so the arm does not snap. Enter again after
+# settle to approve teleop (VF stays frozen until f).
+# Do not treat this as the scratch file — edit SSoT_dof.yaml for other work.
+#
+# Replay:
+#   geodude-ur-stringer-teleop --config config/SSoT_dof_spacemouse_rtde.yaml --backend rtde --viz
+# =============================================================================
+
+session:
+  backend: rtde
+  dry_run: false
+
+robot:
+  arm: right
+  ip: 192.168.1.2
+
+paths:
+  ply: data/processed/laser_profilometer/merged.ply
+  T_tag0_base: null
+  T_rtde_base_vention: null
+  T_left_base_vention: null
+  calib_meta: null
+  object_offset: null
+  laser_ply: null
+  laser_offset: null
+  log_motion: null
+  record_output_dir: null
+
+pointcloud:
+  voxel_size: 0.003
+  normal_orientation: 1
+
+field:
+  mode: end_lines
+  flow: width
+  end_line_fraction: 0.06
+  swap_end_lines: false
+  diffusion_scalar: 500.0
+
+wos:
+  batch_size: 128
+  convergence_threshold_edge_mult: 2.0
+
+query:
+  contact_threshold_m: 0.001
+  query_radius_m: 0.025
+  fit_mode: sphere
+
+vf:
+  r_field_smoothing: 0.75
+  relock_dist_m: 0.1
+  relock_period_s: 0.5
+  # Clipped to [0, 1] in code; 10.0 → snap R_motion to R_field
+  motion_track: 0.5
+  dry_query_period_s: 1.0
+
+control:
+  # Analog device: 50 Hz host loop is enough (keyboard dry-run uses 500 for WASD repeat).
+  hz: 50.0
+  status_hz: 1.0
+  # --- General live UR motion limits (speedJ) ---
+  max_joint_velocity: 1.0          # rad/s  ‖q̇‖ clamp
+  rtde_accel: 1.0                  # rad/s² speedJ acceleration
+  pose_gain: 4.0
+  max_linear_speed: 0.05           # m/s   tip linear from pose error
+  max_angular_speed: 0.4           # rad/s tip angular from pose error
+  # Enter → lock TCP orientation to R_field (live only). Startup caps ease in;
+  # then limits lerp to the general values over startup_ramp_s.
+  orient_lock_on_enable: true
+  startup_max_joint_velocity: 0.03
+  startup_rtde_accel: 0.03
+  startup_max_angular_speed: 0.08
+  startup_ramp_s: 3
+  orient_lock_tol_deg: 2.0
+  keyboard_step: 0.01
+  # --- SpaceMouse (tune these) ---
+  spacemouse: true
+  # m (linear) / rad (angular) at full deflection, per poll, before 0.25× VF scale.
+  spacemouse_linear_scale: 0.01
+  spacemouse_angular_scale: 0.05
+  spacemouse_deadzone: 0.08
+  # Device poll Hz. null → follow control.hz.
+  spacemouse_hz: 50.0
+  # [x, y, z, roll, pitch, yaw]; flip an axis with -1 if it feels inverted.
+  spacemouse_axis_sign: [1, -1, -1, 1, 1, 1]
+  # HID path, or null for auto. List devices: pyspacemouse --list-spacemouse
+  spacemouse_path: null
+  max_twist_scale: 2.0
+  watchdog_ms: 500.0
+  enable_key: enter
+  tip_offset: [0.0, 0.0, 0.0]
+  base_frame: null
+  tag0_frame: null
+  no_object_offset: false
+  no_rtde_base_vention: false
+  no_laser_offset: false
+  object_offset_step_m: 0.001
+
+viz:
+  frame: vention
+  frame_stride: 20
+  hide_object: false
+  show_object: false
+  teleop_keys: false
+  laser: "off"
+  latency_table: true
+
+laser:
+  voxel: 0.003
+
+tag_crosscheck:
+  camera_rgb_topic: null
+  camera_info_topic: null
+  tag_id: 0
+  tag_size_m: 0.04
+  tag_family: tag36h11
+
+record:
+  mcap: false
+  sample_hz: 0.0
+  save_images: true
+  camera_topics: null
+  target_frame: vention_frame
+  plot_motion: false
+
+line_tracking:
+  enabled: false
+  soft_standoff: false
+  standoff_distance: 0.002
+  standoff_gain: 1.0
+  standoff_max_speed: 0.05
+  no_keyboard_normal_ff: false
+
+tactile:
+  enabled: false
+  desired_normal_force: 5.0
+  wrench_kp: 0.02
+  wrench_ki: 0.0
+  wrench_kd: 0.0
+  wrench_to_vn: 0.01
+  max_vn: 0.03
+  ft_bias: null
+
+in_contact:
+  enabled: false
+  force_sign: 1.0
+  align_first: true
+  align_enter_tol_deg: 5.0
+  align_exit_tol_deg: 12.0
+  approach_v_max: 0.006
+  force_max_v: 0.010
+
+diag:
+  hold_zero: false
+  fixed_orient: false
+  verify_500hz: false
+  dtc_verify_seconds: 2.0
+  verify_500hz_exit: false
+  polyscope_version: null

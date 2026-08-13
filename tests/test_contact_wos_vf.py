@@ -279,6 +279,41 @@ def test_motion_relock_throttles_field_query(monkeypatch):
     assert "R_motion_base" in vf.status
 
 
+def test_frozen_vf_skips_relock_query(monkeypatch):
+    """f freeze: update_from_state must not relock R_motion or re-query WoS."""
+    from geodude_teleoperation.teleop import contact_wos_vf as cvf
+
+    calls = {"n": 0}
+    real = cvf.query_field_basis
+
+    def counting_query(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(cvf, "query_field_basis", counting_query)
+
+    vf = ContactWosOrientationField(
+        _line_cloud(),
+        _WosOk(),
+        tip_offset=np.zeros(3),
+        contact_threshold=0.05,
+        relock_dist_m=0.001,
+        relock_period_s=0.0,
+        r_field_smoothing=0.0,
+        motion_track=1.0,
+        fit_mode="plane",
+        query_radius=0.2,
+    )
+    vf.update_from_state(DuckMotor(np.array([0.0, 0.0, 0.02])))
+    R0 = vf.motion_basis().copy()
+    n0 = calls["n"]
+    vf.set_frozen(True)
+    vf.update_from_state(DuckMotor(np.array([0.08, 0.0, 0.02])))
+    assert calls["n"] == n0
+    assert np.allclose(vf.motion_basis(), R0)
+    assert vf.status["relock_reason"] == "frozen"
+
+
 def test_relock_rate_limits_when_tip_jumps_every_tick(monkeypatch):
     """Fast tip travel > relock_dist every sample must not re-query every tick.
 

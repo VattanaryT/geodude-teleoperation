@@ -42,9 +42,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="geodude-ur-stringer-teleop",
         description=(
-            "Keyboard teleoperation for Geodude right UR5e against a stringer "
-            "orientation field. Tunables / paths / robot IP live in "
-            "config/SSoT_dof.yaml; CLI is for session toggles only."
+            "Keyboard (+ optional SpaceMouse) teleoperation for Geodude right "
+            "UR5e against a stringer orientation field. Tunables / paths / "
+            "robot IP live in config/SSoT_dof.yaml; CLI is for session toggles only."
         ),
         parents=[pre],
         allow_abbrev=False,
@@ -96,6 +96,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Override viz.laser from SSoT (off|overlay|replace)",
     )
     parser.add_argument(
+        "--viz-latency",
+        action=argparse.BooleanOptionalAction,
+        help=(
+            "Polyscope Latency table (loop / WoS query / relock / SpaceMouse / "
+            "viz age in ms). Default from viz.latency_table; use --no-viz-latency "
+            "to hide."
+        ),
+    )
+    parser.add_argument(
         "--line-tracking",
         action="store_true",
         help="Phase 1.5: free tip along R_field normal",
@@ -114,6 +123,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--tactile",
         action="store_true",
         help="Phase 3a: ActualTCPForce normal-force FF on speedJ",
+    )
+    parser.add_argument(
+        "--spacemouse",
+        action=argparse.BooleanOptionalAction,
+        help=(
+            "Also read a 3Dconnexion SpaceMouse (keyboard bindings unchanged). "
+            "Default from control.spacemouse in SSoT; use --no-spacemouse to "
+            "force keyboard-only."
+        ),
     )
     parser.add_argument(
         "--in-contact",
@@ -399,7 +417,10 @@ def run_mujoco(args: argparse.Namespace) -> int:
     from geodude_teleoperation.teleop.contact_wos_vf import ContactWosOrientationField
     from geodude_teleoperation.teleop.controller import TeleoperationController
     from geodude_teleoperation.frames import load_T_tag0_base, warn_tip_offset_xy
-    from geodude_teleoperation.teleop.keyboard import KeyboardTeleop
+    from geodude_teleoperation.teleop.inputs import (
+        start_teleop_inputs,
+        stop_teleop_inputs,
+    )
     from geodude_teleoperation.teleop.teleop_state import (
         TeleopState,
         format_status_line,
@@ -518,12 +539,11 @@ def run_mujoco(args: argparse.Namespace) -> int:
     def on_twist(twist) -> None:
         pending_twist["twist"] = twist
 
-    keyboard = KeyboardTeleop(step=args.keyboard_step)
-    keyboard.start(
-        on_twist,
+    keyboard, spacemouse = start_teleop_inputs(
+        args,
+        on_twist=on_twist,
         on_button=on_button,
         on_enable=on_enable,
-        enable_key=args.enable_key,
     )
 
     dt = 1.0 / args.control_hz
@@ -581,7 +601,7 @@ def run_mujoco(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        keyboard.stop()
+        stop_teleop_inputs(keyboard, spacemouse)
         if control_started:
             interface.shutdown()
 
@@ -734,6 +754,7 @@ def run_rtde(args: argparse.Namespace) -> int:
 
     # Polyscope on main thread; RTDE loop publishes TCP on a worker thread.
     live_viz = LiveVizState()
+    live_viz.show_latency_table = bool(getattr(args, "viz_latency", False))
 
     def _loop_worker() -> None:
         try:
@@ -767,6 +788,8 @@ def run_rtde(args: argparse.Namespace) -> int:
             break
         time.sleep(0.05)
 
+    from geodude_teleoperation.rtde.control_loop import request_rtde_shutdown
+
     try:
         maybe_show_startup_viz(
             args,
@@ -781,11 +804,20 @@ def run_rtde(args: argparse.Namespace) -> int:
             live_viz=live_viz,
             T_tag0_vention_raw=T_tag0_vention_raw,
         )
+    except KeyboardInterrupt:
+        print("info: interrupted — stopping RTDE motion", flush=True)
+        live_viz.mark_viz_closed()
+        request_rtde_shutdown()
+        worker.join(timeout=3.0)
+        return 130
     except SystemExit:
         live_viz.mark_viz_closed()
+        request_rtde_shutdown()
+        worker.join(timeout=3.0)
         raise
     finally:
         live_viz.mark_viz_closed()
+        request_rtde_shutdown()
 
     if live_viz.loop_done.is_set():
         worker.join(timeout=5.0)

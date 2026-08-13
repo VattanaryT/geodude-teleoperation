@@ -214,17 +214,26 @@ class NumpyUrKinematicsBridge:
             err = apply_line_tracking_pose_error(err, R, enabled=True)
 
         # Cap pose error so gain * err cannot exceed configured task speeds.
+        # ``<= 0`` means kill that axis (Enter lock: no translation chase).
         g = max(float(gain), 1e-6)
-        if max_linear_speed is not None and float(max_linear_speed) > 0.0:
-            e_max = float(max_linear_speed) / g
-            n = float(np.linalg.norm(err[:3]))
-            if n > e_max:
-                err[:3] *= e_max / n
-        if max_angular_speed is not None and float(max_angular_speed) > 0.0:
-            e_max = float(max_angular_speed) / g
-            n = float(np.linalg.norm(err[3:6]))
-            if n > e_max:
-                err[3:6] *= e_max / n
+        if max_linear_speed is not None:
+            v_max = float(max_linear_speed)
+            if v_max <= 0.0:
+                err[:3] = 0.0
+            else:
+                e_max = v_max / g
+                n = float(np.linalg.norm(err[:3]))
+                if n > e_max:
+                    err[:3] *= e_max / n
+        if max_angular_speed is not None:
+            w_max = float(max_angular_speed)
+            if w_max <= 0.0:
+                err[3:6] = 0.0
+            else:
+                e_max = w_max / g
+                n = float(np.linalg.norm(err[3:6]))
+                if n > e_max:
+                    err[3:6] *= e_max / n
 
         qdot, diag = qdot_from_error(
             err,

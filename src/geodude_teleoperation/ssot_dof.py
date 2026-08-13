@@ -40,10 +40,24 @@ _FLAT_MAP: tuple[tuple[str, str], ...] = (
     ("vf.relock_dist_m", "vf_relock_dist"),
     ("vf.relock_period_s", "vf_relock_period"),
     ("vf.motion_track", "vf_motion_track"),
+    ("vf.dry_query_period_s", "vf_dry_query_period_s"),
     ("control.hz", "control_hz"),
     ("control.status_hz", "status_hz"),
     ("control.max_joint_velocity", "max_joint_velocity"),
+    ("control.orient_lock_on_enable", "orient_lock_on_enable"),
+    ("control.startup_max_joint_velocity", "startup_max_joint_velocity"),
+    ("control.startup_rtde_accel", "startup_rtde_accel"),
+    ("control.startup_max_angular_speed", "startup_max_angular_speed"),
+    ("control.startup_ramp_s", "startup_ramp_s"),
+    ("control.orient_lock_tol_deg", "orient_lock_tol_deg"),
     ("control.keyboard_step", "keyboard_step"),
+    ("control.spacemouse", "spacemouse"),
+    ("control.spacemouse_linear_scale", "spacemouse_linear_scale"),
+    ("control.spacemouse_angular_scale", "spacemouse_angular_scale"),
+    ("control.spacemouse_deadzone", "spacemouse_deadzone"),
+    ("control.spacemouse_hz", "spacemouse_hz"),
+    ("control.spacemouse_axis_sign", "spacemouse_axis_sign"),
+    ("control.spacemouse_path", "spacemouse_path"),
     ("control.rtde_accel", "rtde_accel"),
     ("control.pose_gain", "pose_gain"),
     ("control.max_linear_speed", "max_linear_speed"),
@@ -64,6 +78,7 @@ _FLAT_MAP: tuple[tuple[str, str], ...] = (
     ("viz.show_object", "viz_show_object"),
     ("viz.teleop_keys", "viz_teleop_keys"),
     ("viz.laser", "viz_laser"),
+    ("viz.latency_table", "viz_latency"),
     ("laser.voxel", "laser_voxel"),
     ("tag_crosscheck.camera_rgb_topic", "camera_rgb_topic"),
     ("tag_crosscheck.camera_info_topic", "camera_info_topic"),
@@ -173,6 +188,27 @@ def flatten_ssot(cfg: Mapping[str, Any]) -> dict[str, Any]:
         if len(bias_list) != 6:
             raise ValueError("tactile.ft_bias must have length 6 when set")
         out["ft_bias"] = tuple(float(x) for x in bias_list)
+
+    sm_hz = out.get("spacemouse_hz")
+    if sm_hz is None or sm_hz == "":
+        out["spacemouse_hz"] = None
+    else:
+        out["spacemouse_hz"] = float(sm_hz)
+
+    signs = out.get("spacemouse_axis_sign")
+    if signs is None:
+        out["spacemouse_axis_sign"] = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+    else:
+        sign_list = list(signs)
+        if len(sign_list) != 6:
+            raise ValueError("control.spacemouse_axis_sign must have length 6")
+        out["spacemouse_axis_sign"] = tuple(float(x) for x in sign_list)
+
+    sm_path = out.get("spacemouse_path")
+    if sm_path is None or sm_path == "":
+        out["spacemouse_path"] = None
+    else:
+        out["spacemouse_path"] = str(sm_path)
 
     for key in _PATH_KEYS:
         val = out.get(key)
