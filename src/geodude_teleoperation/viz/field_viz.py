@@ -1117,7 +1117,7 @@ def _run_live_rtde_markers(
                 )
             imgui.TextUnformatted(
                 "teleop (this window): Enter enable · Enter again approve · "
-                "hold w/s a/d x/y move · t/v pause/VF · f freeze VF/n* · q quit"
+                "hold w/s a/d x/y move · t/v pause/VF · f hold / unlock VF · q quit"
             )
             draw_latency_imgui(imgui, live_viz)
 

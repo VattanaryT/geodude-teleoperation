@@ -82,7 +82,7 @@ These are **different jobs** — smoothing ≠ relock ≠ query rate.
 | `pose_gain` | Pose servo: `q̇ ≈ −gain J⁺ e`. Too high saturates on tiny steps. | live (numpy bridge) |
 | `max_linear_speed` | Cap tip linear from pose error (m/s). Always this (Enter does not translate). | live |
 | `max_angular_speed` | Cap tip angular from pose error (rad/s) after lock settles. | live |
-| `orient_lock_on_enable` | Live Enter freezes `R*` = `R_field` and rotates **in place** (no translation servo; **WoS/VF queries paused**). After settle, arm **holds** until a **second Enter** approves teleop. VF stays frozen until `f`. Dry-run still snaps instantly. `false` → hold current EE. | **live** |
+| `orient_lock_on_enable` | Live Enter freezes `R*` = `R_field` and rotates **in place** (no translation servo; **WoS/VF queries paused**). After settle, arm **holds** until a **second Enter** approves teleop. VF stays frozen. **`f`** holds live TCP; **`f` again** unlocks VF queries. Dry-run still snaps instantly. `false` → hold current EE. | **live** |
 | `startup_max_joint_velocity` | `‖q̇‖` cap (rad/s) at Enter; lerps to `max_joint_velocity` over `startup_ramp_s`. | **live** |
 | `startup_rtde_accel` | `speedJ` accel (rad/s²) at Enter; lerps to `rtde_accel`. Keep low so lock does not snap. | **live** |
 | `startup_max_angular_speed` | Tip angular cap (rad/s) at Enter; lerps to `max_angular_speed`. | **live** |

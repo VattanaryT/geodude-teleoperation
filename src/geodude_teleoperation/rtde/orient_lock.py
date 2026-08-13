@@ -76,7 +76,7 @@ class EnableOrientLock:
     """Latch: after Enter, rotate in place toward a frozen ``R_star``.
 
     After settle, hold still until a second Enter approves teleop. VF queries
-    stay frozen. ``f`` toggles pose-hold (stay still) without unfreezing WoS.
+    stay frozen until ``f`` again (pose-hold off unlocks WoS).
     """
 
     def __init__(self) -> None:
@@ -116,9 +116,9 @@ class EnableOrientLock:
         return True
 
     def toggle_pose_hold(self) -> bool:
-        """``f``: freeze current TCP in place. Does not unfreeze VF queries."""
+        """``f``: hold pose + freeze VF. ``f`` again: resume teleop + unlock VF."""
         self.pose_hold = not self.pose_hold
-        self.vf_frozen = True
+        self.vf_frozen = bool(self.pose_hold)
         return self.pose_hold
 
     def toggle_vf_freeze(self) -> bool:

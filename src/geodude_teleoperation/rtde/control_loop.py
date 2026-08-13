@@ -162,13 +162,7 @@ class RtdeTeleopSession:
         qdot_list = [float(v) for v in qdot]
         self._control.speedJ(qdot_list, float(accel), self._speedj_time)
 
-    def stop_motion(self) -> None:
-        """Leave continuous speedJ / DTC cleanly (call before disconnect).
-
-        UR ``speedJ`` keeps the last q̇ until a new command. Host exit without
-        ``speedStop`` leaves the arm moving.
-        """
-        self._stopping = True
+    def _send_stop_commands(self) -> None:
         if self._dry_run or self._control is None:
             return
         accel = float(max(abs(self._accel), 1.0))
@@ -187,6 +181,19 @@ class RtdeTeleopSession:
                 continue
             except Exception:
                 continue
+
+    def zero_speed(self) -> None:
+        """speedStop now without latching shutdown (``f`` pose-hold / approve)."""
+        self._send_stop_commands()
+
+    def stop_motion(self) -> None:
+        """Leave continuous speedJ / DTC cleanly (call before disconnect).
+
+        UR ``speedJ`` keeps the last q̇ until a new command. Host exit without
+        ``speedStop`` leaves the arm moving.
+        """
+        self._stopping = True
+        self._send_stop_commands()
 
     def close(self) -> None:
         global _active_session
@@ -774,7 +781,11 @@ def run_rtde_loop(
     """Host loop at ``args.control_hz`` for RTDE backend."""
     from geodude_teleoperation.frames import warn_tip_offset_xy
     from geodude_teleoperation.teleop.motion_trace import MotionTraceLogger, save_and_maybe_plot
-    from geodude_teleoperation.teleop.teleop_state import format_status_line, should_emit_status
+    from geodude_teleoperation.teleop.teleop_state import (
+        format_status_line,
+        format_toggle,
+        should_emit_status,
+    )
 
     pcloud, wos = field_bundle  # noqa: F841 — kept for API parity with plan
 
@@ -803,6 +814,7 @@ def run_rtde_loop(
         apply_orient_lock_reference,
         blend_startup_motion_limits,
         orientation_error_deg,
+        recapture_pose_reference,
         twist_linear_only,
     )
     from geodude_teleoperation.teleop.contact_teleop import (
@@ -1011,6 +1023,7 @@ def run_rtde_loop(
     prev_orient_locking = False
     prev_awaiting_approve = False
     vf_freeze_on = {"v": False}
+    recapture_pose = {"v": False}
     general_limits = MotionLimits(
         max_joint_velocity=float(args.max_joint_velocity),
         rtde_accel=float(args.rtde_accel),
@@ -1056,9 +1069,17 @@ def run_rtde_loop(
             if not orient_lock.approved:
                 orient_lock.approve()
                 _apply_vf_frozen(True)
+                pending_twist["twist"] = None
+                recapture_pose["v"] = True
+                if session.control_open:
+                    try:
+                        session.zero_speed()
+                    except Exception:
+                        pass
                 print(
-                    "info: teleop approved — VF frozen "
-                    "(press f to unfreeze queries)",
+                    "info: teleop approved — "
+                    f"VF queries={format_toggle(False, on_label='ON', off_label='FROZEN')}; "
+                    f"f = pose hold (again unlocks fields)",
                     flush=True,
                 )
                 return
@@ -1100,6 +1121,10 @@ def run_rtde_loop(
     def on_button(index: int) -> None:
         if index == 0:
             state.teleop_active = not state.teleop_active
+            print(
+                f"info: teleop_active={format_toggle(state.teleop_active, on_label='1', off_label='0')}",
+                flush=True,
+            )
         elif index == 1:
             if diag_hold_zero:
                 return
@@ -1107,19 +1132,45 @@ def run_rtde_loop(
                 return
             state.vf_enabled = not state.vf_enabled
             controller.set_virtual_fixture(vf if state.vf_enabled else None)
+            print(
+                f"info: vf={format_toggle(state.vf_enabled, on_label='1', off_label='0')}",
+                flush=True,
+            )
         elif index == 2:
             if contact_bridge is not None:
                 frozen = contact_bridge.toggle_freeze()
-                print(f"info: n* freeze={'ON' if frozen else 'OFF'}", flush=True)
+                print(
+                    f"info: n* freeze={format_toggle(frozen)}",
+                    flush=True,
+                )
                 return
             if not state.motion_enabled:
                 return
-            if orient_lock.enabled_at is not None:
-                frozen = orient_lock.toggle_vf_freeze()
-            else:
-                frozen = not vf_freeze_on["v"]
-            _apply_vf_frozen(frozen)
-            print(f"info: VF freeze={'ON' if frozen else 'OFF'}", flush=True)
+            if (
+                orient_lock_on_enable
+                and orient_lock.enabled_at is not None
+                and not orient_lock.approved
+            ):
+                print(
+                    "info: f ignored until teleop approved (Enter again)",
+                    flush=True,
+                )
+                return
+            holding = orient_lock.toggle_pose_hold()
+            pending_twist["twist"] = None
+            recapture_pose["v"] = True
+            _apply_vf_frozen(orient_lock.vf_frozen)
+            if holding and session.control_open:
+                try:
+                    session.zero_speed()
+                except Exception:
+                    pass
+            print(
+                f"info: pose hold={format_toggle(holding)}  "
+                f"VF queries={format_toggle(not orient_lock.vf_frozen, on_label='ON', off_label='FROZEN')}  "
+                f"(recaptured live TCP)",
+                flush=True,
+            )
 
     def on_twist(twist, *, source: str = "keyboard") -> None:
         if diag_hold_zero:
@@ -1326,6 +1377,7 @@ def run_rtde_loop(
             motion_limits = general_limits
             orient_locking = False
             hold_still = False
+            pose_hold = bool(orient_lock.pose_hold)
             if (
                 not args.dry_run
                 and orient_lock.enabled_at is not None
@@ -1365,7 +1417,7 @@ def run_rtde_loop(
                     ramp_s=startup_ramp_s,
                     startup=startup_limits,
                     general=general_limits,
-                    locking=orient_locking or hold_still,
+                    locking=orient_locking or hold_still or pose_hold,
                 )
                 if orient_lock.R_star is not None:
                     _apply_vf_frozen(
@@ -1382,8 +1434,12 @@ def run_rtde_loop(
                 kin.ensure_reference_from_tcp()
                 # Dry-run: align EE to live R_field immediately (safe — no speedJ).
                 # Live Enter-lock: freeze R* and pin T_ref to current TCP (in-place).
+                # Approve / f pose-hold: recapture live TCP so leftover R* does not yank.
                 if args.dry_run and sim_active and state.vf_enabled:
                     snap_T_ref_orientation_to_vf(kin, vf)
+                elif recapture_pose["v"] or pose_hold:
+                    recapture_pose_reference(kin, tcp_pose)
+                    recapture_pose["v"] = False
                 elif (
                     (orient_locking or hold_still)
                     and orient_lock.R_star is not None
@@ -1396,7 +1452,7 @@ def run_rtde_loop(
 
             def _apply_twist(twist_obj, *, key: str = "") -> None:
                 nonlocal fresh_command, key_this_tick
-                if orient_locking or hold_still:
+                if orient_locking or hold_still or pose_hold:
                     twist_obj = twist_linear_only(twist_obj)
                 R_prev = vf_R_field_or_none(vf)
                 if R_prev is None:
@@ -1438,7 +1494,7 @@ def run_rtde_loop(
                 pending_twist["twist"] = None
                 key_this_tick = str(pending_twist.get("key") or "")
                 pending_twist["key"] = ""
-                if math_ok and not orient_locking and not hold_still:
+                if math_ok and not orient_locking and not hold_still and not pose_hold:
                     _apply_twist(twist, key=key_this_tick)
 
             # Polyscope held WASD/X/Y → one combined step every control tick
@@ -1449,6 +1505,7 @@ def run_rtde_loop(
                 and not diag_hold_zero
                 and not orient_locking
                 and not hold_still
+                and not pose_hold
                 and (kin_ok or contact_bridge is not None)
             ):
                 held = live_viz.held_teleop_keys()

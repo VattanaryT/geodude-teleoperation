@@ -29,7 +29,7 @@ SpaceMouse teleoperation (optional; keyboard still works):
   press again after settle to approve teleop)
   Button 1: toggle teleoperation pause (same as t)
   v / f / q stay on the keyboard (or Polyscope window).
-  f freezes/unfreezes VF queries during free-space teleop.
+  f holds pose + freezes VF; press again to resume and unlock fields.
   Idle (within deadzone) holds current TCP pose.
   In-contact: only field-tangent xy; z and angular ignored.
 """

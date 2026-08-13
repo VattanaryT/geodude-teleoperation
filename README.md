@@ -100,7 +100,7 @@ Knob-by-knob notes: [`config/SSoT_dof.md`](config/SSoT_dof.md).
 ## Safety
 
 Calibrate (motion off) → check prints → **Enter** to enable → after lock settles **Enter again** to approve teleop.  
-`t` / `v` toggle teleop-active / VF only. `f` freezes VF (free-space) or `n*` (in-contact). `q` quits. **Ctrl+C** must `speedStop` the UR (last `speedJ` otherwise keeps running).
+`t` / `v` toggle teleop-active / VF only. `f` holds pose in place (free-space) or freezes `n*` (in-contact). `q` quits. **Ctrl+C** must `speedStop` the UR (last `speedJ` otherwise keeps running).
 
 | Key | Free-space | In-contact |
 | --- | --- | --- |
@@ -108,7 +108,7 @@ Calibrate (motion off) → check prints → **Enter** to enable → after lock s
 | `t` / `v` | Pause teleop / toggle VF | Pause teleop / toggle VF |
 | `w/s a/d` | Field ±x / ±y | Tangent slide ⊥ `n*` |
 | `y/x` | Field ±z (normal) | Ignored (Force owns normal) |
-| `f` | Freeze / unfreeze VF queries (`R_motion`) | Freeze / unfreeze `n*` |
+| `f` | Hold pose (`speedStop` + recapture, VF frozen). Again: resume + unlock VF | Freeze / unfreeze `n*` |
 | `q` | Quit | Quit |
 
 With `--viz`, use these keys in the **Polyscope window** (not only the terminal).
@@ -151,7 +151,7 @@ geodude-ur-stringer-teleop --backend rtde --no-dry-run --viz
 geodude-ur-stringer-teleop --config config/SSoT_dof_spacemouse_rtde.yaml --viz
 ```
 
-Calibrate → focus the **Polyscope window** → **Enter** (enable + rotate TCP **in place** to frozen `R_field`) → wait for settle → **Enter again** to approve teleop → `w/s a/d x/y` move tip along the **field** frame (±x/±y/±z). VF stays frozen after approve (no WoS relock) until `f`. Live Enter uses `startup_*` vel/accel (linear speed 0 during lock/hold) then general limits after approve. One keypress ≈ `keyboard_step` × adaptive scale (capped by `max_twist_scale`).
+Calibrate → focus the **Polyscope window** → **Enter** (enable + rotate TCP **in place** to frozen `R_field`) → wait for settle → **Enter again** to approve teleop → `w/s a/d x/y` move tip along the **field** frame (±x/±y/±z). VF stays frozen after approve (no WoS relock). **`f`** holds the live TCP (`speedStop` + recapture, VF frozen). **`f` again** resumes teleop and unlocks VF queries. Live Enter uses `startup_*` vel/accel (linear speed 0 during lock/hold) then general limits after approve. One keypress ≈ `keyboard_step` × adaptive scale (capped by `max_twist_scale`).
 
 Optional free-space layers (SSoT or CLI): `--line-tracking`, `--tactile` (not with `--in-contact`).
 

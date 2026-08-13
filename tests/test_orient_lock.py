@@ -135,7 +135,7 @@ def test_enable_orient_lock_holds_until_second_enter():
     assert lock.vf_frozen is True
 
 
-def test_enable_orient_lock_toggle_pose_hold_keeps_vf_frozen():
+def test_enable_orient_lock_toggle_pose_hold_unfreezes_vf_on_second_f():
     lock = EnableOrientLock()
     lock.on_enable(now=0.0)
     lock.approve()
@@ -147,7 +147,7 @@ def test_enable_orient_lock_toggle_pose_hold_keeps_vf_frozen():
     assert lock.vf_frozen is True
     assert lock.toggle_pose_hold() is False
     assert lock.pose_hold is False
-    assert lock.vf_frozen is True
+    assert lock.vf_frozen is False
 
 
 def test_recapture_pose_reference_matches_live_tcp():

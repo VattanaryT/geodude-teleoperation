@@ -5,7 +5,7 @@
 # Tune device feel (scales / deadzone / hz / axis signs / HID path) and
 # UR motion limits here. Enter locks TCP orientation to R_field with a
 # startup vel/accel ramp so the arm does not snap. Enter again after
-# settle to approve teleop (VF stays frozen until f).
+# settle to approve teleop (VF frozen). f holds pose; f again unlocks VF.
 # Do not treat this as the scratch file — edit SSoT_dof.yaml for other work.
 #
 # Replay:
@@ -53,17 +53,17 @@ query:
   fit_mode: sphere
 
 vf:
-  r_field_smoothing: 0.75
+  r_field_smoothing: 0.5
   relock_dist_m: 0.1
   relock_period_s: 0.5
   # Clipped to [0, 1] in code; 10.0 → snap R_motion to R_field
-  motion_track: 0.5
+  motion_track: 1.0
   dry_query_period_s: 1.0
 
 control:
   # Analog device: 50 Hz host loop is enough (keyboard dry-run uses 500 for WASD repeat).
   hz: 50.0
-  status_hz: 1.0
+  status_hz: 0.01
   # --- General live UR motion limits (speedJ) ---
   max_joint_velocity: 1.0          # rad/s  ‖q̇‖ clamp
   rtde_accel: 1.0                  # rad/s² speedJ acceleration

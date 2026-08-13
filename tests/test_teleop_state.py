@@ -1,6 +1,7 @@
 from geodude_teleoperation.teleop.teleop_state import (
     TeleopState,
     format_status_line,
+    format_toggle,
     should_emit_status,
 )
 
@@ -41,6 +42,24 @@ def test_status_line_has_flags():
     )
     assert "motion_enabled=1" in line
     assert "teleop_active=1" in line
+
+
+def test_format_toggle_plain_without_tty(monkeypatch):
+    monkeypatch.setattr(
+        "geodude_teleoperation.teleop.teleop_state._stdout_color", lambda: False
+    )
+    assert format_toggle(True) == "ON"
+    assert format_toggle(False) == "OFF"
+
+
+def test_format_toggle_ansi_when_tty(monkeypatch):
+    monkeypatch.setattr(
+        "geodude_teleoperation.teleop.teleop_state._stdout_color", lambda: True
+    )
+    on = format_toggle(True)
+    off = format_toggle(False)
+    assert "ON" in on and "\033[32m" in on and "\033[0m" in on
+    assert "OFF" in off and "\033[31m" in off and "\033[0m" in off
 
 
 def test_should_emit_status_throttles():

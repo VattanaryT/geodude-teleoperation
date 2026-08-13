@@ -1,8 +1,31 @@
 """Teleop mode flags, command gating, and status line formatting."""
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from typing import Any, Mapping
+
+_GREEN = "\033[32m"
+_RED = "\033[31m"
+_BOLD = "\033[1m"
+_RESET = "\033[0m"
+
+
+def _stdout_color() -> bool:
+    out = getattr(sys, "stdout", None)
+    isatty = getattr(out, "isatty", None)
+    return bool(isatty()) if callable(isatty) else False
+
+
+def format_toggle(
+    on: bool, *, on_label: str = "ON", off_label: str = "OFF"
+) -> str:
+    """Green bold ON / red bold OFF when stdout is a TTY; plain otherwise."""
+    label = on_label if on else off_label
+    if not _stdout_color():
+        return label
+    color = _GREEN if on else _RED
+    return f"{color}{_BOLD}{label}{_RESET}"
 
 
 @dataclass
@@ -34,7 +57,7 @@ class TeleopState:
 
 
 def _flag(value: bool) -> str:
-    return "1" if value else "0"
+    return format_toggle(bool(value), on_label="1", off_label="0")
 
 
 def _format_signed_d(signed_d: float) -> str:

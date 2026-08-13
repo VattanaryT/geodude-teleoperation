@@ -44,7 +44,8 @@ Keyboard teleoperation:
   TCP orientation to R_field with a startup vel/accel ramp.
   Live: Enter again after lock settles to approve teleop.
   t: toggle teleoperation    v: toggle virtual fixture
-  f: freeze/unfreeze VF (free-space) or n* (in-contact)    q: quit
+  f: hold pose + freeze VF; again = resume + unlock fields (or n* in-contact)
+  q: quit
 
 With --viz (live Polyscope): Enter / w/s/a/d/x/y / t/v/f / q also work in the
   Polyscope window (stdin is unused while the GUI has focus). Object offset

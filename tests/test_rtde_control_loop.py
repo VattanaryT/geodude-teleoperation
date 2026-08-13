@@ -924,8 +924,8 @@ def test_enable_locks_orientation_with_startup_limits(fake_ur_rtde, monkeypatch)
     assert vf.n_update_after_enable == 0, vf.n_update_after_enable
 
 
-def test_second_enter_approves_teleop_vf_stays_frozen(fake_ur_rtde, monkeypatch):
-    """After lock settles, hold still until Enter #2; f pose-holds, VF stays frozen."""
+def test_second_enter_approves_teleop_f_unlocks_vf(fake_ur_rtde, monkeypatch):
+    """Enter #2 approves (VF frozen). f holds pose; f again unlocks VF queries."""
     import sys
     import types
 
@@ -970,8 +970,10 @@ def test_second_enter_approves_teleop_vf_stays_frozen(fake_ur_rtde, monkeypatch)
             elif self._n == 6 and self._on_enable is not None:
                 self._on_enable()
             elif self._n == 10 and self._on_button is not None:
-                self._on_button(2)  # f → pose hold, not VF unfreeze
-            elif self._n >= 14:
+                self._on_button(2)  # f → pose hold ON, VF frozen
+            elif self._n == 12 and self._on_button is not None:
+                self._on_button(2)  # f → pose hold OFF, VF unlocked
+            elif self._n >= 16:
                 self._running.clear()
 
     kb = _KB()
@@ -1081,10 +1083,12 @@ def test_second_enter_approves_teleop_vf_stays_frozen(fake_ur_rtde, monkeypatch)
         keyboard=kb,
     )
 
-    # After first Enter / approve / f pose-hold: VF stays frozen (no WoS yank).
-    queries_after_enable = [n for n in query_log if n >= 1]
-    assert queries_after_enable == [], query_log
-    assert vf._frozen is True
+    # Lock / approve / first f: no WoS. Second f unlocks fields.
+    queries_while_frozen = [n for n in query_log if 1 <= n < 12]
+    assert queries_while_frozen == [], query_log
+    queries_after_unlock = [n for n in query_log if n >= 12]
+    assert queries_after_unlock, query_log
+    assert vf._frozen is False
     ctrl = FakeControl.instances[0]
     assert ctrl.speed_stop_calls, "f / approve must speedStop so last speedJ does not coast"
 
