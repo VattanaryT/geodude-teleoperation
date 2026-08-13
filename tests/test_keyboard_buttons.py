@@ -7,6 +7,21 @@ def test_enable_enter():
     assert dispatch_key("\n", step=0.01)[0] == "enable"
 
 
+def test_handle_key_enable_and_twist():
+    from geodude_teleoperation.teleop.keyboard import KeyboardTeleop
+
+    events = []
+    kb = KeyboardTeleop(step=0.01)
+    kb._running.set()
+    kb._on_twist = lambda tw: events.append(("twist", tw.get_linear().tolist()))
+    kb._on_enable = lambda: events.append(("enable", None))
+    kb.handle_key("\n")
+    kb.handle_key("w")
+    assert events[0][0] == "enable"
+    assert events[1][0] == "twist"
+    assert np.allclose(events[1][1], [0.01, 0.0, 0.0])
+
+
 def test_t_v_buttons():
     assert dispatch_key("t", step=0.01) == ("button", 0)
     assert dispatch_key("v", step=0.01) == ("button", 1)

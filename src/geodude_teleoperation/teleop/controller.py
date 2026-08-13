@@ -1,9 +1,12 @@
 import numpy as np
 
-try:
+from geodude_teleoperation.gafropy_compat import gafropy_importable
+
+if gafropy_importable():
     import gafropy
+
     _VelocityControllerBase = gafropy.control.VelocityController
-except ImportError:
+else:
     gafropy = None
 
     class _VelocityControllerBase:

@@ -5,26 +5,27 @@ from pathlib import Path
 
 import numpy as np
 import open3d as o3d
-import yaml
 
 from diffused_fields.diffusion import PointcloudScalarDiffusion, WalkOnSpheresDiffusion
 from diffused_fields.manifold import Pointcloud
 
-from geodude_teleoperation.paths import pointclouds_config_path
+from geodude_teleoperation.paths import ssot_dof_config_path
 
 _DEFAULTS = {"voxel_size": 0.004, "normal_orientation": 1}
 
 
 def config_defaults(object_name: str = "stringer_layup") -> dict:
-    """Load voxel_size / normal_orientation from local ``config/pointclouds.yaml``."""
+    """Load voxel_size / normal_orientation from ``config/SSoT_dof.yaml``."""
+    del object_name  # kept for call-site compatibility
     defaults = dict(_DEFAULTS)
     try:
-        cfg_path = pointclouds_config_path()
+        from geodude_teleoperation.ssot_dof import load_ssot_dof
+
+        cfg_path = ssot_dof_config_path()
         if not cfg_path.exists():
             return defaults
-        with cfg_path.open() as f:
-            cfg = yaml.safe_load(f) or {}
-        entry = cfg.get(object_name, {}) or {}
+        cfg = load_ssot_dof(cfg_path)
+        entry = cfg.get("pointcloud", {}) or {}
         defaults["voxel_size"] = entry.get("voxel_size", defaults["voxel_size"])
         defaults["normal_orientation"] = entry.get(
             "normal_orientation", defaults["normal_orientation"]
@@ -190,10 +191,20 @@ def validate_field_prints(
     return "\n".join(lines)
 
 
-def build_wos(pcloud: Pointcloud, batch_size: int) -> WalkOnSpheresDiffusion:
-    """Walk-on-Spheres solver for off-surface orientation queries."""
+def build_wos(
+    pcloud: Pointcloud,
+    batch_size: int,
+    *,
+    convergence_threshold_edge_mult: float = 2.0,
+) -> WalkOnSpheresDiffusion:
+    """Walk-on-Spheres solver for off-surface orientation queries.
+
+    ``convergence_threshold`` is ``mean_edge_length * convergence_threshold_edge_mult``
+    (see ``wos.convergence_threshold_edge_mult`` in ``SSoT_dof.yaml``).
+    """
     return WalkOnSpheresDiffusion(
         boundaries=[pcloud],
         batch_size=batch_size,
-        convergence_threshold=pcloud.get_mean_edge_length() * 2,
+        convergence_threshold=pcloud.get_mean_edge_length()
+        * float(convergence_threshold_edge_mult),
     )

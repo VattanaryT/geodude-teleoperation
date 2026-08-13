@@ -108,13 +108,14 @@ class _FallbackMotor:
 def _motor_with_field_orientation(proposed_reference, R_field_base: np.ndarray):
     """Keep proposed translator; replace orientation with R_field_base."""
     translator = proposed_reference.get_translator()
-    try:
+    from geodude_teleoperation.gafropy_compat import gafropy_importable
+
+    if gafropy_importable():
         import gafropy
 
         rotor = gafropy.Rotor.from_matrix(R_field_base)
         return gafropy.Motor(translator, rotor)
-    except ImportError:
-        return _FallbackMotor(translator, R_field_base)
+    return _FallbackMotor(translator, R_field_base)
 
 
 @dataclass

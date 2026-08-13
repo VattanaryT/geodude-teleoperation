@@ -1,8 +1,10 @@
 """RTDE receive-only dry-run and live speedJ host loop for stringer teleop.
 
 Kinematics:
-- **Dry-run / VF status:** ``getActualTCPPose`` → minimal EE motor for
-  ``vf.update_from_state``; joint commands stay zero (receive-only).
+- **Dry-run calibrate:** ``getActualTCPPose`` tracks the real arm (pendant OK);
+  control interface stays closed.
+- **Dry-run after Enter:** same free-space / DualLoop math as live; integrate
+  ``q_sim`` and publish TCP to Polyscope (never ``speedJ``). Prefer numpy UR5e.
 - **Live speedJ (preferred):** gafropy MuJoCo ``RobotInterface`` FK/Jacobian
   via ``_GafropyKinematicsBridge``.
 - **Live speedJ (backup):** vendored UR5e FK/J + RTDE TCP via
@@ -434,22 +436,81 @@ def should_refresh_watchdog(
     that target between keypresses. Refreshing only on keypress made each WASD
     tick re-open the gate and dump the same VF orientation snap toward
     ``R_field`` — looking like “every key rotates the same way.”
+
+    Dry-run sim also refreshes: Polyscope integrates ``qdot`` between keys with
+    no control interface open.
     """
     if fresh_command:
         return True
-    return bool(commands_allowed and not dry_run and kin_ok and control_open)
+    if not (commands_allowed and kin_ok):
+        return False
+    if dry_run:
+        return True
+    return bool(control_open)
+
+
+def flange_tcp_offset_matrix(q: Sequence[float], tcp_pose: Sequence[float]) -> np.ndarray:
+    """Fixed flange→TCP SE(3) from a joint/TCP snapshot (for dry-run FK)."""
+    from geodude_teleoperation.rtde.ur5e_kinematics import forward_kinematics
+    from geodude_teleoperation.se3 import tcp_pose_to_matrix
+
+    T_flange, _ = forward_kinematics(np.asarray(q, dtype=float).reshape(6))
+    T_tcp = tcp_pose_to_matrix(tcp_pose)
+    return np.linalg.inv(T_flange) @ T_tcp
+
+
+def tcp_pose_from_q_and_offset(
+    q: Sequence[float], T_flange_tcp: np.ndarray
+) -> np.ndarray:
+    """TCP pose [x,y,z,rx,ry,rz] from joints and a flange→TCP offset."""
+    from geodude_teleoperation.rtde.ur5e_kinematics import forward_kinematics
+    from geodude_teleoperation.se3 import matrix_to_tcp_pose
+
+    T_flange, _ = forward_kinematics(np.asarray(q, dtype=float).reshape(6))
+    return matrix_to_tcp_pose(T_flange @ np.asarray(T_flange_tcp, dtype=float))
+
+
+def snap_T_ref_orientation_to_vf(kin, vf) -> bool:
+    """Replace ``kin._T_ref`` rotation with VF ``R_field`` (dry-run viz only).
+
+    Live speedJ deliberately does not snap on pure linear WASD; dry-run Polyscope
+    can show the field frame on the EE without commanding the robot.
+    """
+    T = getattr(kin, "_T_ref", None)
+    if T is None:
+        return False
+    R = None
+    if hasattr(vf, "motion_basis"):
+        try:
+            R = np.asarray(vf.motion_basis(), dtype=float).reshape(3, 3)
+        except Exception:
+            R = None
+    if R is None:
+        st = getattr(vf, "status", None) or {}
+        raw = st.get("R_field_raw_smoothed")
+        if raw is None:
+            raw = st.get("R_field_base")
+        if raw is not None:
+            R = np.asarray(raw, dtype=float).reshape(3, 3)
+    if R is None:
+        return False
+    T_new = np.asarray(T, dtype=float).reshape(4, 4).copy()
+    T_new[:3, :3] = R
+    kin._T_ref = T_new
+    return True
 
 
 def resolve_live_kinematics(line_tracking=None):
-    """Prefer gafropy; fall back to numpy UR5e backup. ``None`` if both fail.
+    """Prefer gafropy when it imports cleanly; else numpy UR5e backup.
 
-    Phase 1.5 line tracking / soft stand-off / Phase 3 tactile prefer the numpy
-    bridge (explicit pose error + normal feedforward). When those modes are on,
-    numpy is tried first.
+    ``import gafropy`` SIGILLs on some CPUs, so we probe in a subprocess first
+    (see ``gafropy_compat``). Phase 1.5 line tracking prefers numpy either way.
     """
+    from geodude_teleoperation.gafropy_compat import gafropy_importable
     from geodude_teleoperation.rtde.numpy_kinematics_bridge import NumpyUrKinematicsBridge
 
     prefer_numpy = bool(line_tracking is not None and getattr(line_tracking, "enabled", False))
+    ga_ok = gafropy_importable()
 
     def _try_numpy():
         kin = NumpyUrKinematicsBridge.try_create(line_tracking=line_tracking)
@@ -461,12 +522,14 @@ def resolve_live_kinematics(line_tracking=None):
         return kin
 
     def _try_gafropy():
+        if not ga_ok:
+            return None
         kin = _GafropyKinematicsBridge.try_create()
         if kin is not None:
             print("kinematics: gafropy (MuJoCo FK/J)", flush=True)
         return kin
 
-    if prefer_numpy:
+    if prefer_numpy or not ga_ok:
         kin = _try_numpy()
         if kin is not None:
             return kin
@@ -696,7 +759,25 @@ def run_rtde_loop(
     plot_motion = _flag("plot_motion", False)
     motion_log = MotionTraceLogger() if log_path is not None else None
 
-    kin = None if args.dry_run else resolve_live_kinematics(line_tracking=line_cfg)
+    # Dry-run sim needs the same FK/J path as live; prefer numpy (no MuJoCo).
+    if args.dry_run:
+        from geodude_teleoperation.rtde.numpy_kinematics_bridge import (
+            NumpyUrKinematicsBridge,
+        )
+
+        kin = NumpyUrKinematicsBridge.try_create(line_tracking=line_cfg)
+        if kin is not None:
+            print(
+                "kinematics: numpy UR5e backup (dry-run Polyscope sim)",
+                flush=True,
+            )
+        else:
+            print(
+                "warning: numpy kinematics unavailable; dry-run sim tip will not move",
+                file=sys.stderr,
+            )
+    else:
+        kin = resolve_live_kinematics(line_tracking=line_cfg)
     kin_ok = kin is not None
     kin_warned = False
     tf_warned = False
@@ -784,6 +865,19 @@ def run_rtde_loop(
 
     def on_enable() -> None:
         state.enable()
+        if args.dry_run:
+            print(
+                "info: motion enabled (Enter) — teleop_active=1; "
+                "dry_run=1 (Polyscope sim; robot not commanded); "
+                f"vf={int(bool(state.vf_enabled))}",
+                flush=True,
+            )
+        else:
+            print(
+                "info: motion enabled (Enter) — teleop_active=1; "
+                f"dry_run=0; vf={int(bool(state.vf_enabled))}",
+                flush=True,
+            )
         if contact_bridge is not None:
             pending_contact_arm["arm"] = True
 
@@ -835,18 +929,32 @@ def run_rtde_loop(
     last_command_time = time.monotonic()
     last_status_t = float("-inf")
     status_hz = float(getattr(args, "status_hz", 5.0))
+    # Dry-run Polyscope sim: after Enter, integrate q_sim (never speedJ).
+    sim_active = False
+    q_sim: np.ndarray | None = None
+    tcp_sim: np.ndarray | None = None
+    T_flange_tcp: np.ndarray | None = None
+    last_dry_vf_query_t = float("-inf")
+    dry_vf_period_s = 0.25
 
     try:
         while keyboard._running.is_set():
             t0 = time.perf_counter()
             now = time.monotonic()
 
+            if live_viz is not None:
+                for key in live_viz.drain_teleop_keys():
+                    keyboard.handle_key(key)
+                if not keyboard._running.is_set():
+                    break
+
             if tf_ctx is not None:
                 tf_ctx.spin_once()
 
             rtde_state = session.read_state()
             fault = bool(rtde_state["fault"])
-            q = rtde_state["q"]
+            live_q = np.asarray(rtde_state["q"], dtype=float).reshape(6)
+            live_tcp = np.asarray(rtde_state["tcp_pose"], dtype=float).reshape(6)
 
             if mcap is not None and state.motion_enabled and not prev_motion_enabled:
                 mcap.begin_rollout(
@@ -880,7 +988,7 @@ def run_rtde_loop(
                 tag_vs_tf_mm = resolve_tag_vs_tf_mm(
                     args,
                     T_tag_tf=T_tag_tf,
-                    tcp_pose=rtde_state["tcp_pose"],
+                    tcp_pose=live_tcp,
                     rgb=rgb,
                     camera_matrix=camera_matrix,
                     dist_coeffs=dist_coeffs,
@@ -898,7 +1006,29 @@ def run_rtde_loop(
                     )
                     apriltag_warned = True
 
-            tcp_pose = rtde_state["tcp_pose"]
+            # Until Enter: track live RTDE. After Enter in dry-run: own q/tcp.
+            if args.dry_run and state.motion_enabled:
+                if not sim_active:
+                    q_sim = live_q.copy()
+                    tcp_sim = live_tcp.copy()
+                    T_flange_tcp = flange_tcp_offset_matrix(q_sim, tcp_sim)
+                    sim_active = True
+                    print(
+                        "info: dry-run sim TCP locked; WASD moves Polyscope tip only "
+                        f"(vf={int(bool(state.vf_enabled))})",
+                        flush=True,
+                    )
+                q = np.asarray(q_sim, dtype=float).reshape(6)
+                tcp_pose = np.asarray(tcp_sim, dtype=float).reshape(6)
+            else:
+                q = live_q
+                tcp_pose = live_tcp
+
+            math_ok = state.control_math_allowed(fault=fault, tf_ok=tf_ok)
+            send_ok = state.commands_allowed(
+                dry_run=args.dry_run, fault=fault, tf_ok=tf_ok
+            )
+
             if kin is not None and use_numpy_kin:
                 try:
                     kin.sync_joints(q)
@@ -932,16 +1062,159 @@ def run_rtde_loop(
             else:
                 ee = ee_motor_from_tcp_pose(tcp_pose)
 
-            vf.update_from_state(ee, T_tag0_base)
+            # Apply keyboard twists BEFORE the slow WoS/VF query so dry-run
+            # Polyscope tip updates even when query_ms is multi-second.
+            if (
+                contact_bridge is None
+                and not diag_hold_zero
+                and state.motion_enabled
+                and kin_ok
+                and use_numpy_kin
+            ):
+                kin.ensure_reference_from_tcp()
+                # Dry-run: align EE to R_field immediately (safe — no speedJ).
+                if args.dry_run and sim_active and state.vf_enabled:
+                    snap_T_ref_orientation_to_vf(kin, vf)
 
-            if live_viz is not None:
-                st = vf.status
-                live_viz.publish(
-                    tcp_pose,
-                    R_field_tcp=st.get("R_field_raw_smoothed"),
-                    signed_d=st.get("signed_d"),
-                    in_contact=st.get("in_contact"),
+            twist = pending_twist["twist"]
+            key_this_tick = ""
+            fresh_command = False
+
+            def _apply_twist(twist_obj, *, key: str = "") -> None:
+                nonlocal fresh_command, key_this_tick
+                R_prev = vf_R_field_or_none(vf)
+                if R_prev is None:
+                    R_prev = vf_R_field(vf)
+                if contact_bridge is not None and R_prev is not None:
+                    n_app = None
+                    if contact_bridge._R_star is not None:
+                        n_app = contact_bridge._R_star[:, 2]
+                    else:
+                        n_app = np.asarray(R_prev, dtype=float).reshape(3, 3)[:, 2]
+                    contact_bridge.push_tangent_field_linear(
+                        twist_obj, R_prev, n_approach=n_app
+                    )
+                    fresh_command = True
+                    if key:
+                        key_this_tick = key
+                elif kin_ok:
+                    if use_numpy_kin:
+                        kin.update_command(
+                            twist_obj,
+                            vf=vf if state.vf_enabled else None,
+                            min_scale=getattr(
+                                controller, "_min_twist_scaling_factor", 1.0
+                            ),
+                            max_scale=getattr(
+                                controller, "_max_twist_scaling_factor", 2.0
+                            ),
+                            key=key or None,
+                        )
+                        if args.dry_run and state.vf_enabled:
+                            snap_T_ref_orientation_to_vf(kin, vf)
+                    else:
+                        controller.update_command(twist_obj)
+                    fresh_command = True
+                    if key:
+                        key_this_tick = key
+
+            if twist is not None:
+                pending_twist["twist"] = None
+                key_this_tick = str(pending_twist.get("key") or "")
+                pending_twist["key"] = ""
+                if math_ok:
+                    _apply_twist(twist, key=key_this_tick)
+
+            # Polyscope held WASD/X/Y → one combined step every control tick
+            # (ImGui key-repeat alone was ~1–2 Hz → felt frozen with 2 mm steps).
+            if (
+                live_viz is not None
+                and math_ok
+                and not diag_hold_zero
+                and (kin_ok or contact_bridge is not None)
+            ):
+                held = live_viz.held_teleop_keys()
+                if held:
+                    from geodude_teleoperation.teleop.keyboard import (
+                        dispatch_key,
+                        make_twist,
+                    )
+
+                    coeffs = np.zeros(6, dtype=float)
+                    for ch in held:
+                        kind, payload = dispatch_key(
+                            ch,
+                            step=float(args.keyboard_step),
+                            enable_key=getattr(args, "enable_key", "\n"),
+                        )
+                        if kind == "twist":
+                            coeffs = coeffs + np.asarray(payload, dtype=float).reshape(6)
+                    if float(np.linalg.norm(coeffs)) > 1e-12:
+                        _apply_twist(
+                            make_twist(coeffs),
+                            key="+".join(sorted(held)),
+                        )
+
+            # Free-space dry-run: tip IS the pose reference (instant WASD feedback).
+            # Joint servo to T_ref is for live speedJ only; with query_ms≫dt the
+            # old qdot·dt integrate looked frozen.
+            if (
+                args.dry_run
+                and sim_active
+                and math_ok
+                and contact_bridge is None
+                and use_numpy_kin
+                and kin is not None
+                and getattr(kin, "_T_ref", None) is not None
+            ):
+                from geodude_teleoperation.se3 import matrix_to_tcp_pose
+
+                tcp_sim = matrix_to_tcp_pose(kin._T_ref)
+                tcp_pose = tcp_sim
+                q = np.asarray(q_sim, dtype=float).reshape(6)
+                try:
+                    kin.set_tcp_pose(tcp_pose)
+                except Exception:
+                    pass
+                ee = ee_motor_from_tcp_pose(tcp_pose)
+                if live_viz is not None:
+                    st0 = vf.status
+                    live_viz.publish(
+                        tcp_pose,
+                        R_field_tcp=st0.get("R_field_raw_smoothed"),
+                        signed_d=st0.get("signed_d"),
+                        in_contact=st0.get("in_contact"),
+                    )
+
+            # WoS/VF query is expensive (~seconds on dense clouds). In free-space
+            # dry-run, throttle it so WASD→tip stays near control_hz.
+            run_vf_query = True
+            if args.dry_run and sim_active and contact_bridge is None:
+                run_vf_query = bool(fresh_command) or (
+                    (now - last_dry_vf_query_t) >= dry_vf_period_s
                 )
+            if run_vf_query:
+                vf.update_from_state(ee, T_tag0_base)
+                last_dry_vf_query_t = now
+                if (
+                    args.dry_run
+                    and sim_active
+                    and contact_bridge is None
+                    and state.vf_enabled
+                    and use_numpy_kin
+                    and kin is not None
+                ):
+                    snap_T_ref_orientation_to_vf(kin, vf)
+                    from geodude_teleoperation.se3 import matrix_to_tcp_pose
+
+                    if getattr(kin, "_T_ref", None) is not None:
+                        tcp_sim = matrix_to_tcp_pose(kin._T_ref)
+                        tcp_pose = tcp_sim
+                        try:
+                            kin.set_tcp_pose(tcp_pose)
+                        except Exception:
+                            pass
+                        ee = ee_motor_from_tcp_pose(tcp_pose)
 
             T_tcp = tcp_pose_to_matrix(tcp_pose)
             R_tcp = T_tcp[:3, :3]
@@ -988,9 +1261,7 @@ def run_rtde_loop(
                 and hasattr(kin, "set_extra_normal_ff")
             ):
                 R = vf_R_field(vf)
-                if R is not None and state.commands_allowed(
-                    dry_run=args.dry_run, fault=fault, tf_ok=tf_ok
-                ):
+                if R is not None and math_ok:
                     out = tactile_agent.update(
                         wrench_meas=rtde_state.get("tcp_force", [0.0] * 6),
                         R_field=R,
@@ -1002,70 +1273,15 @@ def run_rtde_loop(
                 else:
                     kin.set_extra_normal_ff(None)
 
-            if (
-                contact_bridge is None
-                and not diag_hold_zero
-                and state.motion_enabled
-                and not args.dry_run
-                and kin_ok
-                and use_numpy_kin
-            ):
-                # Capture T_ref from TCP once; do NOT re-project onto live R_field
-                # every tick. Continuous project + active watchdog made Enter alone
-                # chase R_motion (idle wobble). VF orientation lock happens only
-                # when a twist calls kin.update_command(..., vf=...).
-                kin.ensure_reference_from_tcp()
-
-            twist = pending_twist["twist"]
-            key_this_tick = ""
-            fresh_command = False
-            if twist is not None:
-                pending_twist["twist"] = None
-                key_this_tick = str(pending_twist.get("key") or "")
-                pending_twist["key"] = ""
-                if state.commands_allowed(
-                    dry_run=args.dry_run, fault=fault, tf_ok=tf_ok
-                ):
-                    if contact_bridge is not None and R_field is not None:
-                        R_tan = R_local if R_local is not None else R_field
-                        n_app = None
-                        if contact_bridge._R_star is not None:
-                            n_app = contact_bridge._R_star[:, 2]
-                        elif R_field is not None:
-                            n_app = np.asarray(R_field, dtype=float).reshape(3, 3)[:, 2]
-                        contact_bridge.push_tangent_field_linear(
-                            twist, R_tan, n_approach=n_app
-                        )
-                        fresh_command = True
-                    elif kin_ok:
-                        if use_numpy_kin:
-                            kin.update_command(
-                                twist,
-                                vf=vf if state.vf_enabled else None,
-                                min_scale=getattr(
-                                    controller, "_min_twist_scaling_factor", 1.0
-                                ),
-                                max_scale=getattr(
-                                    controller, "_max_twist_scaling_factor", 10.0
-                                ),
-                                key=key_this_tick or None,
-                            )
-                        else:
-                            controller.update_command(twist)
-                        fresh_command = True
-
             qdot = np.zeros(6, dtype=float)
             qdot_norm = 0.0
             control_diag: dict = {}
-            allowed = state.commands_allowed(
-                dry_run=args.dry_run, fault=fault, tf_ok=tf_ok
-            )
             # Active teleop keeps the watchdog alive between one-shot keypresses
             # (pose servo to T_ref / VF orientation lock). Refresh before any
             # apply_watchdog so a long calibrate dwell doesn't zero the first
             # motion tick after Enter.
             if should_refresh_watchdog(
-                commands_allowed=allowed,
+                commands_allowed=math_ok,
                 dry_run=bool(args.dry_run),
                 kin_ok=kin_ok or contact_bridge is not None,
                 control_open=bool(session.control_open),
@@ -1074,16 +1290,20 @@ def run_rtde_loop(
                 or (
                     contact_bridge is not None
                     and contact_bridge.armed
-                    and allowed
+                    and math_ok
                 ),
             ):
                 last_command_time = now
-            if (
+            run_control = (
                 not diag_hold_zero
-                and allowed
-                and not args.dry_run
-                and session.control_open
-            ):
+                and math_ok
+                and (bool(session.control_open) or bool(args.dry_run))
+            )
+            # Free-space dry-run already snapped tip to T_ref; skip joint chase.
+            dry_run_free_snap = bool(
+                args.dry_run and sim_active and contact_bridge is None
+            )
+            if run_control and not dry_run_free_snap:
                 try:
                     if contact_bridge is not None and contact_bridge.armed and R_field is not None:
                         if kin is not None and use_numpy_kin:
@@ -1119,10 +1339,18 @@ def run_rtde_loop(
                         kin_ok = True
                     elif kin_ok and use_numpy_kin:
                         qdot = kin.compute_qdot(
-                            gain=float(getattr(controller, "_gain", 16.0)),
+                            gain=float(getattr(controller, "_gain", 4.0)),
                             damping=float(getattr(controller, "_damping", 0.05)),
                             max_joint_velocity=float(args.max_joint_velocity),
                             vf=vf if state.vf_enabled else None,
+                            max_linear_speed=float(
+                                getattr(args, "max_linear_speed", 0.05) or 0.0
+                            )
+                            or None,
+                            max_angular_speed=float(
+                                getattr(args, "max_angular_speed", 0.4) or 0.0
+                            )
+                            or None,
                         )
                         control_diag = dict(getattr(kin, "last_control_diag", {}) or {})
                     elif kin_ok:
@@ -1146,13 +1374,49 @@ def run_rtde_loop(
                     qdot = np.zeros(6, dtype=float)
                     qdot_norm = 0.0
 
+            # In-contact dry-run: integrate with wall-clock dt (loop may be slow).
+            if (
+                args.dry_run
+                and sim_active
+                and math_ok
+                and contact_bridge is not None
+                and T_flange_tcp is not None
+                and q_sim is not None
+            ):
+                wall_dt = float(min(max(time.perf_counter() - t0, dt), 0.1))
+                q_sim = np.asarray(q_sim, dtype=float).reshape(6) + np.asarray(
+                    qdot, dtype=float
+                ).reshape(6) * wall_dt
+                tcp_sim = tcp_pose_from_q_and_offset(q_sim, T_flange_tcp)
+                q = q_sim
+                tcp_pose = tcp_sim
+                if kin is not None and use_numpy_kin:
+                    try:
+                        kin.sync_joints(q)
+                        kin.set_tcp_pose(tcp_pose)
+                    except Exception:
+                        pass
+                ee = ee_motor_from_tcp_pose(tcp_pose)
+                T_tcp = tcp_pose_to_matrix(tcp_pose)
+                p_tcp = T_tcp[:3, 3]
+                R_tcp = T_tcp[:3, :3]
+
+            if live_viz is not None:
+                st = vf.status
+                live_viz.publish(
+                    tcp_pose,
+                    R_field_tcp=st.get("R_field_raw_smoothed"),
+                    signed_d=st.get("signed_d"),
+                    in_contact=st.get("in_contact"),
+                )
+
             send_qdot = np.zeros(6, dtype=float)
             if session.control_open:
                 try:
                     if diag_hold_zero:
                         send_qdot = np.zeros(6)
                     else:
-                        send_qdot = qdot if allowed and not args.dry_run else np.zeros(6)
+                        send_qdot = qdot if send_ok else np.zeros(6)
                         send_qdot = apply_watchdog(
                             send_qdot,
                             last_command_time=last_command_time,
@@ -1170,7 +1434,7 @@ def run_rtde_loop(
                 line = format_status_line(
                     state,
                     status,
-                    qdot_norm=qdot_norm if not args.dry_run else 0.0,
+                    qdot_norm=qdot_norm,
                     tf_age_ms=tf_age_ms,
                     tag_vs_tf_mm=tag_vs_tf_mm,
                 )
@@ -1243,7 +1507,7 @@ def run_rtde_loop(
                         ).reshape(3)
                 active_motion_log.append(
                     t_mono=now,
-                    qdot=send_qdot if not args.dry_run else np.zeros(6),
+                    qdot=send_qdot if not args.dry_run else qdot,
                     qdot_raw=qdot_raw,
                     R_motion=(
                         status.get("R_motion_base")
@@ -1301,7 +1565,7 @@ def run_rtde_loop(
                     tcp_pose=tcp_pose,
                     ref_pose=ref_pose,
                     wrench=rtde_state.get("tcp_force"),
-                    qdot=send_qdot if not args.dry_run else np.zeros(6),
+                    qdot=send_qdot if not args.dry_run else qdot,
                     qdot_raw=control_diag.get("qdot_raw"),
                     status=st_pack,
                     R_motion=R_motion,

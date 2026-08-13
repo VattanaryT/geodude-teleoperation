@@ -43,6 +43,12 @@ Keyboard teleoperation:
   Enter: enable motion (calibrate → teleop)
   t: toggle teleoperation    v: toggle virtual fixture    q: quit
 
+With --viz (live Polyscope): Enter / w/s/a/d/x/y / t/v/f / q also work in the
+  Polyscope window (stdin is unused while the GUI has focus). Object offset
+  remains j/l i/k u/o in-window; angular teleop n/m from the terminal only.
+  --dry-run --viz: after Enter, tip moves in Polyscope only (sim); VF still
+  applies unless you press v. Robot is never commanded.
+
 In-contact mode (--in-contact):
   Enter: Align tool-Z → n* first, then Force seeks/holds Fd along n*.
   w/s a/d: tangent slide in VF local frame (R_motion x/y), not tool body.
@@ -83,15 +89,16 @@ def contact_field_linear_from_twist_coeffs(coeffs) -> np.ndarray:
 
 
 def make_twist(payload):
-    """Build gafropy.Twist when available; otherwise NumpyTwist (same blade order)."""
-    try:
+    """Build gafropy.Twist when usable; otherwise NumpyTwist (same blade order)."""
+    from geodude_teleoperation.gafropy_compat import gafropy_importable
+
+    if gafropy_importable():
         import gafropy
 
         return gafropy.Twist.from_array(payload)
-    except ImportError:
-        from geodude_teleoperation.se3 import NumpyTwist
+    from geodude_teleoperation.se3 import NumpyTwist
 
-        return NumpyTwist.from_array(payload)
+    return NumpyTwist.from_array(payload)
 
 
 class KeyboardTeleop:
@@ -103,6 +110,7 @@ class KeyboardTeleop:
         self._on_button = None
         self._on_enable = None
         self._enable_key = "\n"
+        self._lock = threading.Lock()
         self.last_key = ""
         self.last_twist_coeffs: np.ndarray | None = None
 
@@ -124,6 +132,48 @@ class KeyboardTeleop:
             self._thread.join()
             self._thread = None
 
+    def handle_key(self, key: str) -> None:
+        """Process one key from stdin or Polyscope inject. Thread-safe."""
+        if not key or not self._running.is_set():
+            return
+        try:
+            with self._lock:
+                kind, payload = dispatch_key(
+                    key, step=self._step, enable_key=self._enable_key
+                )
+                on_enable = self._on_enable
+                on_button = self._on_button
+                on_twist = self._on_twist
+                if kind == "twist":
+                    self.last_key = key
+                    self.last_twist_coeffs = np.asarray(payload, dtype=float).copy()
+                    twist = make_twist(payload)
+                else:
+                    twist = None
+            if kind == "ignore":
+                return
+            if kind == "quit":
+                self._running.clear()
+                return
+            if kind == "enable":
+                if on_enable is not None:
+                    on_enable()
+                return
+            if kind == "button":
+                if on_button is not None:
+                    on_button(payload)
+                return
+            if kind == "twist" and on_twist is not None and twist is not None:
+                on_twist(twist)
+        except Exception:
+            # Without this, an exception here (e.g. a numerical issue in the
+            # controller) kills this background thread silently -- keypresses
+            # would then just stop doing anything, with no indication why, since
+            # the main viser loop keeps running regardless. Print and keep going
+            # rather than let one bad update take down keyboard input entirely.
+            print("KeyboardTeleop: on_twist/on_button raised, continuing:")
+            traceback.print_exc()
+
     def _run(self):
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
@@ -138,37 +188,6 @@ class KeyboardTeleop:
                 if not ready:
                     continue
                 key = sys.stdin.read(1)
-
-                try:
-                    kind, payload = dispatch_key(
-                        key, step=self._step, enable_key=self._enable_key
-                    )
-                    if kind == "ignore":
-                        continue
-                    if kind == "quit":
-                        self._running.clear()
-                        continue
-                    if kind == "enable":
-                        if self._on_enable is not None:
-                            self._on_enable()
-                        continue
-                    if kind == "button":
-                        if self._on_button is not None:
-                            self._on_button(payload)
-                        continue
-                    if kind == "twist":
-                        self.last_key = key
-                        self.last_twist_coeffs = np.asarray(payload, dtype=float).copy()
-                        self._on_twist(make_twist(payload))
-                    else:
-                        self.last_key = key if kind != "ignore" else self.last_key
-                except Exception:
-                    # Without this, an exception here (e.g. a numerical issue in the
-                    # controller) kills this background thread silently -- keypresses
-                    # would then just stop doing anything, with no indication why, since
-                    # the main viser loop keeps running regardless. Print and keep going
-                    # rather than let one bad update take down keyboard input entirely.
-                    print("KeyboardTeleop: on_twist/on_button raised, continuing:")
-                    traceback.print_exc()
+                self.handle_key(key)
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)

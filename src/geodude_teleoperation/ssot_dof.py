@@ -1,0 +1,201 @@
+"""Load and flatten ``config/SSoT_dof.yaml`` into teleop Namespace-compatible attrs."""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Mapping
+
+import yaml
+
+from geodude_teleoperation.paths import ssot_dof_config_path
+
+# Nested YAML path → argparse / Namespace attribute name used by teleop + viz.
+_FLAT_MAP: tuple[tuple[str, str], ...] = (
+    ("session.backend", "backend"),
+    ("session.dry_run", "dry_run"),
+    ("robot.arm", "arm"),
+    ("robot.ip", "robot_ip"),
+    ("paths.ply", "ply"),
+    ("paths.T_tag0_base", "T_tag0_base"),
+    ("paths.T_rtde_base_vention", "T_rtde_base_vention"),
+    ("paths.T_left_base_vention", "T_left_base_vention"),
+    ("paths.calib_meta", "calib_meta"),
+    ("paths.object_offset", "object_offset"),
+    ("paths.laser_ply", "laser_ply"),
+    ("paths.laser_offset", "laser_offset"),
+    ("paths.log_motion", "log_motion"),
+    ("paths.record_output_dir", "record_output_dir"),
+    ("pointcloud.voxel_size", "voxel_size"),
+    ("pointcloud.normal_orientation", "normal_orientation"),
+    ("field.mode", "field_mode"),
+    ("field.flow", "field_flow"),
+    ("field.end_line_fraction", "end_line_fraction"),
+    ("field.swap_end_lines", "swap_end_lines"),
+    ("field.diffusion_scalar", "diffusion_scalar"),
+    ("wos.batch_size", "wos_batch_size"),
+    ("wos.convergence_threshold_edge_mult", "wos_convergence_threshold_edge_mult"),
+    ("query.contact_threshold_m", "contact_threshold"),
+    ("query.query_radius_m", "query_radius"),
+    ("query.fit_mode", "fit_mode"),
+    ("vf.r_field_smoothing", "r_field_smoothing"),
+    ("vf.relock_dist_m", "vf_relock_dist"),
+    ("vf.relock_period_s", "vf_relock_period"),
+    ("vf.motion_track", "vf_motion_track"),
+    ("control.hz", "control_hz"),
+    ("control.status_hz", "status_hz"),
+    ("control.max_joint_velocity", "max_joint_velocity"),
+    ("control.keyboard_step", "keyboard_step"),
+    ("control.rtde_accel", "rtde_accel"),
+    ("control.pose_gain", "pose_gain"),
+    ("control.max_linear_speed", "max_linear_speed"),
+    ("control.max_angular_speed", "max_angular_speed"),
+    ("control.max_twist_scale", "max_twist_scale"),
+    ("control.watchdog_ms", "watchdog_ms"),
+    ("control.enable_key", "enable_key"),
+    ("control.tip_offset", "tip_offset"),
+    ("control.base_frame", "base_frame"),
+    ("control.tag0_frame", "tag0_frame"),
+    ("control.no_object_offset", "no_object_offset"),
+    ("control.no_rtde_base_vention", "no_rtde_base_vention"),
+    ("control.no_laser_offset", "no_laser_offset"),
+    ("control.object_offset_step_m", "object_offset_step_m"),
+    ("viz.frame", "viz_frame"),
+    ("viz.frame_stride", "viz_frame_stride"),
+    ("viz.hide_object", "viz_hide_object"),
+    ("viz.show_object", "viz_show_object"),
+    ("viz.teleop_keys", "viz_teleop_keys"),
+    ("viz.laser", "viz_laser"),
+    ("laser.voxel", "laser_voxel"),
+    ("tag_crosscheck.camera_rgb_topic", "camera_rgb_topic"),
+    ("tag_crosscheck.camera_info_topic", "camera_info_topic"),
+    ("tag_crosscheck.tag_id", "tag_id"),
+    ("tag_crosscheck.tag_size_m", "tag_size_m"),
+    ("tag_crosscheck.tag_family", "tag_family"),
+    ("record.mcap", "record_mcap"),
+    ("record.sample_hz", "record_sample_hz"),
+    ("record.save_images", "record_save_images"),
+    ("record.camera_topics", "record_camera_topics"),
+    ("record.target_frame", "record_target_frame"),
+    ("record.plot_motion", "plot_motion"),
+    ("line_tracking.enabled", "line_tracking"),
+    ("line_tracking.soft_standoff", "soft_standoff"),
+    ("line_tracking.standoff_distance", "standoff_distance"),
+    ("line_tracking.standoff_gain", "standoff_gain"),
+    ("line_tracking.standoff_max_speed", "standoff_max_speed"),
+    ("line_tracking.no_keyboard_normal_ff", "no_keyboard_normal_ff"),
+    ("tactile.enabled", "tactile"),
+    ("tactile.desired_normal_force", "desired_normal_force"),
+    ("tactile.wrench_kp", "wrench_kp"),
+    ("tactile.wrench_ki", "wrench_ki"),
+    ("tactile.wrench_kd", "wrench_kd"),
+    ("tactile.wrench_to_vn", "wrench_to_vn"),
+    ("tactile.max_vn", "tactile_max_vn"),
+    ("tactile.ft_bias", "ft_bias"),
+    ("in_contact.enabled", "in_contact"),
+    ("in_contact.force_sign", "force_sign"),
+    ("in_contact.align_first", "align_first"),
+    ("in_contact.align_enter_tol_deg", "align_enter_tol_deg"),
+    ("in_contact.align_exit_tol_deg", "align_exit_tol_deg"),
+    ("in_contact.approach_v_max", "approach_v_max"),
+    ("in_contact.force_max_v", "force_max_v"),
+    ("diag.hold_zero", "diag_hold_zero"),
+    ("diag.fixed_orient", "diag_fixed_orient"),
+    ("diag.verify_500hz", "verify_500hz"),
+    ("diag.dtc_verify_seconds", "dtc_verify_seconds"),
+    ("diag.verify_500hz_exit", "verify_500hz_exit"),
+    ("diag.polyscope_version", "polyscope_version"),
+)
+
+_PATH_KEYS = frozenset(
+    {
+        "ply",
+        "T_tag0_base",
+        "T_rtde_base_vention",
+        "T_left_base_vention",
+        "calib_meta",
+        "object_offset",
+        "laser_ply",
+        "laser_offset",
+        "log_motion",
+        "record_output_dir",
+    }
+)
+
+
+def _dig(cfg: Mapping[str, Any], dotted: str) -> Any:
+    cur: Any = cfg
+    for part in dotted.split("."):
+        if not isinstance(cur, Mapping) or part not in cur:
+            raise KeyError(dotted)
+        cur = cur[part]
+    return cur
+
+
+def load_ssot_dof(path: Path | None = None) -> dict[str, Any]:
+    """Load nested SSoT YAML (default: package ``config/SSoT_dof.yaml``)."""
+    cfg_path = ssot_dof_config_path() if path is None else Path(path)
+    if not cfg_path.is_file():
+        raise FileNotFoundError(f"SSoT_dof config not found: {cfg_path}")
+    with cfg_path.open() as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"SSoT_dof root must be a mapping, got {type(data).__name__}")
+    return data
+
+
+def flatten_ssot(cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """Map nested SSoT sections onto flat teleop Namespace attribute names."""
+    out: dict[str, Any] = {}
+    for dotted, dest in _FLAT_MAP:
+        try:
+            out[dest] = _dig(cfg, dotted)
+        except KeyError as exc:
+            raise KeyError(f"missing SSoT key {dotted!r}") from exc
+
+    # enable_key: YAML "enter" → newline (matches former CLI alias)
+    ek = out.get("enable_key")
+    if isinstance(ek, str) and ek.lower() in ("enter", "return", "newline", "\\n"):
+        out["enable_key"] = "\n"
+    elif isinstance(ek, str) and len(ek) == 1:
+        out["enable_key"] = ek
+    elif ek is not None and not isinstance(ek, str):
+        raise ValueError(f"control.enable_key must be a string, got {ek!r}")
+
+    tip = out.get("tip_offset")
+    if tip is not None:
+        tip_list = list(tip)
+        if len(tip_list) != 3:
+            raise ValueError("control.tip_offset must have length 3")
+        out["tip_offset"] = tuple(float(x) for x in tip_list)
+
+    bias = out.get("ft_bias")
+    if bias is not None:
+        bias_list = list(bias)
+        if len(bias_list) != 6:
+            raise ValueError("tactile.ft_bias must have length 6 when set")
+        out["ft_bias"] = tuple(float(x) for x in bias_list)
+
+    for key in _PATH_KEYS:
+        val = out.get(key)
+        if val is None or val == "":
+            out[key] = None
+        else:
+            out[key] = Path(val)
+
+    # YAML 1.1 may parse bare off/on as bool — normalize viz.laser.
+    laser = out.get("viz_laser")
+    if laser is False:
+        out["viz_laser"] = "off"
+    elif laser is True:
+        out["viz_laser"] = "on"
+    elif laser is not None:
+        out["viz_laser"] = str(laser)
+
+    # Session viz open is CLI-driven; YAML teleop_keys is a default preference only.
+    # Always start with viz=False unless --viz is passed.
+    out["viz"] = False
+    return out
+
+
+def load_flat_ssot(path: Path | None = None) -> dict[str, Any]:
+    """Convenience: load + flatten."""
+    return flatten_ssot(load_ssot_dof(path))

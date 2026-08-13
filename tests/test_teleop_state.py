@@ -17,8 +17,11 @@ def test_gating():
     s.enable()
     assert s.commands_allowed(dry_run=False, fault=False, tf_ok=True)
     assert not s.commands_allowed(dry_run=True, fault=False, tf_ok=True)
+    assert s.control_math_allowed(fault=False, tf_ok=True)
+    assert not s.control_math_allowed(fault=True, tf_ok=True)
     s.teleop_active = False
     assert not s.commands_allowed(dry_run=False, fault=False, tf_ok=True)
+    assert not s.control_math_allowed(fault=False, tf_ok=True)
 
 
 def test_status_line_has_flags():

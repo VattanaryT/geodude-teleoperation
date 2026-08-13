@@ -17,10 +17,20 @@ class TeleopState:
         self.teleop_active = True
         self.mode = "teleop"
 
-    def commands_allowed(self, *, dry_run: bool, fault: bool, tf_ok: bool) -> bool:
-        if dry_run or fault or not tf_ok:
+    def control_math_allowed(self, *, fault: bool, tf_ok: bool) -> bool:
+        """True when the controller may update T_ref / integrate sim or live qdot.
+
+        Ignores ``dry_run`` so ``--dry-run`` can simulate teleop in Polyscope.
+        """
+        if fault or not tf_ok:
             return False
         return self.motion_enabled and self.teleop_active
+
+    def commands_allowed(self, *, dry_run: bool, fault: bool, tf_ok: bool) -> bool:
+        """True when joint commands may be sent to the robot (never in dry-run)."""
+        if dry_run:
+            return False
+        return self.control_math_allowed(fault=fault, tf_ok=tf_ok)
 
 
 def _flag(value: bool) -> str:

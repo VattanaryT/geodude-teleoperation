@@ -21,7 +21,12 @@ def config_dir() -> Path:
 
 
 def pointclouds_config_path() -> Path:
+    """Deprecated: teleop/field defaults live in ``SSoT_dof.yaml``."""
     return config_dir() / "pointclouds.yaml"
+
+
+def ssot_dof_config_path() -> Path:
+    return config_dir() / "SSoT_dof.yaml"
 
 
 def data_processed_dir() -> Path:

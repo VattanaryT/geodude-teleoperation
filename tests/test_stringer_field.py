@@ -55,5 +55,8 @@ def test_field_build_end_lines(tmp_path: Path):
     thr = pc.get_mean_edge_length() * 2
     report = validate_field_prints(pc, sd, thr)
     assert "#verts" in report or "verts" in report
-    wos = build_wos(pc, batch_size=8)
+    wos = build_wos(pc, batch_size=8, convergence_threshold_edge_mult=2.0)
     assert wos is not None
+    assert abs(wos.convergence_threshold - pc.get_mean_edge_length() * 2.0) < 1e-12
+    wos3 = build_wos(pc, batch_size=8, convergence_threshold_edge_mult=3.0)
+    assert abs(wos3.convergence_threshold - pc.get_mean_edge_length() * 3.0) < 1e-12

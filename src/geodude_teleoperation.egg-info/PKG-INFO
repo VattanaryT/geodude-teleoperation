@@ -4,10 +4,17 @@ Version: 0.1.0
 Requires-Python: >=3.10
 Requires-Dist: gafropy
 Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: open3d
 Requires-Dist: viser
 Requires-Dist: trimesh
 Requires-Dist: rtree
 Requires-Dist: pyspacemouse
+Requires-Dist: pyyaml
 Requires-Dist: diffused_fields @ git+https://github.com/loewt/diffused_fields
 Provides-Extra: viz
 Requires-Dist: gafropy[viz]; extra == "viz"
+Provides-Extra: ur
+Requires-Dist: ur-rtde; extra == "ur"
+Provides-Extra: plot
+Requires-Dist: matplotlib>=3.8; extra == "plot"

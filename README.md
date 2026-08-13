@@ -1,66 +1,161 @@
 # UR stringer keyboard teleop
 
-Right UR5e keyboard teleop against the stringer layup field. Local data defaults live under `data/processed/`. Install `diffused_fields` as a package (no sibling checkout on `PYTHONPATH` needed for config/viz).
+Right UR5e keyboard teleop against the stringer layup field.
+
+**Config:** edit [`config/SSoT_dof.yaml`](config/SSoT_dof.yaml) for robot IP, paths, diffusion / WoS / VF, and control defaults. CLI is mainly for session toggles (`--backend`, `--dry-run`, `--viz`, `--in-contact`, …).
+
+Local data defaults live under `data/processed/`. Install `diffused_fields` as a package (no sibling checkout on `PYTHONPATH` for config/viz).
+
+## Modes
+
+Two **mutually exclusive** control paths. Pick one per session.
+
+| | **Free-space** (default) | **In-contact** (`--in-contact` / `in_contact.enabled`) |
+| --- | --- | --- |
+| Backend | MuJoCo or RTDE | **RTDE only** (needs `ActualTCPForce`) |
+| Controller | Pose-reference teleop + orientation VF | DualLoop: Align + Force PID |
+| Normal / depth | Keyboard `y/x` (field ±z); optional `line_tracking` / `tactile` FF | Force PID holds `Fd` along `n*` (auto-seek on Enter) |
+| Tangential | `w/s a/d` in field frame | Same keys, tangent plane only |
+| Angular keys | `n/m j/k u/i` | Ignored |
+| Extra | — | `f` freeze/unfreeze VF `n*` |
+| SSoT knobs | `control.*`, `vf.*`, `query.*`, optional `line_tracking.*` / `tactile.*` | `in_contact.*` + `tactile.desired_normal_force` (`Fd`) |
+
+Shared for both: `paths.*`, `pointcloud.*`, `field.*`, `wos.*`, `query.*`, `viz.*`.
+
+Do **not** combine `--in-contact` with `--tactile`.
 
 ## Install
 
-```bash
-cd /path/to/ur-stringer-teleop
-pip install -e '.[ur]'
-# also: polyscope (for --viz), gafropy (MuJoCo / live kinematics)
-```
+Needs **Python ≥3.12**. Do **not** use system Python 3.10, and do **not** use conda env `pyrite` (that’s the UMI-FT / diffusion-policy / ROS research stack).
+
+Dedicated env: **`geodude-teleop`** (Python 3.12, already created).
 
 ```bash
-geodude-ur-stringer-teleop --help
-# or
-PYTHONPATH=src${PYTHONPATH:+:$PYTHONPATH} python -m geodude_teleoperation.teleop.ur_stringer_teleop --help
+conda activate geodude-teleop
+# Important: clear ROS/UMI overlays so they don't shadow this env
+unset PYTHONPATH AMENT_PREFIX_PATH COLCON_PREFIX_PATH
+
+cd ~/ros2_ws/src/geodude-teleoperation
+pip install -e '.[ur]'
+# Prefer local diffused_fields (complete package) over the GitHub dep alone:
+pip install -e ~/ros2_ws/src/diffused_fields
+# polyscope comes with local diffused_fields; needed for --viz
 ```
+
+Confirm:
+
+```bash
+which geodude-ur-stringer-teleop   # …/miniforge3/envs/geodude-teleop/bin/…
+python -c "import diffused_fields; print(diffused_fields.__file__)"
+# should NOT be under ros2_ws/install/.../python3.10/...
+geodude-ur-stringer-teleop --help
+```
+
+**Recreate the env** (if needed):
+
+```bash
+conda create -y -n geodude-teleop python=3.12 pip
+conda activate geodude-teleop
+unset PYTHONPATH AMENT_PREFIX_PATH COLCON_PREFIX_PATH
+cd ~/ros2_ws/src/geodude-teleoperation
+pip install -e '.[ur]'
+pip install -e ~/ros2_ws/src/diffused_fields
+```
+
+Avoid a sourced ROS overlay that puts an old `diffused_fields` (Python 3.10) ahead of the env on `PYTHONPATH`.
+
+**Note:** On this machine `import gafropy` SIGILLs (bad CPU opcode in the wheel). RTDE teleop auto-probes gafropy in a subprocess and uses `numpy_kinematics_bridge` instead. MuJoCo backend still needs a working gafropy.
+
+## Config (`SSoT_dof.yaml`)
+
+| Section | Typical knobs | Mode |
+| --- | --- | --- |
+| `robot` | `ip` (required for RTDE) | both |
+| `paths` | `ply`, `T_tag0_base`, mounts, offsets (`null` → package defaults) | both |
+| `pointcloud` / `field` / `wos` | voxel, diffusion, WoS stop radius | both |
+| `query` / `vf` | contact band, fit; R_field smoothing & relock | both (VF); free-space pose-ref uses relock heavily |
+| `control` | rates, `keyboard_step`, `max_joint_velocity`, `rtde_accel`, `pose_gain`, `max_linear_speed`, `max_angular_speed`, `max_twist_scale`, `tip_offset` | both |
+| `line_tracking` / `tactile` | soft standoff / normal FF | **free-space only** (forced off in-contact) |
+| `in_contact` | DualLoop caps, align tolerances, `force_sign` | **in-contact only** |
+| `tactile.desired_normal_force` | also `Fd` for DualLoop | in-contact force target |
+
+Override file: `--config /path/to/other.yaml`.
 
 ## Safety
 
 Calibrate (motion off) → check prints → **Enter** to enable → teleop.  
 `t` / `v` toggle teleop-active / VF only. `q` quits.
 
-| Key | Action |
-|-----|--------|
-| Enter | Enable motion |
-| `t` / `v` | Pause teleop / toggle VF |
-| `w/s a/d` | Linear (contact: tangent) |
-| `q` | Quit |
+| Key | Free-space | In-contact |
+| --- | --- | --- |
+| Enter | Enable motion | Enable + arm DualLoop (bias F/T, seek `Fd` along `n*`) |
+| `t` / `v` | Pause teleop / toggle VF | Pause teleop / toggle VF |
+| `w/s a/d` | Field ±x / ±y | Tangent slide ⊥ `n*` |
+| `y/x` | Field ±z (normal) | Ignored (Force owns normal) |
+| `f` | — | Freeze / unfreeze `n*` |
+| `q` | Quit | Quit |
 
-## Dry-run (no motion)
+With `--viz`, use these keys in the **Polyscope window** (not only the terminal).
 
-```bash
-export RIGHT_UR_IP=192.168.x.x
-geodude-ur-stringer-teleop \
-  --backend rtde --robot-ip "$RIGHT_UR_IP" \
-  --dry-run --viz
-```
+## Free-space
 
-Uses default `--ply` / `--T-tag0-base` under `data/processed/` when present.
+### Dry-run (Polyscope sim, no motion)
 
-## Shadow receive (pendant only)
-
-Same as dry-run: receive-only RTDE, jog with pendant, confirm tip vs cloud before live motion.
-
-## Live in-contact
+Set `robot.ip` in `config/SSoT_dof.yaml`, leave `in_contact.enabled: false`, then:
 
 ```bash
-geodude-ur-stringer-teleop \
-  --backend rtde --robot-ip "$RIGHT_UR_IP" \
-  --field-flow width --max-joint-velocity 0.2 \
-  --in-contact --desired-normal-force 5.0 \
-  --viz
+geodude-ur-stringer-teleop --backend rtde --dry-run --viz
 ```
 
-Keep velocity low. Pendant near surface → **Enter** → force PID holds along VF normal → `w/s a/d` slide tangent.
+1. Calibrate: tip tracks the **real** RTDE TCP (pendant OK).
+2. Focus Polyscope → **Enter**: sim locks a TCP snapshot and snaps EE axes to `R_field` (VF on). **Hold** WASD / `x`/`y` — tip slides continuously along the field (~control_hz × keyboard_step). Robot stays receive-only.
+3. `v` toggles VF (default on; when on, EE stays field-aligned in viz). `t` pauses sim. Confirm axes vs the cloud before live.
+
+`--viz-teleop-keys` remains a separate offline preview (no RTDE control loop).
+
+### Shadow receive (pendant only)
+
+Same receive-only RTDE; without Enter, tip only follows the pendant. After Enter with `--dry-run`, tip follows the sim (above).
+
+### Live free-space
+
+`session.dry_run` defaults to `true` in SSoT — clear it for motion:
+
+```bash
+# either set session.dry_run: false in SSoT_dof.yaml, or:
+geodude-ur-stringer-teleop --backend rtde --no-dry-run --viz
+```
+
+Calibrate → focus the **Polyscope window** → **Enter** (enable) → `w/s a/d x/y` move tip along the **field** frame (±x/±y/±z). One keypress ≈ `keyboard_step` × adaptive scale (capped by `max_twist_scale`); speed/accel clamps live under `control.*` in SSoT. Keep limits conservative on first live runs.
+
+Optional free-space layers (SSoT or CLI): `--line-tracking`, `--tactile` (not with `--in-contact`).
+
+## In-contact
+
+Tune `in_contact.*`, `tactile.desired_normal_force` (`Fd`), `field.*`, and keep `control.max_joint_velocity` low, then:
+
+```bash
+geodude-ur-stringer-teleop --backend rtde --no-dry-run --in-contact --viz
+```
+
+(Or set `in_contact.enabled: true` and `session.dry_run: false` in SSoT.)
+
+Pendant near surface → focus Polyscope → **Enter** → Force PID seeks/holds along VF normal → `w/s a/d` slide tangent → `f` to freeze `n*` if the field jitters.
+
+Design: [`docs/superpowers/specs/2026-08-10-in-contact-keyboard-teleop-design.md`](docs/superpowers/specs/2026-08-10-in-contact-keyboard-teleop-design.md).
+
+## Field / VF tuning with viz
+
+1. Edit `field.diffusion_scalar`, `wos.*`, `query.*`, or `vf.*` in `SSoT_dof.yaml`.
+2. Re-run with `--viz` (optionally `--viz-teleop-keys` for offline WASD tip preview).
+3. Iterate until the orientation field and contact frame look right.
 
 ## Layout
 
-- `src/geodude_teleoperation/{field,viz,teleop,rtde}/` — library code  
-- `config/pointclouds.yaml` — local field defaults  
-- `data/processed/` — PLY / crop_meta / laser  
-- `scripts/` — thin wrappers  
+- `config/SSoT_dof.yaml` — **source of truth** (IP, paths, field/WoS/VF, control, mode knobs)
+- `src/geodude_teleoperation/{field,viz,teleop,rtde}/` — library code
+- `data/processed/` — PLY / crop_meta / laser
+- `scripts/` — thin wrappers
 - `docs/superpowers/` — design history (not required for ops)
 
-Design notes: `docs/superpowers/specs/2026-08-12-ur-stringer-teleop-layout-design.md`
+Design: [`docs/superpowers/specs/2026-08-12-ssot-dof-config-design.md`](docs/superpowers/specs/2026-08-12-ssot-dof-config-design.md)

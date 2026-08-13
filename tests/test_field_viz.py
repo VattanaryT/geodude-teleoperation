@@ -98,7 +98,7 @@ def test_camera_pose_in_viz_vention_with_mount():
 def test_show_field_debug_builds_scene(monkeypatch):
     from geodude_teleoperation.viz import field_viz
 
-    calls = {"show": 0, "clouds": []}
+    calls = {"show": 0, "clouds": [], "enabled": {}, "framed": False}
 
     class _FakePS:
         _is_fake_for_tests = True
@@ -117,6 +117,7 @@ def test_show_field_debug_builds_scene(monkeypatch):
 
         def register_point_cloud(self, name, pts, **kwargs):
             calls["clouds"].append(name)
+            calls["enabled"][name] = kwargs.get("enabled", True)
 
             class _Cloud:
                 def add_scalar_quantity(self, *_a, **_k):
@@ -124,8 +125,9 @@ def test_show_field_debug_builds_scene(monkeypatch):
 
             return _Cloud()
 
-        def register_curve_network(self, name, *_a, **_k):
+        def register_curve_network(self, name, *_a, **kwargs):
             calls["clouds"].append(name)
+            calls["enabled"][name] = kwargs.get("enabled", True)
             return object()
 
         def show(self):
@@ -137,7 +139,16 @@ def test_show_field_debug_builds_scene(monkeypatch):
         "plot_orientation_field",
         lambda *a, **k: calls["clouds"].append("field"),
     )
-    monkeypatch.setattr(field_viz, "set_camera_and_plane", lambda: None)
+    monkeypatch.setattr(
+        field_viz,
+        "set_camera_and_plane",
+        lambda **k: calls.update({"up_dir": k.get("up", "z_up")}),
+    )
+    monkeypatch.setattr(
+        field_viz,
+        "frame_camera_on_points",
+        lambda *_a, **_k: calls.update({"framed": True}),
+    )
 
     class _PC:
         vertices = np.zeros((10, 3))
@@ -162,8 +173,9 @@ def test_show_field_debug_builds_scene(monkeypatch):
         T_cam_EE=T_cam_EE,
     )
     assert calls["show"] == 1
-    assert calls.get("up_dir") == "neg_y_up"
-    assert calls.get("reset_home") is True
+    assert calls.get("up_dir") == "z_up"
+    assert calls.get("framed") is True
+    assert calls["enabled"].get("rtde_base") is False
     assert "object" in calls["clouds"]
     assert "tcp" in calls["clouds"]
     assert "tcp_x" in calls["clouds"]
@@ -211,7 +223,8 @@ def test_show_field_debug_laser_overlay(monkeypatch):
     monkeypatch.setattr(
         field_viz, "plot_orientation_field", lambda *a, **k: None
     )
-    monkeypatch.setattr(field_viz, "set_camera_and_plane", lambda: None)
+    monkeypatch.setattr(field_viz, "set_camera_and_plane", lambda **_k: None)
+    monkeypatch.setattr(field_viz, "frame_camera_on_points", lambda *_a, **_k: None)
 
     class _PC:
         vertices = np.zeros((4, 3))
@@ -311,7 +324,8 @@ def test_show_field_debug_teleop_keys(monkeypatch):
     monkeypatch.setattr(
         field_viz, "plot_orientation_field", lambda *a, **k: calls["clouds"].append("field")
     )
-    monkeypatch.setattr(field_viz, "set_camera_and_plane", lambda: None)
+    monkeypatch.setattr(field_viz, "set_camera_and_plane", lambda **_k: None)
+    monkeypatch.setattr(field_viz, "frame_camera_on_points", lambda *_a, **_k: None)
     monkeypatch.setattr(
         field_viz,
         "query_R_field_at_tcp",
@@ -389,6 +403,10 @@ def test_live_viz_state_publish_snapshot():
     assert seq1 == 1
     assert np.allclose(tcp1[:3], [0.1, 0.2, 0.3])
     assert d == -0.01 and c is True
+    live.push_teleop_key("\n")
+    live.push_teleop_key("w")
+    assert live.drain_teleop_keys() == ["\n", "w"]
+    assert live.drain_teleop_keys() == []
     live.mark_viz_closed()
     assert live.viz_open is False
 
@@ -455,7 +473,8 @@ def test_show_field_debug_live_rtde_callback(monkeypatch):
         "plot_orientation_field",
         lambda *a, **k: calls["clouds"].append("field"),
     )
-    monkeypatch.setattr(field_viz, "set_camera_and_plane", lambda: None)
+    monkeypatch.setattr(field_viz, "set_camera_and_plane", lambda **_k: None)
+    monkeypatch.setattr(field_viz, "frame_camera_on_points", lambda *_a, **_k: None)
 
     class _PC:
         vertices = np.zeros((10, 3))

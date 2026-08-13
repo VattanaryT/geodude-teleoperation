@@ -1,0 +1,199 @@
+# =============================================================================
+# SSoT_dof.yaml — single source of truth for UR stringer teleop + field viz
+# =============================================================================
+# Edit knobs here (diffusion / WoS / VF / paths / robot). CLI only for session
+# toggles: --config, --backend, --dry-run, --viz (+ viz helpers), and mode
+# flags (--in-contact, --line-tracking, --tactile, --record-mcap, diags, …).
+#
+# Null paths resolve to package defaults under data/processed/ or assets/.
+#
+# ---------------------------------------------------------------------------
+# Modes (pick one control path per session)
+# ---------------------------------------------------------------------------
+# Free-space (default): pose-reference teleop + orientation VF.
+#   - Enable: leave in_contact.enabled false (and do not pass --in-contact).
+#   - Live motion: session.dry_run false, or CLI --no-dry-run (SSoT often
+#     defaults dry_run true for safety).
+#   - Keys: full field-frame twist (w/s a/d y/x + angular). With --viz, Enter /
+#     linear / t/v/f/q also work in the Polyscope window. Optional layers:
+#     line_tracking.*, tactile.* (normal FF / soft standoff — not DualLoop).
+#   - Tunables: control.*, vf.*, query.*, field.*, wos.*.
+#
+# In-contact: DualLoop (Align + Force PID) — not free-space pose-ref.
+#   - Enable: in_contact.enabled true and/or CLI --in-contact (RTDE only).
+#   - Live motion: same dry_run / --no-dry-run rule as free-space.
+#   - Keys: tangent slide w/s a/d only; Force owns n*; Align aims tool-Z → n*.
+#     y/x and angular keys ignored. f freezes/unfreezes n*.
+#   - Tunables: in_contact.* plus tactile.desired_normal_force (Fd, default 5 N).
+#     line_tracking / tactile FF are forced off when in-contact is on.
+#   - Mutually exclusive with --tactile.
+# =============================================================================
+
+session:
+  # Default backend; override with --backend mujoco|rtde
+  backend: rtde
+  dry_run: true
+
+robot:
+  arm: right
+  # Required when session.backend / --backend is rtde
+  ip: 192.168.1.2
+
+paths:
+  # Object point cloud in tag_0 (null → data/processed/object_tag0_crop_voxel0.0020.ply).
+  # Keyence merged.ply is left-UR-base — ok to set here (auto left→vention→tag0);
+  # preferred: keep ply as tag0 object and use viz.laser: replace + paths.laser_ply.
+  ply: data/processed/laser_profilometer/merged.ply
+  # SE(3) tag_0 in base / crop_meta (null → data/processed/crop_meta.json if present)
+  T_tag0_base: null
+  # RTDE right_base in vention (null → assets/frames/T_right_base_vention.npy)
+  T_rtde_base_vention: null
+  # Left UR base in vention (laser)
+  T_left_base_vention: null
+  # ee_object_calib meta with T_cam_EE (AprilTag / viz camera)
+  calib_meta: null
+  # Object translation offset JSON (null → sidecar next to T_tag0_base)
+  object_offset: null
+  laser_ply: null
+  laser_offset: null
+  log_motion: null
+  record_output_dir: null
+
+pointcloud:
+  # Folded from former config/pointclouds.yaml (stringer_layup)
+  voxel_size: 0.001
+  normal_orientation: 1
+
+# Shared field / WoS / query (both modes use the same orientation field).
+field:
+  # Diffusion BC: end_lines | boundary
+  mode: end_lines
+  # Scalar flow: length → end-cap bands; width → long-edge bands
+  flow: width
+  end_line_fraction: 0.06
+  swap_end_lines: false
+  # Dimensionless diffusion time τ/h²; dt = diffusion_scalar * mean_edge_length²
+  diffusion_scalar: 5000.0
+
+wos:
+  batch_size: 256
+  # Walk-on-Spheres stop radius = mean_edge_length * this multiplier (density-aware)
+  convergence_threshold_edge_mult: 2.0
+
+query:
+  # |d| band used for “near surface” / contact flag in VF status (both modes)
+  contact_threshold_m: 0.001
+  query_radius_m: 0.025
+  # Local surface fit: sphere | plane
+  fit_mode: sphere
+
+# Free-space VF (pose-ref path). Still queried in-contact for n* / R_field.
+vf:
+  # EMA weight on previous R_field (same as Polyscope teleop-key preview)
+  r_field_smoothing: 0.75
+  # Re-query / re-lock R_motion after this tip travel (m)
+  relock_dist_m: 0.012
+  # Re-query / re-lock after this time (s)
+  relock_period_s: 0.10
+  # Slerp amount of R_motion toward smoothed R_field on relock
+  motion_track: 0.55
+
+# Shared rates / gates. Free-space uses keyboard_step as pose-ref increments;
+# in-contact uses it for tangent slide step size.
+control:
+  hz: 50.0
+  status_hz: 5.0
+  # speedJ ||q̇|| clamp (rad/s)
+  max_joint_velocity: 0.5
+  # speedJ acceleration argument (rad/s²)
+  rtde_accel: 0.3
+  # Pose-servo gain (q̇ ≈ -gain J⁺ e). Keep modest; 16 was saturating on tiny steps.
+  pose_gain: 4.0
+  # Cap tip linear / angular command implied by pose error (m/s, rad/s)
+  max_linear_speed: 0.05
+  max_angular_speed: 0.4
+  # Meters of tip travel per keypress (before 0.25× adaptive distance scale)
+  keyboard_step: 0.1
+  # Cap on adaptive distance scale (far → larger steps); was effectively up to 10
+  max_twist_scale: 2.0
+  watchdog_ms: 500.0
+  # Key to enable motion after calibrate: "enter" or a single character (not t/v/f)
+  enable_key: enter
+  tip_offset: [0.0, 0.0, 0.0]
+  base_frame: null
+  tag0_frame: null
+  no_object_offset: false
+  no_rtde_base_vention: false
+  no_laser_offset: false
+  object_offset_step_m: 0.001
+
+viz:
+  # Session --viz still required to open Polyscope; these are viz defaults
+  frame: vention          # tag0 | vention | rtde | base
+  frame_stride: 20
+  hide_object: false
+  show_object: false
+  teleop_keys: false
+  laser: "off"              # off | overlay | replace
+
+laser:
+  voxel: 0.002
+
+tag_crosscheck:
+  camera_rgb_topic: null
+  camera_info_topic: null
+  tag_id: 0
+  tag_size_m: 0.04
+  tag_family: tag36h11
+
+record:
+  mcap: false
+  sample_hz: 0.0          # 0 → use control.hz
+  save_images: true
+  camera_topics: null
+  target_frame: vention_frame
+  plot_motion: false
+
+# --- Free-space optional layers (ignored when in-contact is on) -------------
+line_tracking:
+  enabled: false
+  soft_standoff: false
+  standoff_distance: 0.002
+  standoff_gain: 1.0
+  standoff_max_speed: 0.05
+  no_keyboard_normal_ff: false
+
+tactile:
+  # Free-space Phase-3 normal FF via speedJ (not DualLoop). Do not combine with
+  # --in-contact. desired_normal_force is also Fd for in_contact DualLoop.
+  enabled: false
+  desired_normal_force: 5.0
+  wrench_kp: 0.02
+  wrench_ki: 0.0
+  wrench_kd: 0.0
+  wrench_to_vn: 0.01
+  max_vn: 0.03
+  # Optional 6-vector bias subtracted from actual_TCP_force; null = none
+  ft_bias: null
+
+# --- In-contact DualLoop (RTDE; bypasses free-space pose-ref) ----------------
+in_contact:
+  # true → same as CLI --in-contact (Align + Force PID, tangent keys only)
+  enabled: false
+  # Sign on measured force along n* (+1 / -1 depending on wrench convention)
+  force_sign: 1.0
+  # Align tool-Z to n* before / while seeking force
+  align_first: true
+  align_enter_tol_deg: 5.0
+  align_exit_tol_deg: 12.0
+  # Soft approach / force seek speed caps (m/s)
+  approach_v_max: 0.006
+  force_max_v: 0.010
+
+diag:
+  hold_zero: false
+  fixed_orient: false
+  verify_500hz: false
+  dtc_verify_seconds: 2.0
+  verify_500hz_exit: false
+  polyscope_version: null

@@ -6,13 +6,32 @@ from typing import Any
 import numpy as np
 
 
-def set_camera_and_plane(*, up: str = "y_up") -> None:
-    """Match historical diffused_fields defaults; callers may override up-dir after."""
+def set_camera_and_plane(
+    *, up: str = "z_up", front: str = "neg_x_front"
+) -> None:
+    """Upright stringer/vention view: layup is roughly XY-thin in Z."""
     import polyscope as ps
 
     ps.set_up_dir(up)
-    ps.set_front_dir("neg_x_front")
+    ps.set_front_dir(front)
     ps.set_ground_plane_mode("shadow_only")
+
+
+def frame_camera_on_points(
+    points: Any, *, distance_scale: float = 1.8
+) -> None:
+    """Aim the camera at the bbox center of ``points`` (ignore distant refs)."""
+    import polyscope as ps
+
+    pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    if pts.size == 0:
+        return
+    center = pts.mean(axis=0)
+    extent = float(np.linalg.norm(pts.max(axis=0) - pts.min(axis=0)))
+    dist = max(extent * float(distance_scale), 0.25)
+    # Match neg_x_front: sit on -X looking toward +X, slight elevation.
+    cam = center + np.array([-dist, 0.15 * dist, 0.35 * dist], dtype=float)
+    ps.look_at(cam.tolist(), center.tolist())
 
 
 def plot_orientation_field(

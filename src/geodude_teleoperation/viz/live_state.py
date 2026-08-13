@@ -1,8 +1,9 @@
 """Thread-safe TCP / VF snapshot for live Polyscope updates."""
 from __future__ import annotations
 
+import queue
 import threading
-from typing import Sequence
+from typing import Iterable, Sequence
 
 import numpy as np
 
@@ -25,6 +26,10 @@ class LiveVizState:
         self.object_offset_t: np.ndarray | None = None
         self.laser_offset_t: np.ndarray | None = None
         self._offset_seq: int = 0
+        # Polyscope → RTDE keyboard bridge (stdin is dead while the GUI has focus).
+        self._teleop_keys: queue.Queue[str] = queue.Queue()
+        # Continuous hold (WASD/X/Y) sampled each Polyscope frame.
+        self._held_teleop: frozenset[str] = frozenset()
 
     @property
     def viz_open(self) -> bool:
@@ -42,6 +47,31 @@ class LiveVizState:
     def offset_seq(self) -> int:
         with self._lock:
             return self._offset_seq
+
+    def push_teleop_key(self, key: str) -> None:
+        """Queue a teleop key from the Polyscope thread (Enter, t/v/f/q, …)."""
+        if not key:
+            return
+        self._teleop_keys.put(str(key))
+
+    def drain_teleop_keys(self) -> list[str]:
+        """Pop all pending Polyscope one-shot keys for the RTDE keyboard handler."""
+        out: list[str] = []
+        while True:
+            try:
+                out.append(self._teleop_keys.get_nowait())
+            except queue.Empty:
+                break
+        return out
+
+    def set_held_teleop_keys(self, keys: Iterable[str]) -> None:
+        """Update which movement keys are currently held in the Polyscope window."""
+        with self._lock:
+            self._held_teleop = frozenset(str(k) for k in keys if k)
+
+    def held_teleop_keys(self) -> frozenset[str]:
+        with self._lock:
+            return self._held_teleop
 
     def publish(
         self,

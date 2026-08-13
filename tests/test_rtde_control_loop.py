@@ -187,6 +187,31 @@ def test_watchdog_refreshed_by_active_control_without_keypress():
     assert not rcl.watchdog_is_stale(last_command_time, 0.6, watchdog_s=watchdog_s)
 
 
+def test_watchdog_refreshed_in_dry_run_sim():
+    """Dry-run Polyscope sim must keep the watchdog alive between keypresses."""
+    assert rcl.should_refresh_watchdog(
+        commands_allowed=True,
+        dry_run=True,
+        kin_ok=True,
+        control_open=False,
+        fresh_command=False,
+    )
+
+
+def test_flange_tcp_offset_roundtrip():
+    from geodude_teleoperation.rtde.ur5e_kinematics import forward_kinematics
+    from scipy.spatial.transform import Rotation
+
+    q = np.array([0.1, -1.0, 1.2, -1.4, -1.57, 0.2])
+    T_f, _ = forward_kinematics(q)
+    tcp = np.concatenate(
+        [T_f[:3, 3] + np.array([0.0, 0.0, 0.05]), Rotation.from_matrix(T_f[:3, :3]).as_rotvec()]
+    )
+    off = rcl.flange_tcp_offset_matrix(q, tcp)
+    tcp2 = rcl.tcp_pose_from_q_and_offset(q, off)
+    assert np.allclose(tcp, tcp2, atol=1e-9)
+
+
 def test_resolve_T_fixed_identity():
     args = MagicMock()
     args.base_frame = None
@@ -267,6 +292,9 @@ def test_ee_motor_from_tcp_pose():
 
 def test_resolve_live_kinematics_falls_back_to_numpy(monkeypatch):
     monkeypatch.setattr(
+        "geodude_teleoperation.gafropy_compat.gafropy_importable", lambda: False
+    )
+    monkeypatch.setattr(
         rcl._GafropyKinematicsBridge, "try_create", classmethod(lambda cls: None)
     )
     kin = rcl.resolve_live_kinematics()
@@ -275,19 +303,12 @@ def test_resolve_live_kinematics_falls_back_to_numpy(monkeypatch):
 
 
 def test_make_twist_without_gafropy(monkeypatch):
-    import builtins
-
     from geodude_teleoperation.teleop.keyboard import make_twist
     from geodude_teleoperation.se3 import NumpyTwist
+    from geodude_teleoperation import gafropy_compat
 
-    real_import = builtins.__import__
-
-    def _blocked(name, *args, **kwargs):
-        if name == "gafropy" or name.startswith("gafropy."):
-            raise ImportError("blocked for test")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", _blocked)
+    gafropy_compat.clear_gafropy_importable_cache()
+    monkeypatch.setattr(gafropy_compat, "gafropy_importable", lambda: False)
     tw = make_twist([0.0, 0.0, 0.0, 0.01, 0.0, 0.0])
     assert isinstance(tw, NumpyTwist)
     assert np.allclose(tw.get_linear(), [0.01, 0.0, 0.0])
@@ -395,6 +416,7 @@ def test_numpy_live_loop_can_speedj(fake_ur_rtde, monkeypatch):
     args.status_hz = 0.0
     args.log_motion = None
     args.plot_motion = False
+    args.record_mcap = False
     args.rtde_accel = 1.0
     args.watchdog_ms = 500.0
     args.max_joint_velocity = 1.0
@@ -407,6 +429,11 @@ def test_numpy_live_loop_can_speedj(fake_ur_rtde, monkeypatch):
     args.enable_key = "\n"
     args.no_rtde_base_vention = True
     args.T_rtde_base_vention = None
+    args.diag_hold_zero = False
+    args.line_tracking = False
+    args.tactile = False
+    args.in_contact = False
+    args.verify_dtc_500hz = False
     args.T_tag0_base = None
     args.base_frame = None
     args.tag0_frame = None
@@ -566,3 +593,172 @@ def test_enable_alone_idle_speedj_near_zero(fake_ur_rtde, monkeypatch):
     assert after_enable
     norms = [float(np.linalg.norm(c[0])) for c in after_enable]
     assert max(norms) < 1e-3, norms
+
+
+def test_dry_run_sim_moves_viz_tcp_without_speedj(fake_ur_rtde, monkeypatch):
+    """--dry-run after Enter: integrate sim TCP to live_viz; never open control."""
+    from geodude_teleoperation.teleop.controller import TeleoperationController
+    from geodude_teleoperation.se3 import NumpyTwist
+    from geodude_teleoperation.teleop.teleop_state import TeleopState
+    from geodude_teleoperation.viz.live_state import LiveVizState
+    from geodude_teleoperation.rtde.ur5e_kinematics import forward_kinematics
+    from scipy.spatial.transform import Rotation
+
+    FakeControl, FakeReceive = fake_ur_rtde
+    monkeypatch.setattr(
+        rcl._GafropyKinematicsBridge, "try_create", classmethod(lambda cls: None)
+    )
+
+    q = np.array([0.0, -1.2, 1.4, -1.6, -1.57, 0.0])
+    T_f, _ = forward_kinematics(q)
+    tcp0 = np.concatenate(
+        [T_f[:3, 3], Rotation.from_matrix(T_f[:3, :3]).as_rotvec()]
+    )
+    R_field = Rotation.from_euler("xyz", [20, -30, 10], degrees=True).as_matrix()
+
+    class _KB:
+        def __init__(self):
+            self._running = __import__("threading").Event()
+            self._running.set()
+            self._n = 0
+
+        def start(self, on_twist, on_button=None, on_enable=None, enable_key="\n"):
+            self._on_twist = on_twist
+            self._on_enable = on_enable
+            self._running.set()
+
+        def stop(self):
+            self._running.clear()
+
+        def pump(self):
+            self._n += 1
+            if self._n == 1 and self._on_enable is not None:
+                self._on_enable()
+            elif self._n == 2:
+                live_viz.set_held_teleop_keys({"w"})
+            elif self._n >= 15:
+                live_viz.set_held_teleop_keys(set())
+                self._running.clear()
+
+    kb = _KB()
+    real_sleep = rcl.time.sleep
+
+    def _sleep(_dt):
+        kb.pump()
+        if kb._running.is_set():
+            real_sleep(0.0)
+
+    monkeypatch.setattr(rcl.time, "sleep", _sleep)
+
+    class _Recv(FakeReceive):
+        def __init__(self, ip: str):
+            super().__init__(ip)
+            self._q = list(q)
+            self._tcp = list(tcp0)
+
+    monkeypatch.setitem(
+        sys.modules, "rtde_receive", types.SimpleNamespace(RTDEReceiveInterface=_Recv)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "rtde_control",
+        types.SimpleNamespace(RTDEControlInterface=FakeControl),
+    )
+
+    class _VF:
+        def update_from_state(self, ee, T=None):
+            pass
+
+        def project(self, motor):
+            return motor
+
+        def motion_basis(self):
+            return R_field.copy()
+
+        def get_distance(self, position):
+            return 0.05
+
+        @property
+        def status(self):
+            return {
+                "signed_d": 0.05,
+                "in_contact": False,
+                "tip_nn": 0.05,
+                "used_wos": True,
+                "query_ms": 0.0,
+                "R_field_base": R_field,
+                "R_motion_base": R_field,
+                "R_field_raw_smoothed": R_field,
+            }
+
+    live_viz = LiveVizState()
+    args = MagicMock()
+    args.dry_run = True
+    args.robot_ip = "192.168.1.20"
+    args.control_hz = 50.0
+    args.status_hz = 0.0
+    args.log_motion = None
+    args.plot_motion = False
+    args.record_mcap = False
+    args.rtde_accel = 1.0
+    args.watchdog_ms = 500.0
+    args.max_joint_velocity = 1.0
+    args.keyboard_step = 0.01
+    args.pose_gain = 4.0
+    args.max_linear_speed = 0.05
+    args.max_angular_speed = 0.4
+    args.tip_offset = (0.0, 0.0, 0.0)
+    args.base_frame = None
+    args.tag0_frame = None
+    args.T_tag0_base = None
+    args.calib_meta = None
+    args.enable_key = "\n"
+    args.no_rtde_base_vention = True
+    args.T_rtde_base_vention = None
+    args.diag_hold_zero = False
+    args.line_tracking = False
+    args.tactile = False
+    args.in_contact = False
+    args.object_offset_t = None
+    args.no_object_offset = True
+    args.viz = False
+    args.verify_dtc_500hz = False
+
+    state = TeleopState()
+    assert state.vf_enabled is True
+    rcl.run_rtde_loop(
+        args,
+        (None, None),
+        _VF(),
+        TeleoperationController(max_joint_velocity=1.0),
+        state,
+        keyboard=kb,
+        live_viz=live_viz,
+    )
+
+    assert len(FakeControl.instances) == 0
+    _seq, tcp_pub, R_pub, _d, _c = live_viz.snapshot()
+    assert tcp_pub is not None
+    delta = float(np.linalg.norm(np.asarray(tcp_pub[:3]) - np.asarray(tcp0[:3])))
+    assert delta > 1e-3, f"sim tip did not move (delta={delta})"
+    assert state.vf_enabled is True
+    # EE orientation should track R_field in dry-run.
+    assert R_pub is not None
+    R_tcp = Rotation.from_rotvec(tcp_pub[3:6]).as_matrix()
+    assert np.allclose(R_tcp, R_field, atol=1e-5), (R_tcp, R_field)
+
+
+def test_snap_T_ref_orientation_to_vf():
+    class _Kin:
+        def __init__(self):
+            self._T_ref = np.eye(4)
+            self._T_ref[:3, 3] = [0.1, 0.2, 0.3]
+
+    class _VF:
+        def motion_basis(self):
+            return np.diag([1.0, -1.0, -1.0])
+
+    kin = _Kin()
+    assert rcl.snap_T_ref_orientation_to_vf(kin, _VF())
+    assert np.allclose(kin._T_ref[:3, :3], np.diag([1.0, -1.0, -1.0]))
+    assert np.allclose(kin._T_ref[:3, 3], [0.1, 0.2, 0.3])

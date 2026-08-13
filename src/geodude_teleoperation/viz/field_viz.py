@@ -21,15 +21,17 @@ from geodude_teleoperation.viz.live_state import LiveVizState
 ps = None  # type: ignore
 plot_orientation_field = None  # type: ignore
 set_camera_and_plane = None  # type: ignore
+frame_camera_on_points = None  # type: ignore
 
 
 def _ensure_polyscope() -> None:
-    global ps, plot_orientation_field, set_camera_and_plane
+    global ps, plot_orientation_field, set_camera_and_plane, frame_camera_on_points
     if ps is not None and plot_orientation_field is not None:
         return
     try:
         import polyscope as _ps
         from geodude_teleoperation.viz.polyscope_helpers import (
+            frame_camera_on_points as _frame_camera_on_points,
             plot_orientation_field as _plot_orientation_field,
             set_camera_and_plane as _set_camera_and_plane,
         )
@@ -40,6 +42,7 @@ def _ensure_polyscope() -> None:
     ps = _ps
     plot_orientation_field = _plot_orientation_field
     set_camera_and_plane = _set_camera_and_plane
+    frame_camera_on_points = _frame_camera_on_points
 
 
 def points_in_viz_frame(
@@ -191,7 +194,9 @@ def camera_pose_in_viz(
     )
 
 
-def _register_axes(name: str, T: np.ndarray, *, axis_len: float = 0.08) -> None:
+def _register_axes(
+    name: str, T: np.ndarray, *, axis_len: float = 0.08, enabled: bool = True
+) -> None:
     """Draw RGB axes at SE3 pose ``T`` (columns of R)."""
     assert ps is not None
     T = np.asarray(T, dtype=float).reshape(4, 4)
@@ -206,9 +211,14 @@ def _register_axes(name: str, T: np.ndarray, *, axis_len: float = 0.08) -> None:
             np.array([[0, 1]], dtype=int),
             radius=0.0022,
             color=c,
+            enabled=enabled,
         )
     ps.register_point_cloud(
-        name, o.reshape(1, 3), radius=0.006, color=(0.95, 0.95, 0.95)
+        name,
+        o.reshape(1, 3),
+        radius=0.006,
+        color=(0.95, 0.95, 0.95),
+        enabled=enabled,
     )
 
 
@@ -898,6 +908,18 @@ def _run_live_rtde_markers(
             T_c[:3, :3] = R_viz
             T_c[:3, 3] = tip
             _update_axis_curves(handles, "contact_R_field", T_c, axis_len=0.05)
+        elif R_field_tcp is not None:
+            # Free-space: show R_field at tip so operators can see VF orientation.
+            R_viz = R_tcp_base_to_viz(
+                R_field_tcp,
+                T_tag0_vention=T_eff,
+                T_rtde_base_vention=T_rtde_base_vention,
+                viz_frame=viz_frame,
+            )
+            T_c = np.eye(4)
+            T_c[:3, :3] = R_viz
+            T_c[:3, 3] = tip
+            _update_axis_curves(handles, "R_field", T_c, axis_len=0.06)
         return nn
 
     if seed_tcp is not None:
@@ -905,6 +927,7 @@ def _run_live_rtde_markers(
 
     nudge_map: list = []
     prev_down: dict = {}
+    teleop_key_map: list = []
     if imgui is not None:
         nudge_map = [
             (imgui.ImGuiKey_J, np.array([-1.0, 0.0, 0.0])),
@@ -917,6 +940,23 @@ def _run_live_rtde_markers(
         prev_down = {int(k): False for k, _ in nudge_map}
         for extra in ("LeftBracket", "RightBracket", "R", "P"):
             prev_down[extra] = False
+        # Linear + gates only (j/k/u/i reserved for object offset in this window).
+        teleop_key_map = [
+            (imgui.ImGuiKey_W, "w"),
+            (imgui.ImGuiKey_S, "s"),
+            (imgui.ImGuiKey_A, "a"),
+            (imgui.ImGuiKey_D, "d"),
+            (imgui.ImGuiKey_X, "x"),
+            (imgui.ImGuiKey_Y, "y"),
+            (imgui.ImGuiKey_T, "t"),
+            (imgui.ImGuiKey_V, "v"),
+            (imgui.ImGuiKey_F, "f"),
+            (imgui.ImGuiKey_Q, "q"),
+        ]
+        for key_enum, _ch in teleop_key_map:
+            prev_down[f"teleop_{int(key_enum)}"] = False
+        for name in ("Enter", "KeypadEnter"):
+            prev_down[f"teleop_{name}"] = False
 
     def _edge(key_id, key_enum) -> bool:
         if imgui is None:
@@ -933,6 +973,37 @@ def _run_live_rtde_markers(
                 imgui.IsKeyDown(getattr(imgui, "ImGuiKey_LeftShift", 0))
                 or imgui.IsKeyDown(getattr(imgui, "ImGuiKey_RightShift", 0))
             )
+            # Teleop keys → RTDE worker (stdin is inactive while Polyscope has focus).
+            # Movement: report held keys every frame (control loop applies at control_hz).
+            # Gates (t/v/f/q/Enter): one-shot only.
+            _teleop_move = {"w", "s", "a", "d", "x", "y"}
+
+            def _pressed(key_enum, *, repeat: bool = False) -> bool:
+                if key_enum is None:
+                    return False
+                pressed = getattr(imgui, "IsKeyPressed", None)
+                if pressed is not None:
+                    try:
+                        return bool(pressed(key_enum, repeat))
+                    except TypeError:
+                        return bool(pressed(key_enum))
+                return _edge(f"fallback_{int(key_enum)}", key_enum)
+
+            enter = getattr(imgui, "ImGuiKey_Enter", None)
+            if _pressed(enter, repeat=False):
+                live_viz.push_teleop_key("\n")
+            kp_enter = getattr(imgui, "ImGuiKey_KeypadEnter", None)
+            if _pressed(kp_enter, repeat=False):
+                live_viz.push_teleop_key("\n")
+            held: set[str] = set()
+            for key_enum, ch in teleop_key_map:
+                if ch in _teleop_move:
+                    if imgui.IsKeyDown(key_enum):
+                        held.add(ch)
+                elif _pressed(key_enum, repeat=False):
+                    live_viz.push_teleop_key(ch)
+            live_viz.set_held_teleop_keys(held)
+
             for key_enum, delta_viz in nudge_map:
                 if _edge(int(key_enum), key_enum):
                     d_v = delta_viz_to_vention(
@@ -1005,6 +1076,10 @@ def _run_live_rtde_markers(
                     f"laser offset t_vention_m={np.array2string(t_laser, precision=4)}  "
                     f"(Shift+j/l i/k u/o, Shift+r reset, Shift+p save)"
                 )
+            imgui.TextUnformatted(
+                "teleop (this window): Enter enable · hold w/s a/d x/y move · "
+                "t/v pause/VF · f freeze-n* · q quit"
+            )
 
         if live_viz.loop_done.is_set():
             return
@@ -1027,12 +1102,14 @@ def _run_live_rtde_markers(
 
     print(
         "[viz] live RTDE + offsets: j/l i/k u/o object; Shift+same laser; "
+        "Enter/w/s/a/d/x/y/t/v/f/q teleop in this window; "
         "p / Shift+p save; close window to drop viz (q quits teleop)",
         flush=True,
     )
     ps.set_user_callback(callback)
     ps.show()
     ps.clear_user_callback()
+    live_viz.set_held_teleop_keys(())
     live_viz.mark_viz_closed()
     print(
         "[viz] window closed — RTDE teleop continues in background until terminal q",
@@ -1072,6 +1149,7 @@ def show_field_debug(
     _ensure_polyscope()
     assert ps is not None and plot_orientation_field is not None
     assert set_camera_and_plane is not None
+    assert frame_camera_on_points is not None
 
     tip_offset = (
         np.zeros(3, dtype=float)
@@ -1234,12 +1312,8 @@ def show_field_debug(
         )
 
     ps.init()
-    set_camera_and_plane()
-    # diffused_fields defaults to y_up; stringer/vention/rtde world has Z up and
-    # y_up shows the layup inverted at startup — flip up (keep front).
-    ps.set_up_dir("neg_y_up")
-    if hasattr(ps, "reset_camera_to_home_view"):
-        ps.reset_camera_to_home_view()
+    # Layup is roughly XY (thin in Z); z_up keeps it horizontal at startup.
+    set_camera_and_plane(up="z_up")
     ps.set_ground_plane_mode("none")
 
     if hide_object:
@@ -1313,10 +1387,12 @@ def show_field_debug(
         enable_vector=False,
     )
 
-    # Draw RTDE-base origin in vention frame for sanity.
+    # Keep RTDE-base as a toggleable reference; hide so home view frames the object.
     if viz_frame == "vention" and T_rtde_base_vention is not None:
         T_rv = np.asarray(T_rtde_base_vention, dtype=float).reshape(4, 4)
-        _register_axes("rtde_base", T_rv, axis_len=0.12)
+        _register_axes("rtde_base", T_rv, axis_len=0.12, enabled=False)
+
+    frame_camera_on_points(V)
 
     if live_viz is not None and not show_teleop_keys:
         t0 = (

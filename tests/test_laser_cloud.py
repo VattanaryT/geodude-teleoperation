@@ -1,6 +1,8 @@
 """Laser profilometer → vention / tag0 transform helpers."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 from geodude_teleoperation.frames import (
@@ -9,9 +11,17 @@ from geodude_teleoperation.frames import (
     vention_to_tag0_points,
 )
 from geodude_teleoperation.teleop.laser_cloud import (
+    is_laser_left_base_ply,
     points_vention_in_viz_frame,
     voxel_downsample_points,
 )
+
+
+def test_is_laser_left_base_ply_detects_merged_path():
+    assert is_laser_left_base_ply("data/processed/laser_profilometer/merged.ply")
+    assert is_laser_left_base_ply(Path("foo/laser_profilometer/merged.ply"))
+    assert not is_laser_left_base_ply("data/processed/object_tag0_crop_voxel0.0020.ply")
+    assert not is_laser_left_base_ply(None)
 
 
 def test_default_T_left_base_vention_asset_loads():
@@ -74,7 +84,7 @@ def test_voxel_downsample_points_reduces():
 def test_viz_laser_cli_default_off():
     from geodude_teleoperation.teleop.ur_stringer_teleop import parse_args
 
-    args = parse_args(["--ply", "/tmp/x.ply", "--viz"])
+    args = parse_args(["--viz"])
     assert args.viz_laser == "off"
     assert args.laser_voxel == 0.002
 
@@ -82,7 +92,7 @@ def test_viz_laser_cli_default_off():
 def test_viz_laser_overlay_requires_viz():
     from geodude_teleoperation.teleop.ur_stringer_teleop import parse_args, validate_args
 
-    args = parse_args(["--ply", "/tmp/x.ply", "--viz-laser", "overlay"])
+    args = parse_args(["--viz-laser", "overlay"])
     try:
         validate_args(args)
         raised = False

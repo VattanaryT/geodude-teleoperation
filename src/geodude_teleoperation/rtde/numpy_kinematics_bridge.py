@@ -142,13 +142,25 @@ class NumpyUrKinematicsBridge:
                     self._pending_normal_ff_world = field_normal_ff_world(
                         lin_n, R_field, scale=linear_scale
                     )
-            # Compose in field frame on projected EE (not raw TCP body axes).
-            T_ref0 = np.eye(4)
-            T_ref0[:3, :3] = R_field
-            T_ref0[:3, 3] = T_ee[:3, 3]
-            tw_scaled = NumpyTwist(tw.get_angular(), linear_scale * lin_for_pose)
-            T_new = body_twist_increment(T_ref0, tw_scaled)
-            T_new = matrix_from_motor(vf.project(motor_from_matrix(T_new)))
+            # Seed / keep a pose reference. Pure linear WASD must NOT snap
+            # orientation to R_field — that caused huge rot error / wild q̇ on
+            # a single keypress when the tool was misaligned with the field.
+            self.ensure_reference_from_tcp()
+            assert self._T_ref is not None
+            T_ref0 = np.asarray(self._T_ref, dtype=float).reshape(4, 4).copy()
+            dp_world = R_field @ (linear_scale * lin_for_pose)
+            T_new = T_ref0.copy()
+            T_new[:3, 3] = T_ref0[:3, 3] + dp_world
+            ang = tw.get_angular()
+            if float(np.linalg.norm(ang)) > 1e-12:
+                # Angular keys: interpret ω in field frame, then lock R → R_field.
+                T_field = np.eye(4)
+                T_field[:3, :3] = R_field
+                T_field[:3, 3] = T_new[:3, 3]
+                T_new = body_twist_increment(
+                    T_field, NumpyTwist(ang, np.zeros(3, dtype=float))
+                )
+                T_new = matrix_from_motor(vf.project(motor_from_matrix(T_new)))
             # World-frame commanded linear direction (unit), for t̂1/t̂2 alignment.
             v_field = linear_scale * lin_for_pose
             n = float(np.linalg.norm(v_field))
@@ -173,6 +185,8 @@ class NumpyUrKinematicsBridge:
         damping: float,
         max_joint_velocity: float,
         vf=None,
+        max_linear_speed: float | None = None,
+        max_angular_speed: float | None = None,
     ) -> np.ndarray:
         self.ensure_reference_from_tcp()
         assert self._T_ref is not None
@@ -198,6 +212,19 @@ class NumpyUrKinematicsBridge:
         R = vf_R_field(vf) if vf is not None else None
         if cfg.enabled and R is not None:
             err = apply_line_tracking_pose_error(err, R, enabled=True)
+
+        # Cap pose error so gain * err cannot exceed configured task speeds.
+        g = max(float(gain), 1e-6)
+        if max_linear_speed is not None and float(max_linear_speed) > 0.0:
+            e_max = float(max_linear_speed) / g
+            n = float(np.linalg.norm(err[:3]))
+            if n > e_max:
+                err[:3] *= e_max / n
+        if max_angular_speed is not None and float(max_angular_speed) > 0.0:
+            e_max = float(max_angular_speed) / g
+            n = float(np.linalg.norm(err[3:6]))
+            if n > e_max:
+                err[3:6] *= e_max / n
 
         qdot, diag = qdot_from_error(
             err,

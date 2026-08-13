@@ -75,6 +75,7 @@ def test_vf_ad_moves_along_field_y_not_body_y():
 
     kin.sync_joints(np.zeros(6))
     kin.set_tcp_pose(tcp)
+    kin.ensure_reference_from_tcp()
 
     # d → linear +y in field frame (keyboard index 4).
     step = 0.04
@@ -87,26 +88,37 @@ def test_vf_ad_moves_along_field_y_not_body_y():
     # linear_scale = 0.25 * factor; at d=0.05 → factor=1 → 0.25*step along field +y
     expected_dp = R_field @ np.array([0.0, 0.25 * step, 0.0])
     assert np.allclose(T_ref[:3, 3], expected_dp, atol=1e-9)
-    # Orientation locked to R_field (not body).
-    assert np.allclose(T_ref[:3, :3], R_field, atol=1e-9)
+    # Pure linear keeps TCP orientation (no R_field snap).
+    assert np.allclose(T_ref[:3, :3], R_tcp, atol=1e-9)
     # Must NOT have moved along body +y (world y).
     assert abs(T_ref[1, 3]) < 1e-9
 
 
-def test_vf_pure_linear_reference_has_zero_extra_rotation_vs_field():
+def test_vf_pure_linear_keeps_tcp_orientation():
     kin = NumpyUrKinematicsBridge.try_create()
     assert kin is not None
     R_field = Rotation.from_euler("xyz", [10, -20, 30], degrees=True).as_matrix()
-    # Misaligned TCP — body twist would have coupled badly before the fix.
+    # Misaligned TCP — old path snapped R_ref to R_field and saturated q̇.
     R_tcp = Rotation.from_euler("xyz", [40, 5, -15], degrees=True).as_matrix()
     tcp = np.array([0.1, -0.2, 0.3, 0.0, 0.0, 0.0])
     tcp[3:] = Rotation.from_matrix(R_tcp).as_rotvec()
     kin.sync_joints(np.zeros(6))
     kin.set_tcp_pose(tcp)
+    kin.ensure_reference_from_tcp()
 
     tw = NumpyTwist.from_array([0.0, 0.0, 0.0, 0.0, -0.04, 0.0])  # a
     kin.update_command(tw, vf=_FakeVF(R_field=R_field), min_scale=1.0, max_scale=1.0)
-    assert np.allclose(kin._T_ref[:3, :3], R_field, atol=1e-9)
+    assert np.allclose(kin._T_ref[:3, :3], R_tcp, atol=1e-9)
+    qdot = kin.compute_qdot(
+        gain=4.0,
+        damping=0.05,
+        max_joint_velocity=0.5,
+        vf=_FakeVF(R_field=R_field),
+        max_linear_speed=0.05,
+        max_angular_speed=0.4,
+    )
+    # Linear-only step must not demand large rotational joint rates.
+    assert float(np.linalg.norm(qdot)) < 0.5
 
 
 def test_idle_ensure_reference_does_not_chase_field_orientation():
@@ -129,9 +141,9 @@ def test_idle_ensure_reference_does_not_chase_field_orientation():
     assert np.allclose(kin._T_ref[:3, :3], R_tcp, atol=1e-9)
 
     qdot = kin.compute_qdot(
-        gain=16.0,
+        gain=4.0,
         damping=0.05,
-        max_joint_velocity=1.0,
+        max_joint_velocity=0.5,
         vf=_FakeVF(R_field=R_field),
     )
     assert float(np.linalg.norm(qdot)) < 1e-3

@@ -27,6 +27,24 @@ def resolve_laser_ply(path: Path | str | None) -> Path:
     return Path(DEFAULT_LASER_PLY)
 
 
+def is_laser_left_base_ply(path: Path | str | None) -> bool:
+    """True when ``path`` is the Keyence merge (points already in left UR base).
+
+    ``paths.ply`` is otherwise assumed tag_0; pointing it at ``merged.ply`` must
+    go through left_base→vention→tag0 or the layup appears rotated ~90°.
+    """
+    if path is None:
+        return False
+    p = Path(path)
+    try:
+        if p.resolve() == Path(DEFAULT_LASER_PLY).resolve():
+            return True
+    except OSError:
+        pass
+    parts = {part.lower() for part in p.parts}
+    return "laser_profilometer" in parts and p.name.lower() == "merged.ply"
+
+
 def load_points_xyz(ply: Path | str) -> np.ndarray:
     """Read PLY XYZ (no downsample)."""
     ply = Path(ply).resolve()

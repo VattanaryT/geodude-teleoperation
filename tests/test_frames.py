@@ -73,5 +73,5 @@ def test_default_T_left_base_vention_matches_known_t():
 def test_viz_flags_vention_default():
     from geodude_teleoperation.teleop.ur_stringer_teleop import parse_args
 
-    args = parse_args(["--ply", "/tmp/x.ply", "--viz"])
+    args = parse_args(["--viz"])
     assert args.viz_frame == "vention"
