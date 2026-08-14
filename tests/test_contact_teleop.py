@@ -365,6 +365,125 @@ def test_align_first_gates_force_until_tool_z_aligned():
     assert bridge2.last_diag["Fe_N"] > 0.0
 
 
+def test_align_phase_omega_only_no_tip_slide():
+    """During align: rotate tool-Z → n* in place (no linear / no tangent)."""
+    bridge = ContactTeleopBridge(
+        ContactTeleopConfig(
+            desired_force_n=5.0,
+            force_sign=1.0,
+            align_first=True,
+            align_enter_tol_deg=5.0,
+            freeze_n_on_arm=True,
+            max_joint_velocity=5.0,
+            tangent_scale=8.0,
+        )
+    )
+    R_field = np.eye(3)
+    ang = np.deg2rad(25.0)
+    c, s = np.cos(ang), np.sin(ang)
+    R_tcp = np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
+    bridge.arm([0, 0, 0], R_tcp, R_field)
+    # Keyboard/SpaceMouse should not slide tip while aligning.
+    bridge.push_tangent_field_linear([0.05, 0.0, 0.0], R_field)
+    qdot = bridge.step(
+        p_tcp=[0, 0, 0],
+        R_tcp=R_tcp,
+        R_field=R_field,
+        force_base=[0.0, 0.0, 0.0],
+        jacobian=np.eye(6),
+        dt=0.02,
+    )
+    assert bridge.last_diag["phase_align"] == 1.0
+    assert bridge.last_diag["v_cmd_norm"] < 1e-9
+    assert bridge.last_diag["v_tan_norm"] < 1e-9
+    assert bridge.last_diag["w_cmd_norm"] > 1e-6
+    # J=I → tip linear joints ≈ 0; angular joints move.
+    assert float(np.linalg.norm(qdot[:3])) < 1e-6
+    assert float(np.linalg.norm(qdot[3:])) > 1e-6
+
+
+def test_continuous_tangent_persists_without_hold_decay():
+    """SpaceMouse-style: keep last tangent until cleared (no hold timeout)."""
+    bridge = ContactTeleopBridge(
+        ContactTeleopConfig(
+            desired_force_n=5.0,
+            force_sign=1.0,
+            align_first=False,
+            tangent_scale=1.0,
+            tangent_hold_s=0.05,
+            max_joint_velocity=5.0,
+        )
+    )
+    R = np.eye(3)
+    bridge.arm([0, 0, 0], R, R)
+    bridge.push_tangent_field_linear([0.02, 0.0, 0.0], R, continuous=True)
+    # dt ≫ hold_s — hold mode would have expired.
+    bridge.step(
+        p_tcp=[0, 0, 0],
+        R_tcp=R,
+        R_field=R,
+        force_base=[0.0, 0.0, 5.0],
+        jacobian=np.eye(6),
+        dt=1.0,
+    )
+    assert bridge.last_diag["v_tan_norm"] > 0.01
+    bridge.clear_tangent()
+    bridge.step(
+        p_tcp=[0, 0, 0],
+        R_tcp=R,
+        R_field=R,
+        force_base=[0.0, 0.0, 5.0],
+        jacobian=np.eye(6),
+        dt=0.02,
+    )
+    assert bridge.last_diag["v_tan_norm"] < 1e-12
+
+
+def test_hold_tangent_still_expires():
+    """Keyboard one-shot: tangent dies after tangent_hold_s."""
+    bridge = ContactTeleopBridge(
+        ContactTeleopConfig(
+            desired_force_n=5.0,
+            force_sign=1.0,
+            align_first=False,
+            tangent_scale=1.0,
+            tangent_hold_s=0.05,
+            max_joint_velocity=5.0,
+        )
+    )
+    R = np.eye(3)
+    bridge.arm([0, 0, 0], R, R)
+    bridge.push_tangent_field_linear([0.02, 0.0, 0.0], R)
+    bridge.step(
+        p_tcp=[0, 0, 0],
+        R_tcp=R,
+        R_field=R,
+        force_base=[0.0, 0.0, 5.0],
+        jacobian=np.eye(6),
+        dt=0.02,
+    )
+    assert bridge.last_diag["v_tan_norm"] > 0.01
+    # Hold still applies on the tick that drains the timer…
+    bridge.step(
+        p_tcp=[0, 0, 0],
+        R_tcp=R,
+        R_field=R,
+        force_base=[0.0, 0.0, 5.0],
+        jacobian=np.eye(6),
+        dt=0.1,
+    )
+    # …then the next tick is idle.
+    bridge.step(
+        p_tcp=[0, 0, 0],
+        R_tcp=R,
+        R_field=R,
+        force_base=[0.0, 0.0, 5.0],
+        jacobian=np.eye(6),
+        dt=0.02,
+    )
+    assert bridge.last_diag["v_tan_norm"] < 1e-12
+
+
 def test_align_softened_before_contact_load():
     # Retained name: align-first keeps full k_ori (no soft-until-contact).
     bridge = ContactTeleopBridge(ContactTeleopConfig(desired_force_n=5.0, force_sign=1.0))
@@ -380,3 +499,79 @@ def test_align_softened_before_contact_load():
         dt=0.02,
     )
     assert abs(bridge.last_diag["k_ori"] - k_full) < 1e-9
+
+
+def test_config_from_args_wires_force_and_align_gains():
+    from types import SimpleNamespace
+
+    from geodude_teleoperation.teleop.contact_teleop import config_from_args
+
+    args = SimpleNamespace(
+        contact_desired_force=7.0,
+        force_kp=0.002,
+        force_ki=0.001,
+        force_kd=0.0005,
+        force_deadband_N=0.2,
+        force_lpf_hz=8.0,
+        force_contact_threshold_N=0.7,
+        wrench_in_tool_frame=False,
+        force_sign=-1.0,
+        approach_v_max=0.004,
+        force_max_v=0.008,
+        align_k_perp=50.0,
+        align_k_ori=3.0,
+        align_m_lin=0.8,
+        align_m_ang=0.04,
+        align_b_lin=30.0,
+        align_b_ang=2.0,
+        tangent_scale=4.0,
+        tangent_hold_s=0.2,
+        contact_max_linear_m_s=0.03,
+        contact_max_angular_deg_s=10.0,
+        contact_damping=0.08,
+        max_joint_velocity=0.4,
+        freeze_n_on_arm=False,
+        bias_skip_load_N=1.5,
+        align_first=True,
+        align_enter_tol_deg=4.0,
+        align_exit_tol_deg=10.0,
+    )
+    cfg = config_from_args(args)
+    bridge = ContactTeleopBridge(cfg)
+    assert bridge.cfg.desired_force_n == 7.0
+    assert bridge.dual.config.force.kp == 0.002
+    assert bridge.dual.config.force.ki == 0.001
+    assert bridge.dual.config.force.Fd_N == 7.0
+    assert bridge.dual.config.force.wrench_in_tool_frame is False
+    assert bridge.dual.config.align.k_ori == 3.0
+    assert bridge.dual.config.align.b_lin == 30.0
+    assert bridge._k_ori_full == 3.0
+
+
+def test_dualloop_outputs_qdot_not_joint_torque():
+    """Default actuation=speedj: DualLoop → q̇ (not DTC τ)."""
+    bridge = ContactTeleopBridge(
+        ContactTeleopConfig(
+            desired_force_n=5.0,
+            force_sign=1.0,
+            align_first=False,
+            max_joint_velocity=5.0,
+            actuation="speedj",
+        )
+    )
+    assert bridge.actuation == "speedj"
+    R = np.eye(3)
+    bridge.arm([0, 0, 0], R, R)
+    bridge.push_tangent_field_linear([0.02, 0.0, 0.0], R, continuous=True)
+    qdot = bridge.step(
+        p_tcp=[0, 0, 0],
+        R_tcp=R,
+        R_field=R,
+        force_base=[0.0, 0.0, 5.0],
+        jacobian=np.eye(6),
+        dt=0.02,
+    )
+    assert qdot.shape == (6,)
+    assert float(np.linalg.norm(qdot)) > 0.0
+    assert not hasattr(bridge, "publish_torques")
+    assert float(np.linalg.norm(bridge.last_tau)) == 0.0

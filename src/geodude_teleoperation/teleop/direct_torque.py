@@ -14,6 +14,7 @@ This module:
 from __future__ import annotations
 
 import time
+import threading
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -22,6 +23,50 @@ import numpy as np
 UR_SYSTEM_HZ = 500.0
 DTC_MIN_POLYSCOPE = (5, 23, 0)
 DTC_MIN_POLYSCOPE_X = (10, 10, 0)
+
+# ur_rtde directTorque friction scale defaults (PolyScope DTC).
+DEFAULT_VISCOUS_SCALE = (0.9, 0.9, 0.8, 0.9, 0.9, 0.9)
+DEFAULT_COULOMB_SCALE = (0.8, 0.8, 0.7, 0.8, 0.8, 0.8)
+
+
+def call_direct_torque(
+    control: Any,
+    tau: Sequence[float],
+    *,
+    friction_comp: bool = True,
+    viscous_scale: Sequence[float] | None = None,
+    coulomb_scale: Sequence[float] | None = None,
+) -> bool:
+    """Call ur_rtde ``directTorque`` with the real signature (not a bool flag).
+
+    ``directTorque(torque, viscous_scale=[...], coulomb_scale=[...]) -> bool``
+    """
+    direct = getattr(control, "directTorque", None)
+    if not callable(direct):
+        raise RuntimeError(
+            "control interface has no directTorque(); "
+            "upgrade ur_rtde / PolyScope for DTC"
+        )
+    tau6 = [float(v) for v in np.asarray(tau, dtype=float).reshape(6)]
+    if not np.isfinite(tau6).all():
+        raise ValueError("direct_torque command contains non-finite values")
+    if friction_comp:
+        vs = list(
+            DEFAULT_VISCOUS_SCALE
+            if viscous_scale is None
+            else np.asarray(viscous_scale, dtype=float).reshape(6)
+        )
+        cs = list(
+            DEFAULT_COULOMB_SCALE
+            if coulomb_scale is None
+            else np.asarray(coulomb_scale, dtype=float).reshape(6)
+        )
+    else:
+        vs = [0.0] * 6
+        cs = [0.0] * 6
+    ok = direct(tau6, vs, cs)
+    return ok is not False
+
 
 
 @dataclass
@@ -157,13 +202,140 @@ class DirectTorqueBridge:
     def urscript_snippet(self) -> str:
         return (
             "# Phase 2 DTC skeleton — run on robot (500 Hz) OR use ur_rtde:\n"
-            "#   ctrl.directTorque(tau, friction_comp=True) every timestep\n"
+            "#   ctrl.directTorque(tau, viscous_scale, coulomb_scale) every timestep\n"
             "# Stream target_tau[0:6] via RTDE input registers / socket if URScript.\n"
             "while (True):\n"
             "  tau = get_target_tau_from_host()  # replace with RTDE read\n"
-            f"  direct_torque(tau, friction_comp={'True' if self.friction_comp else 'False'})\n"
+            "  direct_torque(tau)\n"
             "  sync()\n"
         )
+
+
+class HostDirectTorqueStreamer:
+    """Background 500 Hz ``directTorque`` loop that streams a latched τ.
+
+    The main teleop tick (~50 Hz) only updates ``set_tau``; this thread keeps
+    calling ur_rtde every ~2 ms so the arm stays in torque mode.
+    """
+
+    def __init__(
+        self,
+        control: Any,
+        *,
+        friction_comp: bool = True,
+        target_hz: float = UR_SYSTEM_HZ,
+    ):
+        self._control = control
+        self._friction_comp = bool(friction_comp)
+        self._target_hz = float(target_hz)
+        self._tau = np.zeros(6, dtype=float)
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._n_ok = 0
+        self._n_fail = 0
+        self._last_error: str | None = None
+        self._active = False
+
+    @property
+    def active(self) -> bool:
+        return self._active and self._thread is not None and self._thread.is_alive()
+
+    def set_tau(self, tau: Sequence[float]) -> None:
+        arr = np.asarray(tau, dtype=float).reshape(6)
+        if not np.isfinite(arr).all():
+            arr = np.zeros(6, dtype=float)
+        with self._lock:
+            self._tau = arr.copy()
+
+    def start(self) -> None:
+        if self.active:
+            return
+        # Leave any prior speedJ / jog mode before entering DTC.
+        for name, args in (("speedStop", ()), ("speedStop", (1.0,))):
+            fn = getattr(self._control, name, None)
+            if callable(fn):
+                try:
+                    fn(*args)
+                    break
+                except TypeError:
+                    continue
+                except Exception:
+                    break
+        self._stop.clear()
+        self._n_ok = 0
+        self._n_fail = 0
+        self._last_error = None
+        self._thread = threading.Thread(
+            target=self._run, name="host-dtc-500hz", daemon=True
+        )
+        self._active = True
+        self._thread.start()
+        print(
+            "\033[93mWARNING: host DTC streamer @ "
+            f"{self._target_hz:g} Hz started (main loop only latches τ)."
+            "\033[0m",
+            flush=True,
+        )
+
+    def stop(self, *, zero: bool = True) -> None:
+        self._stop.set()
+        if zero:
+            self.set_tau(np.zeros(6))
+        thr = self._thread
+        if thr is not None and thr.is_alive():
+            thr.join(timeout=1.0)
+        self._thread = None
+        self._active = False
+        # Leave torque mode cleanly.
+        for name, args in (("speedStop", ()), ("stopJ", ([0.2] * 6,))):
+            fn = getattr(self._control, name, None)
+            if callable(fn):
+                try:
+                    fn(*args)
+                    break
+                except Exception:
+                    continue
+
+    def stats(self) -> dict[str, Any]:
+        return {
+            "active": self.active,
+            "n_ok": self._n_ok,
+            "n_fail": self._n_fail,
+            "last_error": self._last_error,
+        }
+
+    def _run(self) -> None:
+        dt = 1.0 / max(self._target_hz, 1.0)
+        init_period = getattr(self._control, "initPeriod", None)
+        wait_period = getattr(self._control, "waitPeriod", None)
+        use_period = callable(init_period) and callable(wait_period)
+        while not self._stop.is_set():
+            t0 = time.perf_counter()
+            with self._lock:
+                tau = self._tau.copy()
+            try:
+                t_mark = init_period() if use_period else None
+                ok = call_direct_torque(
+                    self._control, tau, friction_comp=self._friction_comp
+                )
+                if ok is False:
+                    self._n_fail += 1
+                    self._last_error = "directTorque returned False"
+                else:
+                    self._n_ok += 1
+                if use_period:
+                    wait_period(t_mark)
+                else:
+                    remain = dt - (time.perf_counter() - t0)
+                    if remain > 0:
+                        time.sleep(remain)
+            except Exception as exc:
+                self._n_fail += 1
+                self._last_error = str(exc)
+                time.sleep(dt)
+        self._active = False
+
 
 
 @dataclass
@@ -257,7 +429,9 @@ def verify_direct_torque_rate(
         while time.perf_counter() < t_end:
             t0 = time.perf_counter()
             t_mark = init_period() if use_period else None
-            ok_call = direct(tau6.tolist(), bool(friction_comp))
+            ok_call = call_direct_torque(
+                control, tau6, friction_comp=bool(friction_comp)
+            )
             if ok_call is False:
                 errors.append("directTorque returned False")
                 break

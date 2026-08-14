@@ -146,14 +146,32 @@ Ignored / forced off when in-contact is on. Do not combine `--tactile` with `--i
 
 ## in_contact (DualLoop, RTDE only)
 
+Actuation is **tip twist → q̇ → `speedJ`**. Align admittance and Force PID both
+output **velocity**, not UR `direct_torque`. DTC is only `diag.verify_500hz`.
+
 | Key | Notes |
 | --- | --- |
-| `enabled` | Same as CLI `--in-contact`. Align + Force PID; tangent keys only. |
+| `enabled` | Same as CLI `--in-contact`. Align + Force PID; tangent keys / SpaceMouse xy. |
+| `desired_force` | DualLoop `Fd` [N]. Prefer this over `tactile.desired_normal_force` for contact. |
 | `force_sign` | `Fs = sign · (F − bias) · n*`. Use `-1` if Enter seeks away from surface. |
+| `force_kp` / `force_ki` / `force_kd` | Force PID: `(m/s)/N`, `(m/s)/(N·s)`, `(m/s)/(N/s)`. |
+| `force_deadband_N` | Ignore `|Fe|` below this [N]. |
+| `force_lpf_hz` | LPF on `Fs` (Hz); `0` = off. |
+| `force_contact_threshold_N` | Soft-approach while `|Fs|` below this. |
+| `wrench_in_tool_frame` | Rotate `ActualTCPForce` by `R_ee` before projecting on `n*`. |
 | `align_first` | Seek force only after tool-Z ≈ n*. `--no-align-first` skips. |
 | `align_enter_tol_deg` / `align_exit_tol_deg` | Enter Force / drop back to Align (deg). |
+| `align_k_perp` / `align_k_ori` | Align spring stiffness (lateral / orientation). |
+| `align_m_lin` / `align_m_ang` | Align virtual mass. |
+| `align_b_lin` / `align_b_ang` | Align damping. |
 | `approach_v_max` | Soft approach along n* before light contact (m/s). |
 | `force_max_v` | Force PID along-normal speed cap (m/s). |
+| `tangent_scale` | Field linear × scale → tip tangent speed (m/s). |
+| `tangent_hold_s` | Keyboard one-shot hold (s). SpaceMouse is continuous. |
+| `max_linear_m_s` / `max_angular_deg_s` | DualLoop tip ‖v‖ / ‖ω‖ clips. |
+| `damping` | Damped LS for twist → `q̇`. |
+| `freeze_n_on_arm` | Freeze VF `n*` on Enter (`f` toggles). |
+| `bias_skip_load_N` | Skip F/T bias if already loaded above this [N]. |
 
 ---
 
@@ -163,7 +181,7 @@ Ignored / forced off when in-contact is on. Do not combine `--tactile` with `--i
 | --- | --- |
 | `hold_zero` | After enable, `speedJ(0)` every tick (no field / ignore keys). Wobble → RTDE/watchdog. |
 | `fixed_orient` | Lock `R_motion` to EE at first update. Smooth here → wobble is field-tracking. Mutually exclusive with `hold_zero`. |
-| `verify_500hz` / `dtc_verify_seconds` / `verify_500hz_exit` | Direct Torque rate check. |
+| `verify_500hz` / `dtc_verify_seconds` / `verify_500hz_exit` | Direct Torque **rate probe only** — not the in-contact teleop path. |
 | `polyscope_version` | Optional string for DTC check; else DashboardClient. |
 
 ---

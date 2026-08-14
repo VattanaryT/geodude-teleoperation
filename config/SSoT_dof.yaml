@@ -142,12 +142,45 @@ tactile:
 
 in_contact:
   enabled: false
+  # speedj | dtc — default speedj; yellow banner when enabled
+  actuation: speedj
+  # Force PID along n* → tip velocity (speedJ), or Eq.56 τ when actuation=dtc.
+  desired_force: 5.0
   force_sign: 1.0
+  force_kp: 0.001
+  force_ki: 0.0
+  force_kd: 0.0
+  force_deadband_N: 0.35
+  force_lpf_hz: 5.0
+  force_contact_threshold_N: 0.6
+  wrench_in_tool_frame: true
+  wrench_kp: 1.0
+  wrench_ki: 0.0
+  wrench_kd: 0.0
+  tangent_force_gain: 50.0
+  max_tau_nm: 20.0
+  K_line: null
+  D_twist: null
+  approach_v_max: 0.006
+  force_max_v: 0.010
+  # Align geometric admittance (spring–damper → tip twist).
   align_first: true
   align_enter_tol_deg: 5.0
   align_exit_tol_deg: 12.0
-  approach_v_max: 0.006
-  force_max_v: 0.010
+  align_k_perp: 100.0
+  align_k_ori: 5.0
+  align_m_lin: 1.0
+  align_m_ang: 0.05
+  align_b_lin: 45.0
+  align_b_ang: 2.5
+  # Tangent FF + DualLoop clips (SpaceMouse uses continuous tangent).
+  tangent_scale: 8.0
+  tangent_hold_s: 0.12
+  max_linear_m_s: 0.04
+  max_angular_deg_s: 12.0
+  damping: 0.05
+  freeze_n_on_arm: true
+  bias_skip_load_N: 2.0
 
 diag:
   hold_zero: false

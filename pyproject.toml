@@ -25,6 +25,9 @@ ur = [
 plot = [
     "matplotlib>=3.8",
 ]
+cga = [
+    "pygafro>=1.3",
+]
 
 [project.scripts]
 geodude-calibrate = "geodude_teleoperation.calibration.cli:main"

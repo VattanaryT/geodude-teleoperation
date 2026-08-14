@@ -71,6 +71,26 @@ def test_spacemouse_rtde_snapshot_exposes_motion_limits():
     assert live["startup_ramp_s"] > 0.0
 
 
+def test_spacemouse_in_contact_snapshot_exposes_dualloop_tuning():
+    root = ssot_dof_config_path().parent
+    contact = load_flat_ssot(root / "SSoT_dof_spacemouse_rtde_in_contact.yaml")
+    assert contact["in_contact"] is True
+    assert contact["spacemouse"] is True
+    assert contact["contact_desired_force"] == 5.0
+    assert contact["force_kp"] > 0.0
+    assert contact["align_k_ori"] > 0.0
+    assert contact["tangent_scale"] > 0.0
+    assert contact["wrench_in_tool_frame"] is True
+
+
+def test_package_ssot_exposes_contact_force_pid_defaults():
+    flat = load_flat_ssot()
+    assert flat["contact_desired_force"] == 5.0
+    assert flat["force_kp"] == 0.001
+    assert flat["align_k_perp"] == 100.0
+    assert flat["contact_damping"] == 0.05
+
+
 def test_flatten_missing_key_raises():
     with pytest.raises(KeyError, match="missing SSoT key"):
         flatten_ssot({"session": {"backend": "mujoco", "dry_run": False}})

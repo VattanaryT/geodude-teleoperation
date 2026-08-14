@@ -31,7 +31,7 @@ SpaceMouse teleoperation (optional; keyboard still works):
   v / f / q stay on the keyboard (or Polyscope window).
   f holds pose + freezes VF; press again to resume and unlock fields.
   Idle (within deadzone) holds current TCP pose.
-  In-contact: only field-tangent xy; z and angular ignored.
+  In-contact: only field-tangent xy (continuous while held); z and angular ignored.
 """
 
 

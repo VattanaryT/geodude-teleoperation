@@ -162,6 +162,22 @@ class RtdeTeleopSession:
         qdot_list = [float(v) for v in qdot]
         self._control.speedJ(qdot_list, float(accel), self._speedj_time)
 
+    def direct_torque(
+        self, tau: Sequence[float], *, friction_comp: bool = True
+    ) -> None:
+        """Host-side DTC bring-up: ``directTorque(τ, viscous, coulomb)``."""
+        if self._dry_run or self._control is None:
+            raise RuntimeError("direct_torque unavailable in dry-run (receive-only)")
+        if self._stopping:
+            return
+        from geodude_teleoperation.teleop.direct_torque import call_direct_torque
+
+        ok = call_direct_torque(
+            self._control, tau, friction_comp=bool(friction_comp)
+        )
+        if ok is False:
+            raise RuntimeError("directTorque returned False")
+
     def _send_stop_commands(self) -> None:
         if self._dry_run or self._control is None:
             return
@@ -795,6 +811,7 @@ def run_rtde_loop(
 
     from geodude_teleoperation.teleop.direct_torque import (
         DirectTorqueBridge,
+        HostDirectTorqueStreamer,
         print_control_rate_report,
         print_dtc_rate_verification,
         polyscope_supports_dtc,
@@ -835,14 +852,22 @@ def run_rtde_loop(
 
     in_contact = bool(getattr(args, "in_contact", False))
     contact_bridge: ContactTeleopBridge | None = None
+    contact_use_dtc = False
     if in_contact:
         contact_bridge = ContactTeleopBridge(contact_cfg_from_args(args))
+        contact_use_dtc = contact_bridge.actuation == "dtc"
+        from geodude_teleoperation.teleop.contact_teleop import print_actuation_banner
+
+        print_actuation_banner(
+            contact_bridge.actuation,
+            desired_force_n=contact_bridge.cfg.desired_force_n,
+        )
         print(
-            f"In-contact DualLoop ON (Fd={contact_bridge.cfg.desired_force_n:g} N, "
+            f"In-contact ON (actuation={contact_bridge.actuation}, "
+            f"Fd={contact_bridge.cfg.desired_force_n:g} N, "
             f"force_sign={contact_bridge.cfg.force_sign:g}, "
-            f"approach≤{contact_bridge.cfg.approach_v_max_m_s*1e3:.0f} mm/s, "
             f"align_first={int(contact_bridge.cfg.align_first)}, "
-            "tangent keys w/s a/d, f=freeze n*)",
+            "tangent keys w/s a/d + SpaceMouse xy continuous, f=freeze n*)",
             flush=True,
         )
 
@@ -972,6 +997,18 @@ def run_rtde_loop(
         speedj_time=1.0 / args.control_hz,
     )
 
+    dtc_streamer: HostDirectTorqueStreamer | None = None
+    if contact_use_dtc and session.control_open and not args.dry_run:
+        dtc_streamer = HostDirectTorqueStreamer(
+            session._control, friction_comp=True, target_hz=500.0
+        )
+        print(
+            "\033[93mWARNING: DTC needs ~500 Hz directTorque; "
+            f"main control.hz={float(args.control_hz):g} only latches τ — "
+            "host streamer will run at 500 Hz when armed.\033[0m",
+            flush=True,
+        )
+
     if verify_500 is True:
         if args.dry_run or not session.control_open:
             print(
@@ -1007,7 +1044,7 @@ def run_rtde_loop(
                 cam_ctx.close()
             return 0 if dtc_live_ok or args.dry_run else 1
 
-    pending_twist = {"twist": None, "key": ""}
+    pending_twist = {"twist": None, "key": "", "continuous": False, "clear_sm_tangent": False}
     pending_contact_arm = {"arm": False}
     sm_twist_t = {"t": None}
     mcap = None
@@ -1190,11 +1227,18 @@ def run_rtde_loop(
                 if coeffs is None:
                     return
                 lin = contact_tangent_linear_from_spacemouse(coeffs)
+                sm_twist_t["t"] = time.monotonic()
                 if float(np.linalg.norm(lin[:2])) < 1e-12:
+                    # Angular-only / deadzone xy: stop continuous tangent.
+                    pending_twist["clear_sm_tangent"] = True
+                    pending_twist["twist"] = None
+                    pending_twist["continuous"] = False
+                    pending_twist["key"] = ""
                     return
                 pending_twist["twist"] = lin
                 pending_twist["key"] = ""
-                sm_twist_t["t"] = time.monotonic()
+                pending_twist["continuous"] = True
+                pending_twist["clear_sm_tangent"] = False
                 return
             key = getattr(keyboard, "last_key", "") or ""
             if not is_contact_tangent_key(key):
@@ -1208,11 +1252,14 @@ def run_rtde_loop(
                 )
             pending_twist["twist"] = contact_field_linear_from_twist_coeffs(coeffs)
             pending_twist["key"] = key
+            pending_twist["continuous"] = False
+            pending_twist["clear_sm_tangent"] = False
             return
         pending_twist["twist"] = twist
         pending_twist["key"] = (
             (getattr(keyboard, "last_key", "") or "") if source == "keyboard" else ""
         )
+        pending_twist["continuous"] = False
         if source == "spacemouse":
             sm_twist_t["t"] = time.monotonic()
 
@@ -1338,6 +1385,12 @@ def run_rtde_loop(
             send_ok = state.commands_allowed(
                 dry_run=args.dry_run, fault=fault, tf_ok=tf_ok
             )
+            # Enter can land mid-tick (keyboard callback); refresh gates before arm/send.
+            if state.motion_enabled and state.teleop_active:
+                math_ok = state.control_math_allowed(fault=fault, tf_ok=tf_ok)
+                send_ok = state.commands_allowed(
+                    dry_run=args.dry_run, fault=fault, tf_ok=tf_ok
+                )
 
             if kin is not None and use_numpy_kin:
                 try:
@@ -1449,8 +1502,13 @@ def run_rtde_loop(
             twist = pending_twist["twist"]
             key_this_tick = ""
             fresh_command = False
+            twist_continuous = bool(pending_twist.get("continuous", False))
+            if pending_twist.pop("clear_sm_tangent", False) and contact_bridge is not None:
+                contact_bridge.clear_tangent()
 
-            def _apply_twist(twist_obj, *, key: str = "") -> None:
+            def _apply_twist(
+                twist_obj, *, key: str = "", continuous: bool = False
+            ) -> None:
                 nonlocal fresh_command, key_this_tick
                 if orient_locking or hold_still or pose_hold:
                     twist_obj = twist_linear_only(twist_obj)
@@ -1464,7 +1522,10 @@ def run_rtde_loop(
                     else:
                         n_app = np.asarray(R_prev, dtype=float).reshape(3, 3)[:, 2]
                     contact_bridge.push_tangent_field_linear(
-                        twist_obj, R_prev, n_approach=n_app
+                        twist_obj,
+                        R_prev,
+                        n_approach=n_app,
+                        continuous=bool(continuous),
                     )
                     fresh_command = True
                     if key:
@@ -1494,8 +1555,22 @@ def run_rtde_loop(
                 pending_twist["twist"] = None
                 key_this_tick = str(pending_twist.get("key") or "")
                 pending_twist["key"] = ""
+                pending_twist["continuous"] = False
                 if math_ok and not orient_locking and not hold_still and not pose_hold:
-                    _apply_twist(twist, key=key_this_tick)
+                    _apply_twist(
+                        twist, key=key_this_tick, continuous=twist_continuous
+                    )
+
+            # SpaceMouse deadzone skips on_twist; age-out continuous tangent.
+            if (
+                contact_bridge is not None
+                and contact_bridge._tan_continuous
+                and sm_twist_t.get("t") is not None
+            ):
+                sm_hz = float(getattr(args, "spacemouse_hz", None) or args.control_hz)
+                idle_s = max(0.06, 3.0 / max(sm_hz, 1.0))
+                if (now - float(sm_twist_t["t"])) > idle_s:
+                    contact_bridge.clear_tangent()
 
             # Polyscope held WASD/X/Y → one combined step every control tick
             # (ImGui key-repeat alone was ~1–2 Hz → felt frozen with 2 mm steps).
@@ -1627,24 +1702,65 @@ def run_rtde_loop(
                 and pending_contact_arm["arm"]
                 and R_field is not None
             ):
+                # Fresh gates: enable() may have run after the tick's first send_ok.
+                send_ok = state.commands_allowed(
+                    dry_run=args.dry_run, fault=fault, tf_ok=tf_ok
+                )
                 pending_contact_arm["arm"] = False
                 bias_samples = None
+                wrench_bias = None
                 ft = rtde_state.get("tcp_force")
                 if ft is not None:
-                    bias_samples = [np.asarray(ft, dtype=float).reshape(-1)[:3]]
+                    ft_arr = np.asarray(ft, dtype=float).reshape(-1)
+                    bias_samples = [ft_arr[:3]]
+                    if ft_arr.size >= 6:
+                        wrench_bias = [ft_arr[:6]]
                 contact_bridge.arm(
                     p_tcp,
                     R_tcp,
                     R_field,
                     force_bias_samples=bias_samples,
+                    wrench_bias_samples=wrench_bias,
                 )
                 print(
                     f"info: in-contact armed (Fd={contact_bridge.cfg.desired_force_n:g} N, "
                     f"force_sign={contact_bridge.cfg.force_sign:g}, "
                     f"n_freeze={int(contact_bridge.n_frozen)}, "
-                    f"phase={contact_bridge.phase})",
+                    f"phase={contact_bridge.phase}, "
+                    f"actuation={contact_bridge.actuation}, "
+                    f"send_ok={int(send_ok)} tf_ok={int(tf_ok)} fault={int(fault)} "
+                    f"control_open={int(session.control_open)})",
                     flush=True,
                 )
+                if contact_use_dtc and dtc_streamer is not None and send_ok:
+                    try:
+                        session.zero_speed()
+                    except Exception:
+                        pass
+                    # Do not start DTC streamer yet — align + free-space seek use speedJ.
+                    print(
+                        "\033[93mWARNING: DTC hybrid — DualLoop speedJ for align/"
+                        f"approach until Fs≥contact; "
+                        f"geom gate d≤{contact_bridge.cfg.dtc_contact_dist_m:g} m, "
+                        "then Eq.56 directTorque.\033[0m",
+                        flush=True,
+                    )
+                    contact_bridge._dtc_first_tau_logged = False
+                elif contact_use_dtc and not send_ok:
+                    print(
+                        "\033[93mWARNING: DTC armed but send_ok=0 "
+                        f"(tf_ok={int(tf_ok)} fault={int(fault)} "
+                        f"motion={int(state.motion_enabled)} "
+                        f"teleop={int(state.teleop_active)}) — "
+                        "no directTorque will be sent.\033[0m",
+                        flush=True,
+                    )
+                elif contact_use_dtc and dtc_streamer is None:
+                    print(
+                        "\033[93mWARNING: DTC armed but host streamer is None "
+                        "(control interface closed?).\033[0m",
+                        flush=True,
+                    )
 
             if (
                 tactile_agent is not None
@@ -1708,14 +1824,43 @@ def run_rtde_loop(
                             J_flange, T_flange[:3, 3], p_tcp
                         )
                         ft = rtde_state.get("tcp_force", [0.0] * 6)
-                        qdot = contact_bridge.step(
-                            p_tcp=p_tcp,
-                            R_tcp=R_tcp,
-                            R_field=R_field,
-                            force_base=np.asarray(ft, dtype=float).reshape(-1)[:3],
-                            jacobian=J_tcp,
-                            dt=dt,
-                        )
+                        ft_arr = np.asarray(ft, dtype=float).reshape(-1)
+                        if ft_arr.size < 6:
+                            ft6 = np.zeros(6, dtype=float)
+                            ft6[: ft_arr.size] = ft_arr
+                        else:
+                            ft6 = ft_arr[:6]
+                        qdot_meas = np.zeros(6, dtype=float)
+                        get_qd = getattr(session._receive, "getActualQd", None)
+                        if callable(get_qd):
+                            try:
+                                qdot_meas = np.asarray(get_qd(), dtype=float).reshape(6)
+                            except Exception:
+                                qdot_meas = np.zeros(6, dtype=float)
+                        if contact_use_dtc:
+                            sd = None
+                            if isinstance(vf.status, dict):
+                                sd = vf.status.get("signed_d")
+                            qdot = contact_bridge.step(
+                                p_tcp=p_tcp,
+                                R_tcp=R_tcp,
+                                R_field=R_field,
+                                force_base=ft6[:3],
+                                jacobian=J_tcp,
+                                dt=dt,
+                                wrench6=ft6,
+                                qdot_meas=qdot_meas,
+                                signed_d=float(sd) if sd is not None else None,
+                            )
+                        else:
+                            qdot = contact_bridge.step(
+                                p_tcp=p_tcp,
+                                R_tcp=R_tcp,
+                                R_field=R_field,
+                                force_base=ft6[:3],
+                                jacobian=J_tcp,
+                                dt=dt,
+                            )
                         control_diag = dict(contact_bridge.last_diag or {})
                         if float(control_diag.get("phase_changed", 0.0)) > 0.5:
                             ph = (
@@ -1756,9 +1901,14 @@ def run_rtde_loop(
                         control_diag.setdefault("qdot_unclipped_norm", speed)
                         qdot = qdot * (motion_limits.max_joint_velocity / speed)
                     qdot_norm = float(np.linalg.norm(qdot))
-                except Exception:
+                except Exception as exc:
                     qdot = np.zeros(6, dtype=float)
                     qdot_norm = 0.0
+                    if contact_bridge is not None and contact_bridge.armed:
+                        print(
+                            f"warning: in-contact control tick failed ({exc})",
+                            flush=True,
+                        )
 
             # In-contact dry-run: integrate with wall-clock dt (loop may be slow).
             if (
@@ -1800,8 +1950,118 @@ def run_rtde_loop(
             if session.control_open:
                 try:
                     if diag_hold_zero:
+                        if contact_use_dtc and dtc_streamer is not None:
+                            dtc_streamer.set_tau(np.zeros(6))
+                            if not dtc_streamer.active:
+                                dtc_streamer.start()
+                        elif contact_use_dtc:
+                            session.direct_torque(np.zeros(6))
+                        else:
+                            session.speedj(np.zeros(6), motion_limits.rtde_accel)
                         send_qdot = np.zeros(6)
+                    elif (
+                        contact_use_dtc
+                        and contact_bridge is not None
+                        and contact_bridge.armed
+                        and send_ok
+                    ):
+                        d = contact_bridge.last_diag or {}
+                        aligning = float(d.get("phase_align", 0.0)) > 0.5
+                        use_speedj = (
+                            aligning
+                            or float(d.get("dtc_use_speedj", 0.0)) > 0.5
+                            or str(d.get("actuation", "")).endswith("speedj")
+                        )
+                        if use_speedj:
+                            # Align / free-space seek via DualLoop speedJ.
+                            if dtc_streamer is not None and dtc_streamer.active:
+                                dtc_streamer.stop(zero=True)
+                            send_qdot = np.asarray(qdot, dtype=float).reshape(6)
+                            send_qdot = apply_watchdog(
+                                send_qdot,
+                                last_command_time=last_command_time,
+                                now=now,
+                                watchdog_s=watchdog_s,
+                            )
+                            # Startup accel while aligning — avoids snap/drift.
+                            t_arm = getattr(contact_bridge, "armed_mono_t", None)
+                            t_since = (
+                                now - float(t_arm)
+                                if t_arm is not None
+                                else float(startup_ramp_s)
+                            )
+                            align_limits = blend_startup_motion_limits(
+                                t_since_enable=t_since,
+                                ramp_s=startup_ramp_s,
+                                startup=startup_limits,
+                                general=general_limits,
+                                locking=aligning,  # in-place ω only while aligning
+                            )
+                            qn = float(np.linalg.norm(send_qdot))
+                            if aligning:
+                                q_cap = min(
+                                    float(align_limits.max_joint_velocity), 0.08
+                                )
+                            else:
+                                # Soft seek approach — keep below general clamp.
+                                q_cap = min(
+                                    float(align_limits.max_joint_velocity),
+                                    float(general_limits.max_joint_velocity),
+                                    0.25,
+                                )
+                            if qn > q_cap and qn > 1e-12:
+                                send_qdot = send_qdot * (q_cap / qn)
+                            session.speedj(send_qdot, align_limits.rtde_accel)
+                            qdot_norm = float(np.linalg.norm(send_qdot))
+                        else:
+                            tau = np.asarray(
+                                contact_bridge.last_tau, dtype=float
+                            ).reshape(6)
+                            age = now - last_command_time
+                            if age > watchdog_s:
+                                tau = np.zeros(6, dtype=float)
+                            if dtc_streamer is not None:
+                                dtc_streamer.set_tau(tau)
+                                if not dtc_streamer.active:
+                                    try:
+                                        session.zero_speed()
+                                    except Exception:
+                                        pass
+                                    dtc_streamer.start()
+                                st = dtc_streamer.stats()
+                                if st["n_fail"] > 0 and (
+                                    st["n_fail"] == 1 or st["n_fail"] % 250 == 0
+                                ):
+                                    print(
+                                        f"warning: DTC streamer fail "
+                                        f"n_fail={st['n_fail']} n_ok={st['n_ok']}: "
+                                        f"{st['last_error']}",
+                                        flush=True,
+                                    )
+                            else:
+                                session.direct_torque(tau)
+                            qdot_norm = float(np.linalg.norm(tau))
+                            send_qdot = np.zeros(6)
+                            if not getattr(
+                                contact_bridge, "_dtc_first_tau_logged", True
+                            ):
+                                contact_bridge._dtc_first_tau_logged = True
+                                st = (
+                                    dtc_streamer.stats()
+                                    if dtc_streamer is not None
+                                    else {}
+                                )
+                                print(
+                                    f"info: DTC seek τ ‖τ‖={qdot_norm:.4f} Nm  "
+                                    f"ang_z={d.get('ang_z_deg', float('nan')):.1f}deg  "
+                                    f"streamer_ok={st.get('n_ok', 'n/a')} "
+                                    f"fail={st.get('n_fail', 'n/a')}",
+                                    flush=True,
+                                )
                     else:
+                        if dtc_streamer is not None and dtc_streamer.active:
+                            # Disarmed / not send_ok — leave torque mode.
+                            dtc_streamer.stop(zero=True)
                         send_qdot = qdot if send_ok else np.zeros(6)
                         send_qdot = apply_watchdog(
                             send_qdot,
@@ -1809,10 +2069,10 @@ def run_rtde_loop(
                             now=now,
                             watchdog_s=watchdog_s,
                         )
-                    session.speedj(send_qdot, motion_limits.rtde_accel)
-                    qdot_norm = float(np.linalg.norm(send_qdot))
-                except RuntimeError:
-                    pass
+                        session.speedj(send_qdot, motion_limits.rtde_accel)
+                        qdot_norm = float(np.linalg.norm(send_qdot))
+                except RuntimeError as exc:
+                    print(f"warning: RTDE command failed ({exc})", flush=True)
 
             status = vf.status
             if should_emit_status(last_status_t, now, status_hz=status_hz):
@@ -1831,14 +2091,30 @@ def run_rtde_loop(
                         f"{line}  contact=1  phase={phase}  "
                         f"ang_z={d.get('ang_z_deg', float('nan')):.1f}deg  "
                         f"Fd={d.get('Fd_N', float('nan')):.2f}  "
-                        f"Fs={d.get('Fs_N', float('nan')):.2f}  "
-                        f"Fe={d.get('Fe_N', float('nan')):.2f}  "
+                        f"Fs={d.get('Fs_comp', d.get('Fs_ee_z', d.get('Fs_N', float('nan')))):.2f}  "
+                        f"W_C={d.get('W_C_norm', float('nan')):.2f}  "
+                        f"f_b=[{d.get('f_cmd_base_x', float('nan')):.1f},"
+                        f"{d.get('f_cmd_base_y', float('nan')):.1f},"
+                        f"{d.get('f_cmd_base_z', float('nan')):.1f}]  "
+                        f"tau={d.get('tau_norm', qdot_norm):.3f}  "
+                        f"send_ok={int(send_ok)}  "
                         f"n_freeze={int(d.get('n_freeze', 0))}"
                     )
+                    if contact_use_dtc and dtc_streamer is not None:
+                        st = dtc_streamer.stats()
+                        line += (
+                            f"  act={d.get('actuation', 'dtc')}  "
+                            f"dtc_on={int(bool(st.get('active')))}  "
+                            f"dtc_ok={st['n_ok']} fail={st['n_fail']}"
+                        )
+                    elif contact_use_dtc:
+                        line += f"  act={d.get('actuation', 'dtc')}"
                     if float(d.get("force_wrong_sign", 0.0)) > 0.5:
                         line += "  WARN=force_sign?"
                     if float(d.get("force_fault", 0.0)) > 0.5:
                         line += "  OVERLOAD=retract"
+                    if float(d.get("force_overshoot", 0.0)) > 0.5:
+                        line += "  OVERSHOOT=unload"
                 print(line, flush=True)
 
             elapsed = time.perf_counter() - t0
@@ -1978,12 +2254,16 @@ def run_rtde_loop(
     except KeyboardInterrupt:
         print("info: interrupted — stopping RTDE motion", flush=True)
         try:
+            if dtc_streamer is not None:
+                dtc_streamer.stop(zero=True)
             session.stop_motion()
         except Exception:
             pass
     finally:
         stop_teleop_inputs(keyboard, spacemouse)
         try:
+            if dtc_streamer is not None:
+                dtc_streamer.stop(zero=True)
             session.stop_motion()
         except Exception:
             pass

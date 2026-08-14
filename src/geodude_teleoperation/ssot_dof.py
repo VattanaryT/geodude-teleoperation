@@ -106,12 +106,44 @@ _FLAT_MAP: tuple[tuple[str, str], ...] = (
     ("tactile.max_vn", "tactile_max_vn"),
     ("tactile.ft_bias", "ft_bias"),
     ("in_contact.enabled", "in_contact"),
+    ("in_contact.actuation", "contact_actuation"),
+    ("in_contact.desired_force", "contact_desired_force"),
     ("in_contact.force_sign", "force_sign"),
+    ("in_contact.force_kp", "force_kp"),
+    ("in_contact.force_ki", "force_ki"),
+    ("in_contact.force_kd", "force_kd"),
+    ("in_contact.force_deadband_N", "force_deadband_N"),
+    ("in_contact.force_lpf_hz", "force_lpf_hz"),
+    ("in_contact.force_contact_threshold_N", "force_contact_threshold_N"),
+    ("in_contact.wrench_in_tool_frame", "wrench_in_tool_frame"),
+    ("in_contact.wrench_kp", "contact_wrench_kp"),
+    ("in_contact.wrench_ki", "contact_wrench_ki"),
+    ("in_contact.wrench_kd", "contact_wrench_kd"),
+    ("in_contact.tangent_force_gain", "tangent_force_gain"),
+    ("in_contact.max_tau_nm", "max_tau_nm"),
+    ("in_contact.max_wrench_n", "max_wrench_n"),
+    ("in_contact.K_line", "contact_K_line"),
+    ("in_contact.D_twist", "contact_D_twist"),
     ("in_contact.align_first", "align_first"),
     ("in_contact.align_enter_tol_deg", "align_enter_tol_deg"),
     ("in_contact.align_exit_tol_deg", "align_exit_tol_deg"),
+    ("in_contact.align_k_perp", "align_k_perp"),
+    ("in_contact.align_k_ori", "align_k_ori"),
+    ("in_contact.align_m_lin", "align_m_lin"),
+    ("in_contact.align_m_ang", "align_m_ang"),
+    ("in_contact.align_b_lin", "align_b_lin"),
+    ("in_contact.align_b_ang", "align_b_ang"),
     ("in_contact.approach_v_max", "approach_v_max"),
     ("in_contact.force_max_v", "force_max_v"),
+    ("in_contact.dtc_contact_dist_m", "dtc_contact_dist_m"),
+    ("in_contact.dtc_require_force", "dtc_require_force"),
+    ("in_contact.tangent_scale", "tangent_scale"),
+    ("in_contact.tangent_hold_s", "tangent_hold_s"),
+    ("in_contact.max_linear_m_s", "contact_max_linear_m_s"),
+    ("in_contact.max_angular_deg_s", "contact_max_angular_deg_s"),
+    ("in_contact.damping", "contact_damping"),
+    ("in_contact.freeze_n_on_arm", "freeze_n_on_arm"),
+    ("in_contact.bias_skip_load_N", "bias_skip_load_N"),
     ("diag.hold_zero", "diag_hold_zero"),
     ("diag.fixed_orient", "diag_fixed_orient"),
     ("diag.verify_500hz", "verify_500hz"),
@@ -160,11 +192,24 @@ def load_ssot_dof(path: Path | None = None) -> dict[str, Any]:
 def flatten_ssot(cfg: Mapping[str, Any]) -> dict[str, Any]:
     """Map nested SSoT sections onto flat teleop Namespace attribute names."""
     out: dict[str, Any] = {}
+    optional_defaults: dict[str, Any] = {
+        "in_contact.actuation": "speedj",
+        "in_contact.wrench_kp": 1.0,
+        "in_contact.wrench_ki": 0.0,
+        "in_contact.wrench_kd": 0.0,
+        "in_contact.tangent_force_gain": 50.0,
+        "in_contact.max_tau_nm": 20.0,
+        "in_contact.K_line": None,
+        "in_contact.D_twist": None,
+    }
     for dotted, dest in _FLAT_MAP:
         try:
             out[dest] = _dig(cfg, dotted)
         except KeyError as exc:
-            raise KeyError(f"missing SSoT key {dotted!r}") from exc
+            if dotted in optional_defaults:
+                out[dest] = optional_defaults[dotted]
+            else:
+                raise KeyError(f"missing SSoT key {dotted!r}") from exc
 
     # enable_key: YAML "enter" → newline (matches former CLI alias)
     ek = out.get("enable_key")

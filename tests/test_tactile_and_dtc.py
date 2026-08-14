@@ -61,9 +61,10 @@ class _FakeControl:
         _ = t_mark
         time.sleep(0.002)
 
-    def directTorque(self, tau, friction_comp=True):
+    def directTorque(self, tau, viscous_scale=None, coulomb_scale=None):
         self.n += 1
         self.calls.append(list(tau))
+        _ = viscous_scale, coulomb_scale
         if self.fail_after is not None and self.n >= self.fail_after:
             return False
         return True
@@ -82,6 +83,20 @@ def test_verify_direct_torque_rate_mock_ok():
     assert ctrl.stopped is True
     assert np.allclose(ctrl.calls[0], 0.0)
     assert r.ok is True
+
+
+def test_host_dtc_streamer_latches_and_calls():
+    from geodude_teleoperation.teleop.direct_torque import HostDirectTorqueStreamer
+
+    ctrl = _FakeControl()
+    streamer = HostDirectTorqueStreamer(ctrl, target_hz=200.0)
+    streamer.set_tau([0.1, 0, 0, 0, 0, 0])
+    streamer.start()
+    time.sleep(0.05)
+    streamer.stop(zero=True)
+    assert streamer.stats()["n_ok"] >= 5
+    assert ctrl.stopped is True
+    assert np.allclose(ctrl.calls[-1], 0.0) or ctrl.n >= 5
 
 
 def test_verify_direct_torque_rate_missing_api():

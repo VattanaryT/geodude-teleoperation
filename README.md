@@ -92,8 +92,8 @@ geodude-ur-stringer-teleop --config config/SSoT_dof_spacemouse_dryrun.yaml \
 | `query` / `vf` | contact band, fit; R_field smoothing & relock | both (VF); free-space pose-ref uses relock heavily |
 | `control` | rates, `keyboard_step`, `spacemouse` (+ `linear_scale` / `angular_scale` / `deadzone` / `hz` / `axis_sign` / `path`), general UR limits (`max_joint_velocity`, `rtde_accel`, `max_linear_speed`, `max_angular_speed`), Enter lock (`orient_lock_on_enable`, `startup_*`, `orient_lock_tol_deg`), `pose_gain`, `max_twist_scale`, `tip_offset` | both |
 | `line_tracking` / `tactile` | soft standoff / normal FF | **free-space only** (forced off in-contact) |
-| `in_contact` | DualLoop caps, align tolerances, `force_sign` | **in-contact only** |
-| `tactile.desired_normal_force` | also `Fd` for DualLoop | in-contact force target |
+| `in_contact` | DualLoop Force PID + Align + tangent → **speedJ**, **or** Eq.56/`pygafro` → **directTorque** (`actuation: speedj\|dtc`; yellow banner) | **in-contact only** |
+| `tactile.desired_normal_force` | free-space tactile `Fd`; contact prefers `in_contact.desired_force` | both |
 
 Knob-by-knob notes: [`config/SSoT_dof.md`](config/SSoT_dof.md).
 
@@ -115,7 +115,7 @@ With `--viz`, use these keys in the **Polyscope window** (not only the terminal)
 
 `--viz --viz-latency` (or `viz.latency_table: true`) opens a **Latency** table: loop ms vs `1000/hz`, WoS `query`, relock age, SpaceMouse age, viz publish→draw. `!` means loop or query is slower than the target tick.
 
-**SpaceMouse** (`--spacemouse` or `control.spacemouse: true`): analog 6-DOF on the same twist path. Button 0 = Enter (enable), button 1 = `t` (pause). `v` / `f` / `q` stay on the keyboard. In-contact: tangent xy only. If the device fails to open, teleop stays keyboard-only. Tune feel in [`config/SSoT_dof_spacemouse_dryrun.yaml`](config/SSoT_dof_spacemouse_dryrun.yaml) (`spacemouse_linear_scale`, `_angular_scale`, `_deadzone`, `_hz`, `_axis_sign`, `_path`).
+**SpaceMouse** (`--spacemouse` or `control.spacemouse: true`): analog 6-DOF on the same twist path. Button 0 = Enter (enable), button 1 = `t` (pause). `v` / `f` / `q` stay on the keyboard. In-contact: continuous tangent xy only (z/angular ignored; tip holds during Align). If the device fails to open, teleop stays keyboard-only. Tune feel in [`config/SSoT_dof_spacemouse_dryrun.yaml`](config/SSoT_dof_spacemouse_dryrun.yaml) (`spacemouse_linear_scale`, `_angular_scale`, `_deadzone`, `_hz`, `_axis_sign`, `_path`). Live free-space: [`config/SSoT_dof_spacemouse_rtde.yaml`](config/SSoT_dof_spacemouse_rtde.yaml). Live in-contact: [`config/SSoT_dof_spacemouse_rtde_in_contact.yaml`](config/SSoT_dof_spacemouse_rtde_in_contact.yaml).
 
 ## Free-space
 
@@ -161,6 +161,8 @@ Tune `in_contact.*`, `tactile.desired_normal_force` (`Fd`), `field.*`, and keep 
 
 ```bash
 geodude-ur-stringer-teleop --backend rtde --no-dry-run --in-contact --viz
+# SpaceMouse in-contact snapshot:
+geodude-ur-stringer-teleop --config config/SSoT_dof_spacemouse_rtde_in_contact.yaml --viz
 ```
 
 (Or set `in_contact.enabled: true` and `session.dry_run: false` in SSoT.)

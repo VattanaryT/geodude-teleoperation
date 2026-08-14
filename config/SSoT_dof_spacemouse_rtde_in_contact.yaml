@@ -1,0 +1,200 @@
+# =============================================================================
+# Snapshot: SpaceMouse live RTDE in-contact (2026-08-13)
+# =============================================================================
+# Dual path: in_contact.actuation = speedj | dtc
+#   speedj — DualLoop tip twist → q̇ → RTDE speedJ
+#   dtc    — hybrid: DualLoop speedJ for align + approach/teleop until Fs shows
+#            compression (≥ force_contact_threshold_N); then Eq.56 directTorque
+# Yellow terminal banner states the active actuation on start / Enter.
+#
+# Replay:
+#   geodude-ur-stringer-teleop --config config/SSoT_dof_spacemouse_rtde_in_contact.yaml --viz
+# =============================================================================
+
+session:
+  backend: rtde
+  dry_run: false
+
+robot:
+  arm: right
+  ip: 192.168.1.2
+
+paths:
+  ply: data/processed/laser_profilometer/merged.ply
+  T_tag0_base: null
+  T_rtde_base_vention: null
+  T_left_base_vention: null
+  calib_meta: null
+  object_offset: null
+  laser_ply: null
+  laser_offset: null
+  log_motion: null
+  record_output_dir: null
+
+pointcloud:
+  voxel_size: 0.01
+  normal_orientation: 1
+
+field:
+  mode: end_lines
+  flow: width
+  end_line_fraction: 0.06
+  swap_end_lines: false
+  diffusion_scalar: 50.0
+
+wos:
+  batch_size: 128
+  convergence_threshold_edge_mult: 2.0
+
+query:
+  contact_threshold_m: 0.001
+  query_radius_m: 0.025
+  fit_mode: sphere
+
+vf:
+  r_field_smoothing: 0.5
+  relock_dist_m: 0.1
+  relock_period_s: 0.5
+  motion_track: 1.0
+  dry_query_period_s: 1.0
+
+control:
+  hz: 50.0
+  # Status prints (was 0.01 = once per 100s — too rare to debug DTC).
+  status_hz: 2.0
+  # Contact DualLoop still commands speedJ — keep ‖q̇‖ modest.
+  max_joint_velocity: 0.5
+  rtde_accel: 0.5
+  pose_gain: 4.0
+  max_linear_speed: 0.05
+  max_angular_speed: 0.4
+  orient_lock_on_enable: true
+  startup_max_joint_velocity: 0.03
+  startup_rtde_accel: 0.03
+  startup_max_angular_speed: 0.08
+  startup_ramp_s: 3
+  orient_lock_tol_deg: 2.0
+  keyboard_step: 0.01
+  spacemouse: true
+  spacemouse_linear_scale: 0.01
+  spacemouse_angular_scale: 0.05
+  spacemouse_deadzone: 0.08
+  spacemouse_hz: 50.0
+  spacemouse_axis_sign: [1, -1, -1, 1, 1, 1]
+  spacemouse_path: null
+  max_twist_scale: 2.0
+  watchdog_ms: 500.0
+  enable_key: enter
+  tip_offset: [0.0, 0.0, 0.0]
+  base_frame: null
+  tag0_frame: null
+  no_object_offset: false
+  no_rtde_base_vention: false
+  no_laser_offset: false
+  object_offset_step_m: 0.001
+
+viz:
+  frame: vention
+  frame_stride: 20
+  hide_object: false
+  show_object: false
+  teleop_keys: false
+  laser: "off"
+  latency_table: true
+
+laser:
+  voxel: 0.01
+
+tag_crosscheck:
+  camera_rgb_topic: null
+  camera_info_topic: null
+  tag_id: 0
+  tag_size_m: 0.04
+  tag_family: tag36h11
+
+record:
+  mcap: false
+  sample_hz: 0.0
+  save_images: true
+  camera_topics: null
+  target_frame: vention_frame
+  plot_motion: false
+
+line_tracking:
+  enabled: false
+  soft_standoff: false
+  standoff_distance: 0.002
+  standoff_gain: 1.0
+  standoff_max_speed: 0.05
+  no_keyboard_normal_ff: false
+
+tactile:
+  enabled: false
+  # Free-space tactile path only; DualLoop Fd is in_contact.desired_force.
+  desired_normal_force: 5.0
+  wrench_kp: 0.02
+  wrench_ki: 0.0
+  wrench_kd: 0.0
+  wrench_to_vn: 0.01
+  max_vn: 0.03
+  ft_bias: null
+
+in_contact:
+  enabled: true
+  # speedj = DualLoop→q̇; dtc = Eq.56/pygafro→directTorque (yellow banner on start)
+  actuation: dtc
+  # DTC handoff: require real compression (Fs), not VF d alone (Polyscope mismatch).
+  dtc_contact_dist_m: 0.015
+  dtc_require_force: true
+  # -------------------------------------------------------------------------
+  # Force / wrench (DTC uses wrench_*; speedj uses force_kp → v∥)
+  # -------------------------------------------------------------------------
+  desired_force: 5.0              # Fd [N]
+  force_sign: 1.0                 # Fs = sign · (F−bias)·n*; −1 if Enter seeks away
+  force_kp: 0.001                 # speedj only: (m/s) / N
+  force_ki: 0.0
+  force_kd: 0.0
+  force_deadband_N: 0.35
+  force_lpf_hz: 5.0
+  force_contact_threshold_N: 0.6
+  wrench_in_tool_frame: true
+  wrench_kp: 0.25                 # dtc normal-force PID only (was 1.0 → τ saturate)
+  wrench_ki: 0.0
+  wrench_kd: 0.0
+  tangent_force_gain: 50.0        # N per (m/s) tangent → W_tan
+  max_tau_nm: 20.0                # joint ‖τ‖ clamp; 40 let W_C wind into hard push
+  max_wrench_n: 12.0              # clamp ‖W_C‖ force (N)
+  K_line: [30.0, 30.0, 30.0, 750.0, 750.0, 300.0]
+  D_twist: [10.0, 10.0, 10.0, 150.0, 150.0, 50.0]
+  approach_v_max: 0.006
+  force_max_v: 0.010
+  # -------------------------------------------------------------------------
+  # Align (speedj DualLoop) / phase gate (both)
+  # -------------------------------------------------------------------------
+  align_first: true
+  align_enter_tol_deg: 5.0
+  align_exit_tol_deg: 12.0
+  align_k_perp: 100.0
+  align_k_ori: 5.0
+  align_m_lin: 1.0
+  align_m_ang: 0.05
+  align_b_lin: 45.0
+  align_b_ang: 2.5
+  # -------------------------------------------------------------------------
+  # Tangent FF
+  # -------------------------------------------------------------------------
+  tangent_scale: 8.0
+  tangent_hold_s: 0.12
+  max_linear_m_s: 0.04
+  max_angular_deg_s: 12.0
+  damping: 0.05
+  freeze_n_on_arm: true
+  bias_skip_load_N: 2.0
+
+diag:
+  hold_zero: false
+  fixed_orient: false
+  verify_500hz: false             # DTC rate probe only — not teleop actuation
+  dtc_verify_seconds: 2.0
+  verify_500hz_exit: false
+  polyscope_version: null

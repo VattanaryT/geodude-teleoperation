@@ -33,7 +33,7 @@ paths:
   record_output_dir: null
 
 pointcloud:
-  voxel_size: 0.003
+  voxel_size: 0.01
   normal_orientation: 1
 
 field:
@@ -41,7 +41,7 @@ field:
   flow: width
   end_line_fraction: 0.06
   swap_end_lines: false
-  diffusion_scalar: 500.0
+  diffusion_scalar: 50.0
 
 wos:
   batch_size: 128
@@ -149,12 +149,33 @@ tactile:
 
 in_contact:
   enabled: false
+  desired_force: 5.0
   force_sign: 1.0
+  force_kp: 0.001
+  force_ki: 0.0
+  force_kd: 0.0
+  force_deadband_N: 0.35
+  force_lpf_hz: 5.0
+  force_contact_threshold_N: 0.6
+  wrench_in_tool_frame: true
+  approach_v_max: 0.006
+  force_max_v: 0.010
   align_first: true
   align_enter_tol_deg: 5.0
   align_exit_tol_deg: 12.0
-  approach_v_max: 0.006
-  force_max_v: 0.010
+  align_k_perp: 100.0
+  align_k_ori: 5.0
+  align_m_lin: 1.0
+  align_m_ang: 0.05
+  align_b_lin: 45.0
+  align_b_ang: 2.5
+  tangent_scale: 8.0
+  tangent_hold_s: 0.12
+  max_linear_m_s: 0.04
+  max_angular_deg_s: 12.0
+  damping: 0.05
+  freeze_n_on_arm: true
+  bias_skip_load_N: 2.0
 
 diag:
   hold_zero: false
