@@ -1,0 +1,3977 @@
+system:
+  name: geodude_cylinder_ee
+  meshdir: assets
+  root_link: vention_base
+  base_pose:
+    position:
+      x: 0
+      y: 0
+      z: 0
+    orientation:
+      w: 1
+      x: 0
+      y: 0
+      z: 0
+  kinematic_chains:
+  - name: left_ur5e/endeffector_link
+    tip: left_ur5e/endeffector_link
+  - name: right_ur5e/endeffector_link
+    tip: right_ur5e/endeffector_link
+  task_spaces:
+  - name: left_ee
+    chains:
+    - left_ur5e/endeffector_link
+    control_groups:
+    - left_ur5e
+  - name: right_ee
+    chains:
+    - right_ur5e/endeffector_link
+    control_groups:
+    - right_ur5e
+  - name: coop
+    chains:
+    - left_ur5e/endeffector_link
+    - right_ur5e/endeffector_link
+    control_groups:
+    - left_ur5e
+    - right_ur5e
+  control_groups:
+  - name: left_ur5e
+    joint:
+    - left_ur5e/shoulder_pan_joint
+    - left_ur5e/shoulder_lift_joint
+    - left_ur5e/elbow_joint
+    - left_ur5e/wrist_1_joint
+    - left_ur5e/wrist_2_joint
+    - left_ur5e/wrist_3_joint
+  - name: right_ur5e
+    joint:
+    - right_ur5e/shoulder_pan_joint
+    - right_ur5e/shoulder_lift_joint
+    - right_ur5e/elbow_joint
+    - right_ur5e/wrist_1_joint
+    - right_ur5e/wrist_2_joint
+    - right_ur5e/wrist_3_joint
+  links:
+    left_arm_vention_base:
+      name: left_arm_vention_base
+      parent_joint: left_arm_linear_vention
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: box
+          length: 0.225
+          width: 0.02
+          height: 0.225
+        attributes:
+          name: geom_4
+          mass: 18.57
+          material: red
+      sites:
+      - name: left_arm_attachment_site
+        pose:
+          position:
+            x: 0
+            y: -0.030000000000000002
+            z: 1.734723475976807e-18
+          orientation:
+            w: 0
+            x: 0
+            y: -0.7070904020014415
+            z: 0.7071231599922605
+        group: 4
+        size:
+        - 0.01
+        rgba:
+        - 0.5
+        - 0.5
+        - 0.5
+        - 0.3
+      joints:
+      - left_ur5e/_fixed
+    left_ur5e/:
+      name: left_ur5e/
+      parent_joint: left_ur5e/_fixed
+      lights:
+      - name: left_ur5e/spotlight
+        position:
+        - 0
+        - -1
+        - 2
+        direction: null
+        mode: targetbodycom
+        target: left_ur5e/wrist_2_link
+        diffuse: null
+        specular: null
+      joints:
+      - left_ur5e/base_fixed
+    left_ur5e/base:
+      name: left_ur5e/base
+      parent_joint: left_ur5e/base_fixed
+      inertial:
+        mass: 4
+        inertia:
+          xx: 0.00443333156
+          xy: 0
+          xz: 0
+          yy: 0.00443333156
+          yz: 0
+          zz: 0.0072
+        origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: base_0-d5328a99917358d9aa384f12743fe73698461d1c.obj
+          mesh_name: left_ur5e/base_0
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: left_ur5e/geom_0
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/black
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: base_1-d1c667ae5f87b9c900fdeadad850205153846396.obj
+          mesh_name: left_ur5e/base_1
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: left_ur5e/geom_1
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/jointgray
+      childclass: left_ur5e/ur5e
+      gravcomp: 1
+      joints:
+      - left_ur5e/shoulder_pan_joint
+    left_ur5e/endeffector_link:
+      name: left_ur5e/endeffector_link
+      parent_joint: left_ur5e/endeffector_link_fixed
+      gravcomp: 1
+      inertial:
+        mass: 0.05
+        inertia:
+          xx: 2.7916666666666666e-05
+          xy: 0
+          xz: 0
+          yy: 2.7916666666666666e-05
+          yz: 0
+          zz: 2.5e-06
+        origin:
+          position:
+            x: 0
+            y: 0
+            z: 0.04
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0.04
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: cylinder
+          length: 0.08
+          radius: 0.01
+        attributes:
+          name: left_ur5e/geom_ee_tool
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/black
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0.04
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: cylinder
+          length: 0.08
+          radius: 0.01
+        attributes:
+          name: left_ur5e/ee_tool_collision
+          geometry_class: left_ur5e/eef_collision
+          group: 3
+          mass: 0
+          density: 0
+    left_ur5e/forearm_link:
+      name: left_ur5e/forearm_link
+      parent_joint: left_ur5e/elbow_joint
+      inertial:
+        mass: 2.275
+        inertia:
+          xx: 0.0311796
+          xy: 0
+          xz: 0
+          yy: 0.0311796
+          yz: 0
+          zz: 0.004095
+        origin:
+          position:
+            x: 0
+            y: 0
+            z: 0.196
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: forearm_0-7994229075bdd0e4a5c860ca174278ee8eda8229.obj
+          mesh_name: left_ur5e/forearm_0
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: left_ur5e/geom_12
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/urblue
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: forearm_1-c72848167eef89e0d9801ddd7da516e7e878776e.obj
+          mesh_name: left_ur5e/forearm_1
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: left_ur5e/geom_13
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/linkgray
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: forearm_2-3a33518f421ed893ff9b0d759af07b0e5900e78c.obj
+          mesh_name: left_ur5e/forearm_2
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: left_ur5e/geom_14
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/black
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: forearm_3-54cad2556a94cdda04a7cef5c84554a7d9f3ab03.obj
+          mesh_name: left_ur5e/forearm_3
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: left_ur5e/geom_15
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/jointgray
+      - origin:
+          position:
+            x: 0
+            y: 0.07999999999999999
+            z: 0
+          orientation:
+            w: 0.7071067811865475
+            x: 0.7071067811865475
+            y: 0
+            z: 0
+        geometry:
+          type: capsule
+          length: 0.12
+          radius: 0.055
+        attributes:
+          name: left_ur5e/geom_16
+          geometry_class: left_ur5e/collision
+          group: 3
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0.2
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: capsule
+          length: 0.38
+          radius: 0.038
+        attributes:
+          name: left_ur5e/geom_17
+          geometry_class: left_ur5e/collision
+          group: 3
+      gravcomp: 1
+      joints:
+      - left_ur5e/wrist_1_joint
+    left_ur5e/gripper/:
+      name: left_ur5e/gripper/
+      parent_joint: left_ur5e/gripper/_fixed
+      joints:
+      - left_ur5e/gripper/base_mount_fixed
+    left_ur5e/gripper/base_mount:
+      name: left_ur5e/gripper/base_mount
+      parent_joint: left_ur5e/gripper/base_mount_fixed
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: base_mount-492692230394a1ebdce431c652d89a9c9a4211b5.stl
+          mesh_name: left_ur5e/gripper/base_mount
+          scale:
+            x: 0.001
+            y: 0.001
+            z: 0.001
+        attributes:
+          name: left_ur5e/gripper/geom_0
+          geometry_class: left_ur5e/gripper/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/gripper/black
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: base_mount-492692230394a1ebdce431c652d89a9c9a4211b5.stl
+          mesh_name: left_ur5e/gripper/base_mount
+          scale:
+            x: 0.001
+            y: 0.001
+            z: 0.001
+        attributes:
+          name: left_ur5e/gripper/geom_1
+          geometry_class: left_ur5e/gripper/collision
+          group: 3
+      sites:
+      - name: left_ur5e/gripper/grasp_site
+        pose:
+          position:
+            x: 0
+            y: 0
+            z: 0.10000000000000002
+          orientation:
+            w: 0.7071067811865476
+            x: 0
+            y: 0
+            z: -0.7071067811865476
+        size:
+        - 0.005
+        rgba:
+        - 0
+        - 1
+        - 0
+        - 1
+      childclass: left_ur5e/gripper/2f140
+      gravcomp: 1
+      joints:
+      - left_ur5e/endeffector_link_fixed
+    left_ur5e/shoulder_link:
+      name: left_ur5e/shoulder_link
+      parent_joint: left_ur5e/shoulder_pan_joint
+      inertial:
+        mass: 3.7
+        inertia:
+          xx: 0.0102675
+          xy: 0
+          xz: 0
+          yy: 0.0102675
+          yz: 0
+          zz: 0.00666
+        origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: shoulder_0-89051b80580d45ef39cb220bf068742b01770552.obj
+          mesh_name: left_ur5e/shoulder_0
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: left_ur5e/geom_2
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/urblue
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: shoulder_1-50ba15e82459989cf7f17cba7b1aafbca2781206.obj
+          mesh_name: left_ur5e/shoulder_1
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: left_ur5e/geom_3
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/black
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: shoulder_2-29ad171bec79e2912abb81d250aaf5ff9a67bc60.obj
+          mesh_name: left_ur5e/shoulder_2
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: left_ur5e/geom_4
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/jointgray
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: -0.04
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: capsule
+          length: 0.12
+          radius: 0.06
+        attributes:
+          name: left_ur5e/geom_5
+          geometry_class: left_ur5e/collision
+          group: 3
+      gravcomp: 1
+      joints:
+      - left_ur5e/shoulder_lift_joint
+    left_ur5e/upper_arm_link:
+      name: left_ur5e/upper_arm_link
+      parent_joint: left_ur5e/shoulder_lift_joint
+      inertial:
+        mass: 8.393
+        inertia:
+          xx: 0.133886
+          xy: 0
+          xz: 0
+          yy: 0.133886
+          yz: 0
+          zz: 0.0151074
+        origin:
+          position:
+            x: 0
+            y: 0
+            z: 0.2125
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: upperarm_0-16bfdf8d1b19d35ef0adbc4cf29ab0c7edb62dcf.obj
+          mesh_name: left_ur5e/upperarm_0
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: left_ur5e/geom_6
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/linkgray
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: upperarm_1-c53724435bec35e1b608145457af767b038f4fd1.obj
+          mesh_name: left_ur5e/upperarm_1
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: left_ur5e/geom_7
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/black
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: upperarm_2-199e0d0c1baa55a078742ed298800ff26d072c09.obj
+          mesh_name: left_ur5e/upperarm_2
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: left_ur5e/geom_8
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/jointgray
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: upperarm_3-62f2bba935d9ab94800a49bcb6ede7b0fa9dd071.obj
+          mesh_name: left_ur5e/upperarm_3
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: left_ur5e/geom_9
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/urblue
+      - origin:
+          position:
+            x: 0
+            y: -0.039999999999999994
+            z: 0
+          orientation:
+            w: 0.7071067811865475
+            x: 0.7071067811865475
+            y: 0
+            z: 0
+        geometry:
+          type: capsule
+          length: 0.12
+          radius: 0.06
+        attributes:
+          name: left_ur5e/geom_10
+          geometry_class: left_ur5e/collision
+          group: 3
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0.2
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: capsule
+          length: 0.4
+          radius: 0.05
+        attributes:
+          name: left_ur5e/geom_11
+          geometry_class: left_ur5e/collision
+          group: 3
+      gravcomp: 1
+      joints:
+      - left_ur5e/elbow_joint
+    left_ur5e/wrist_1_link:
+      name: left_ur5e/wrist_1_link
+      parent_joint: left_ur5e/wrist_1_joint
+      inertial:
+        mass: 1.219
+        inertia:
+          xx: 0.0025599
+          xy: 0
+          xz: 0
+          yy: 0.0025599
+          yz: 0
+          zz: 0.0021942
+        origin:
+          position:
+            x: 0
+            y: 0.127
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: wrist1_0-6876ccb9d0084054268dd6aec007e5a61aea6c2d.obj
+          mesh_name: left_ur5e/wrist1_0
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: left_ur5e/geom_18
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/black
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: wrist1_1-0f7e6640a9dfb98e58078997f5f82bd433879387.obj
+          mesh_name: left_ur5e/wrist1_1
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: left_ur5e/geom_19
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/urblue
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: wrist1_2-3f6dcae8c736e2c42db3746db7f24ac4516aaca7.obj
+          mesh_name: left_ur5e/wrist1_2
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: left_ur5e/geom_20
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/jointgray
+      - origin:
+          position:
+            x: 0
+            y: 0.049999999999999996
+            z: 0
+          orientation:
+            w: 0.7071067811865475
+            x: 0.7071067811865475
+            y: 0
+            z: 0
+        geometry:
+          type: capsule
+          length: 0.14
+          radius: 0.04
+        attributes:
+          name: left_ur5e/geom_21
+          geometry_class: left_ur5e/collision
+          group: 3
+      gravcomp: 1
+      joints:
+      - left_ur5e/wrist_2_joint
+    left_ur5e/wrist_2_link:
+      name: left_ur5e/wrist_2_link
+      parent_joint: left_ur5e/wrist_2_joint
+      inertial:
+        mass: 1.219
+        inertia:
+          xx: 0.0025599
+          xy: 0
+          xz: 0
+          yy: 0.0025599
+          yz: 0
+          zz: 0.0021942
+        origin:
+          position:
+            x: 0
+            y: 0
+            z: 0.1
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: wrist2_0-fdb3f7bc360f8f37f6be6270c8b507291dc9b01c.obj
+          mesh_name: left_ur5e/wrist2_0
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: left_ur5e/geom_22
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/black
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: wrist2_1-258ca475798c530d954723dc29f3d67086ead0d9.obj
+          mesh_name: left_ur5e/wrist2_1
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: left_ur5e/geom_23
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/urblue
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: wrist2_2-c6734971531db7f2f09e746377aa9faccb69b192.obj
+          mesh_name: left_ur5e/wrist2_2
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: left_ur5e/geom_24
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/jointgray
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0.04
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: capsule
+          length: 0.12
+          radius: 0.04
+        attributes:
+          name: left_ur5e/geom_25
+          geometry_class: left_ur5e/collision
+          group: 3
+      - origin:
+          position:
+            x: 0
+            y: 0.020000000000000004
+            z: 0.09999999999999999
+          orientation:
+            w: 0.7071067811865475
+            x: 0.7071067811865475
+            y: 0
+            z: 0
+        geometry:
+          type: capsule
+          length: 0.08
+          radius: 0.04
+        attributes:
+          name: left_ur5e/geom_26
+          geometry_class: left_ur5e/collision
+          group: 3
+      gravcomp: 1
+      joints:
+      - left_ur5e/wrist_3_joint
+    left_ur5e/wrist_3_link:
+      name: left_ur5e/wrist_3_link
+      parent_joint: left_ur5e/wrist_3_joint
+      inertial:
+        mass: 0.1889
+        inertia:
+          xx: 9.908629999999995e-05
+          xy: -7.338063490180958e-21
+          xz: 0
+          yy: 0.00013213399999999995
+          yz: 0
+          zz: 9.90863e-05
+        origin:
+          position:
+            x: 0
+            y: 0.07716829999999998
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: wrist3-a1fffb4f599e121fb18be40e087b6fd7fb164e59.obj
+          mesh_name: left_ur5e/wrist3
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: left_ur5e/geom_27
+          geometry_class: left_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: left_ur5e/linkgray
+      - origin:
+          position:
+            x: 0
+            y: 0.07999999999999999
+            z: 0
+          orientation:
+            w: 0.7071067811865475
+            x: 0.7071067811865475
+            y: 0
+            z: 0
+        geometry:
+          type: cylinder
+          length: 0.04
+          radius: 0.04
+        attributes:
+          name: left_ur5e/geom_28
+          geometry_class: left_ur5e/eef_collision
+          group: 3
+      sites:
+      - name: left_ur5e/ft_sensor_site
+        pose:
+          position:
+            x: 0
+            y: 0.09999999999999999
+            z: 0
+          orientation:
+            w: -0.7071067811865475
+            x: 0.7071067811865475
+            y: 0
+            z: 0
+        group: 4
+        size:
+        - 0.01
+        rgba:
+        - 0.5
+        - 0.5
+        - 0.5
+        - 0.3
+      - name: left_ur5e/gripper_attachment_site
+        pose:
+          position:
+            x: 0
+            y: 0.09999999999999999
+            z: 0
+          orientation:
+            w: -0.7071067811865475
+            x: 0.7071067811865475
+            y: 0
+            z: 0
+        group: 4
+        size:
+        - 0.01
+        rgba:
+        - 0.5
+        - 0.5
+        - 0.5
+        - 0.3
+      gravcomp: 1
+      joints:
+      - left_ur5e/gripper/_fixed
+    right_arm_vention_base:
+      name: right_arm_vention_base
+      parent_joint: right_arm_linear_vention
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: box
+          length: 0.225
+          width: 0.02
+          height: 0.225
+        attributes:
+          name: geom_5
+          mass: 18.57
+          material: red
+      sites:
+      - name: right_arm_attachment_site
+        pose:
+          position:
+            x: 0
+            y: -0.030000000000000002
+            z: 1.734723475976807e-18
+          orientation:
+            w: 0
+            x: 0
+            y: -0.7070904020014415
+            z: 0.7071231599922605
+        group: 4
+        size:
+        - 0.01
+        rgba:
+        - 0.5
+        - 0.5
+        - 0.5
+        - 0.3
+      joints:
+      - right_ur5e/_fixed
+    right_ur5e/:
+      name: right_ur5e/
+      parent_joint: right_ur5e/_fixed
+      lights:
+      - name: right_ur5e/spotlight
+        position:
+        - 0
+        - -1
+        - 2
+        direction: null
+        mode: targetbodycom
+        target: right_ur5e/wrist_2_link
+        diffuse: null
+        specular: null
+      joints:
+      - right_ur5e/base_fixed
+    right_ur5e/base:
+      name: right_ur5e/base
+      parent_joint: right_ur5e/base_fixed
+      inertial:
+        mass: 4
+        inertia:
+          xx: 0.00443333156
+          xy: 0
+          xz: 0
+          yy: 0.00443333156
+          yz: 0
+          zz: 0.0072
+        origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: base_0-d5328a99917358d9aa384f12743fe73698461d1c.obj
+          mesh_name: right_ur5e/base_0
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: right_ur5e/geom_0
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/black
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: base_1-d1c667ae5f87b9c900fdeadad850205153846396.obj
+          mesh_name: right_ur5e/base_1
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: right_ur5e/geom_1
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/jointgray
+      childclass: right_ur5e/ur5e
+      gravcomp: 1
+      joints:
+      - right_ur5e/shoulder_pan_joint
+    right_ur5e/endeffector_link:
+      name: right_ur5e/endeffector_link
+      parent_joint: right_ur5e/endeffector_link_fixed
+      gravcomp: 1
+      inertial:
+        mass: 0.05
+        inertia:
+          xx: 2.7916666666666666e-05
+          xy: 0
+          xz: 0
+          yy: 2.7916666666666666e-05
+          yz: 0
+          zz: 2.5e-06
+        origin:
+          position:
+            x: 0
+            y: 0
+            z: 0.04
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0.04
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: cylinder
+          length: 0.08
+          radius: 0.01
+        attributes:
+          name: right_ur5e/geom_ee_tool
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/black
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0.04
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: cylinder
+          length: 0.08
+          radius: 0.01
+        attributes:
+          name: right_ur5e/ee_tool_collision
+          geometry_class: right_ur5e/eef_collision
+          group: 3
+          mass: 0
+          density: 0
+    right_ur5e/forearm_link:
+      name: right_ur5e/forearm_link
+      parent_joint: right_ur5e/elbow_joint
+      inertial:
+        mass: 2.275
+        inertia:
+          xx: 0.0311796
+          xy: 0
+          xz: 0
+          yy: 0.0311796
+          yz: 0
+          zz: 0.004095
+        origin:
+          position:
+            x: 0
+            y: 0
+            z: 0.196
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: forearm_0-7994229075bdd0e4a5c860ca174278ee8eda8229.obj
+          mesh_name: right_ur5e/forearm_0
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: right_ur5e/geom_12
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/urblue
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: forearm_1-c72848167eef89e0d9801ddd7da516e7e878776e.obj
+          mesh_name: right_ur5e/forearm_1
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: right_ur5e/geom_13
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/linkgray
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: forearm_2-3a33518f421ed893ff9b0d759af07b0e5900e78c.obj
+          mesh_name: right_ur5e/forearm_2
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: right_ur5e/geom_14
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/black
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: forearm_3-54cad2556a94cdda04a7cef5c84554a7d9f3ab03.obj
+          mesh_name: right_ur5e/forearm_3
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: right_ur5e/geom_15
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/jointgray
+      - origin:
+          position:
+            x: 0
+            y: 0.07999999999999999
+            z: 0
+          orientation:
+            w: 0.7071067811865475
+            x: 0.7071067811865475
+            y: 0
+            z: 0
+        geometry:
+          type: capsule
+          length: 0.12
+          radius: 0.055
+        attributes:
+          name: right_ur5e/geom_16
+          geometry_class: right_ur5e/collision
+          group: 3
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0.2
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: capsule
+          length: 0.38
+          radius: 0.038
+        attributes:
+          name: right_ur5e/geom_17
+          geometry_class: right_ur5e/collision
+          group: 3
+      gravcomp: 1
+      joints:
+      - right_ur5e/wrist_1_joint
+    right_ur5e/gripper/:
+      name: right_ur5e/gripper/
+      parent_joint: right_ur5e/gripper/_fixed
+      joints:
+      - right_ur5e/gripper/base_mount_fixed
+    right_ur5e/gripper/base_mount:
+      name: right_ur5e/gripper/base_mount
+      parent_joint: right_ur5e/gripper/base_mount_fixed
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: base_mount-492692230394a1ebdce431c652d89a9c9a4211b5.stl
+          mesh_name: right_ur5e/gripper/base_mount
+          scale:
+            x: 0.001
+            y: 0.001
+            z: 0.001
+        attributes:
+          name: right_ur5e/gripper/geom_0
+          geometry_class: right_ur5e/gripper/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/gripper/black
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: base_mount-492692230394a1ebdce431c652d89a9c9a4211b5.stl
+          mesh_name: right_ur5e/gripper/base_mount
+          scale:
+            x: 0.001
+            y: 0.001
+            z: 0.001
+        attributes:
+          name: right_ur5e/gripper/geom_1
+          geometry_class: right_ur5e/gripper/collision
+          group: 3
+      sites:
+      - name: right_ur5e/gripper/grasp_site
+        pose:
+          position:
+            x: 0
+            y: 0
+            z: 0.10000000000000002
+          orientation:
+            w: 0.7071067811865476
+            x: 0
+            y: 0
+            z: -0.7071067811865476
+        size:
+        - 0.005
+        rgba:
+        - 0
+        - 1
+        - 0
+        - 1
+      childclass: right_ur5e/gripper/2f140
+      gravcomp: 1
+      joints:
+      - right_ur5e/endeffector_link_fixed
+    right_ur5e/shoulder_link:
+      name: right_ur5e/shoulder_link
+      parent_joint: right_ur5e/shoulder_pan_joint
+      inertial:
+        mass: 3.7
+        inertia:
+          xx: 0.0102675
+          xy: 0
+          xz: 0
+          yy: 0.0102675
+          yz: 0
+          zz: 0.00666
+        origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: shoulder_0-89051b80580d45ef39cb220bf068742b01770552.obj
+          mesh_name: right_ur5e/shoulder_0
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: right_ur5e/geom_2
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/urblue
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: shoulder_1-50ba15e82459989cf7f17cba7b1aafbca2781206.obj
+          mesh_name: right_ur5e/shoulder_1
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: right_ur5e/geom_3
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/black
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: shoulder_2-29ad171bec79e2912abb81d250aaf5ff9a67bc60.obj
+          mesh_name: right_ur5e/shoulder_2
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: right_ur5e/geom_4
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/jointgray
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: -0.04
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: capsule
+          length: 0.12
+          radius: 0.06
+        attributes:
+          name: right_ur5e/geom_5
+          geometry_class: right_ur5e/collision
+          group: 3
+      gravcomp: 1
+      joints:
+      - right_ur5e/shoulder_lift_joint
+    right_ur5e/upper_arm_link:
+      name: right_ur5e/upper_arm_link
+      parent_joint: right_ur5e/shoulder_lift_joint
+      inertial:
+        mass: 8.393
+        inertia:
+          xx: 0.133886
+          xy: 0
+          xz: 0
+          yy: 0.133886
+          yz: 0
+          zz: 0.0151074
+        origin:
+          position:
+            x: 0
+            y: 0
+            z: 0.2125
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: upperarm_0-16bfdf8d1b19d35ef0adbc4cf29ab0c7edb62dcf.obj
+          mesh_name: right_ur5e/upperarm_0
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: right_ur5e/geom_6
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/linkgray
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: upperarm_1-c53724435bec35e1b608145457af767b038f4fd1.obj
+          mesh_name: right_ur5e/upperarm_1
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: right_ur5e/geom_7
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/black
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: upperarm_2-199e0d0c1baa55a078742ed298800ff26d072c09.obj
+          mesh_name: right_ur5e/upperarm_2
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: right_ur5e/geom_8
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/jointgray
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: upperarm_3-62f2bba935d9ab94800a49bcb6ede7b0fa9dd071.obj
+          mesh_name: right_ur5e/upperarm_3
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: right_ur5e/geom_9
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/urblue
+      - origin:
+          position:
+            x: 0
+            y: -0.039999999999999994
+            z: 0
+          orientation:
+            w: 0.7071067811865475
+            x: 0.7071067811865475
+            y: 0
+            z: 0
+        geometry:
+          type: capsule
+          length: 0.12
+          radius: 0.06
+        attributes:
+          name: right_ur5e/geom_10
+          geometry_class: right_ur5e/collision
+          group: 3
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0.2
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: capsule
+          length: 0.4
+          radius: 0.05
+        attributes:
+          name: right_ur5e/geom_11
+          geometry_class: right_ur5e/collision
+          group: 3
+      gravcomp: 1
+      joints:
+      - right_ur5e/elbow_joint
+    right_ur5e/wrist_1_link:
+      name: right_ur5e/wrist_1_link
+      parent_joint: right_ur5e/wrist_1_joint
+      inertial:
+        mass: 1.219
+        inertia:
+          xx: 0.0025599
+          xy: 0
+          xz: 0
+          yy: 0.0025599
+          yz: 0
+          zz: 0.0021942
+        origin:
+          position:
+            x: 0
+            y: 0.127
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: wrist1_0-6876ccb9d0084054268dd6aec007e5a61aea6c2d.obj
+          mesh_name: right_ur5e/wrist1_0
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: right_ur5e/geom_18
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/black
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: wrist1_1-0f7e6640a9dfb98e58078997f5f82bd433879387.obj
+          mesh_name: right_ur5e/wrist1_1
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: right_ur5e/geom_19
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/urblue
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: wrist1_2-3f6dcae8c736e2c42db3746db7f24ac4516aaca7.obj
+          mesh_name: right_ur5e/wrist1_2
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: right_ur5e/geom_20
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/jointgray
+      - origin:
+          position:
+            x: 0
+            y: 0.049999999999999996
+            z: 0
+          orientation:
+            w: 0.7071067811865475
+            x: 0.7071067811865475
+            y: 0
+            z: 0
+        geometry:
+          type: capsule
+          length: 0.14
+          radius: 0.04
+        attributes:
+          name: right_ur5e/geom_21
+          geometry_class: right_ur5e/collision
+          group: 3
+      gravcomp: 1
+      joints:
+      - right_ur5e/wrist_2_joint
+    right_ur5e/wrist_2_link:
+      name: right_ur5e/wrist_2_link
+      parent_joint: right_ur5e/wrist_2_joint
+      inertial:
+        mass: 1.219
+        inertia:
+          xx: 0.0025599
+          xy: 0
+          xz: 0
+          yy: 0.0025599
+          yz: 0
+          zz: 0.0021942
+        origin:
+          position:
+            x: 0
+            y: 0
+            z: 0.1
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: wrist2_0-fdb3f7bc360f8f37f6be6270c8b507291dc9b01c.obj
+          mesh_name: right_ur5e/wrist2_0
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: right_ur5e/geom_22
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/black
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: wrist2_1-258ca475798c530d954723dc29f3d67086ead0d9.obj
+          mesh_name: right_ur5e/wrist2_1
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: right_ur5e/geom_23
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/urblue
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: wrist2_2-c6734971531db7f2f09e746377aa9faccb69b192.obj
+          mesh_name: right_ur5e/wrist2_2
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: right_ur5e/geom_24
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/jointgray
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0.04
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: capsule
+          length: 0.12
+          radius: 0.04
+        attributes:
+          name: right_ur5e/geom_25
+          geometry_class: right_ur5e/collision
+          group: 3
+      - origin:
+          position:
+            x: 0
+            y: 0.020000000000000004
+            z: 0.09999999999999999
+          orientation:
+            w: 0.7071067811865475
+            x: 0.7071067811865475
+            y: 0
+            z: 0
+        geometry:
+          type: capsule
+          length: 0.08
+          radius: 0.04
+        attributes:
+          name: right_ur5e/geom_26
+          geometry_class: right_ur5e/collision
+          group: 3
+      gravcomp: 1
+      joints:
+      - right_ur5e/wrist_3_joint
+    right_ur5e/wrist_3_link:
+      name: right_ur5e/wrist_3_link
+      parent_joint: right_ur5e/wrist_3_joint
+      inertial:
+        mass: 0.1889
+        inertia:
+          xx: 9.908629999999995e-05
+          xy: -7.338063490180958e-21
+          xz: 0
+          yy: 0.00013213399999999995
+          yz: 0
+          zz: 9.90863e-05
+        origin:
+          position:
+            x: 0
+            y: 0.07716829999999998
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: wrist3-a1fffb4f599e121fb18be40e087b6fd7fb164e59.obj
+          mesh_name: right_ur5e/wrist3
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: right_ur5e/geom_27
+          geometry_class: right_ur5e/visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: right_ur5e/linkgray
+      - origin:
+          position:
+            x: 0
+            y: 0.07999999999999999
+            z: 0
+          orientation:
+            w: 0.7071067811865475
+            x: 0.7071067811865475
+            y: 0
+            z: 0
+        geometry:
+          type: cylinder
+          length: 0.04
+          radius: 0.04
+        attributes:
+          name: right_ur5e/geom_28
+          geometry_class: right_ur5e/eef_collision
+          group: 3
+      sites:
+      - name: right_ur5e/ft_sensor_site
+        pose:
+          position:
+            x: 0
+            y: 0.09999999999999999
+            z: 0
+          orientation:
+            w: -0.7071067811865475
+            x: 0.7071067811865475
+            y: 0
+            z: 0
+        group: 4
+        size:
+        - 0.01
+        rgba:
+        - 0.5
+        - 0.5
+        - 0.5
+        - 0.3
+      - name: right_ur5e/gripper_attachment_site
+        pose:
+          position:
+            x: 0
+            y: 0.09999999999999999
+            z: 0
+          orientation:
+            w: -0.7071067811865475
+            x: 0.7071067811865475
+            y: 0
+            z: 0
+        group: 4
+        size:
+        - 0.01
+        rgba:
+        - 0.5
+        - 0.5
+        - 0.5
+        - 0.3
+      gravcomp: 1
+      joints:
+      - right_ur5e/gripper/_fixed
+    vention_base:
+      name: vention_base
+      geometries:
+      - origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: mesh
+          filename: vention_frame_visual_model-3ad6025d0633a8c49789e10339a2c0fb6855dd81.stl
+          mesh_name: vention_frame_visual_model
+          scale:
+            x: 1
+            y: 1
+            z: 1
+        attributes:
+          name: geom_0
+          geometry_class: visual
+          group: 2
+          contype: 0
+          conaffinity: 0
+          material: blue
+      - origin:
+          position:
+            x: 0
+            y: -0.475
+            z: 0.3825
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: box
+          length: 1.3
+          width: 1.2
+          height: 0.742
+        attributes:
+          name: geom_1
+          geometry_class: collision
+          group: 3
+          rgba:
+          - 0.7
+          - 0.7
+          - 0.7
+          - 0.9
+      - origin:
+          position:
+            x: 0
+            y: -0.96
+            z: 1.41
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: box
+          length: 1.1
+          width: 0.2
+          height: 1.32
+        attributes:
+          name: geom_2
+          geometry_class: collision
+          group: 3
+          rgba:
+          - 0.7
+          - 0.7
+          - 0.7
+          - 0.9
+      - origin:
+          position:
+            x: -0.66
+            y: -0.1
+            z: 0.72
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        geometry:
+          type: box
+          length: 0.074
+          width: 0.09
+          height: 0.144
+        attributes:
+          name: geom_3
+          geometry_class: collision
+          group: 3
+          rgba:
+          - 0.7
+          - 0.7
+          - 0.7
+          - 0.9
+      sites:
+      - name: worktop
+        pose:
+          position:
+            x: 0
+            y: -0.35
+            z: 0.755
+          orientation:
+            w: 1
+            x: 0
+            y: 0
+            z: 0
+        group: 2
+        type: box
+        size:
+        - 0.6
+        - 0.4
+        - 0.005
+        rgba:
+        - 0.2
+        - 0.8
+        - 0.2
+        - 0
+      childclass: vention
+      joints:
+      - left_arm_linear_vention
+      - right_arm_linear_vention
+  joints:
+    left_arm_linear_vention:
+      type: prismatic
+      name: left_arm_linear_vention
+      parent_link: vention_base
+      child_link: left_arm_vention_base
+      origin:
+        position:
+          x: -0.33
+          y: -0.848
+          z: 1.12
+        orientation:
+          w: 0
+          x: 0
+          y: 0
+          z: 1
+      axis:
+        x: 0
+        y: 0
+        z: 1
+      limits:
+        position_lower: 0
+        position_upper: 0.5
+        velocity: 0
+        torque: 0
+      dynamics:
+        damping: 5000
+    left_ur5e/_fixed:
+      type: fixed
+      name: left_ur5e/_fixed
+      parent_link: left_arm_vention_base
+      child_link: left_ur5e/
+      origin:
+        position:
+          x: 0
+          y: -0.030000000000000002
+          z: 1.734723475976807e-18
+        orientation:
+          w: 0
+          x: 0
+          y: -0.7070904020014415
+          z: 0.7071231599922605
+      axis:
+        x: 0
+        y: 0
+        z: 0
+      limits:
+        position_lower: 0
+        position_upper: 0
+        velocity: 0
+        torque: 0
+    left_ur5e/base_fixed:
+      type: fixed
+      name: left_ur5e/base_fixed
+      parent_link: left_ur5e/
+      child_link: left_ur5e/base
+      origin:
+        position:
+          x: 0
+          y: 0
+          z: 0
+        orientation:
+          w: 0
+          x: 0
+          y: 0
+          z: -1
+      axis:
+        x: 0
+        y: 0
+        z: 0
+      limits:
+        position_lower: 0
+        position_upper: 0
+        velocity: 0
+        torque: 0
+    left_ur5e/elbow_joint:
+      type: revolute
+      name: left_ur5e/elbow_joint
+      parent_link: left_ur5e/upper_arm_link
+      child_link: left_ur5e/forearm_link
+      origin:
+        position:
+          x: 0
+          y: -0.131
+          z: 0.425
+        orientation:
+          w: 1
+          x: 0
+          y: 0
+          z: 0
+      axis:
+        x: 0
+        y: -1
+        z: 0
+      limits:
+        position_lower: -3.1415
+        position_upper: 3.1415
+        velocity: 0
+        torque: 0
+      dynamics:
+        armature: 0.1
+    left_ur5e/endeffector_link_fixed:
+      type: fixed
+      name: left_ur5e/endeffector_link_fixed
+      parent_link: left_ur5e/gripper/base_mount
+      child_link: left_ur5e/endeffector_link
+      origin:
+        position:
+          x: 0
+          y: 0
+          z: 0
+        orientation:
+          w: 0.7071067811865476
+          x: 0
+          y: 0
+          z: -0.7071067811865476
+      axis:
+        x: 0
+        y: 0
+        z: 0
+      limits:
+        position_lower: 0
+        position_upper: 0
+        velocity: 0
+        torque: 0
+    left_ur5e/gripper/_fixed:
+      type: fixed
+      name: left_ur5e/gripper/_fixed
+      parent_link: left_ur5e/wrist_3_link
+      child_link: left_ur5e/gripper/
+      origin:
+        position:
+          x: 0
+          y: 0.09999999999999999
+          z: 0
+        orientation:
+          w: -0.7071067811865475
+          x: 0.7071067811865475
+          y: 0
+          z: 0
+      axis:
+        x: 0
+        y: 0
+        z: 0
+      limits:
+        position_lower: 0
+        position_upper: 0
+        velocity: 0
+        torque: 0
+    left_ur5e/gripper/base_mount_fixed:
+      type: fixed
+      name: left_ur5e/gripper/base_mount_fixed
+      parent_link: left_ur5e/gripper/
+      child_link: left_ur5e/gripper/base_mount
+      origin:
+        position:
+          x: 0
+          y: 0
+          z: 0.007
+        orientation:
+          w: 1
+          x: 0
+          y: 0
+          z: 0
+      axis:
+        x: 0
+        y: 0
+        z: 0
+      limits:
+        position_lower: 0
+        position_upper: 0
+        velocity: 0
+        torque: 0
+    left_ur5e/shoulder_lift_joint:
+      type: revolute
+      name: left_ur5e/shoulder_lift_joint
+      parent_link: left_ur5e/shoulder_link
+      child_link: left_ur5e/upper_arm_link
+      origin:
+        position:
+          x: 0
+          y: 0.13799999999999998
+          z: 0
+        orientation:
+          w: 0.7071067811865475
+          x: 0
+          y: 0.7071067811865475
+          z: 0
+      axis:
+        x: 0
+        y: -1
+        z: 0
+      limits:
+        position_lower: -3.1415
+        position_upper: 3.1415
+        velocity: 0
+        torque: 0
+      dynamics:
+        armature: 0.1
+    left_ur5e/shoulder_pan_joint:
+      type: revolute
+      name: left_ur5e/shoulder_pan_joint
+      parent_link: left_ur5e/base
+      child_link: left_ur5e/shoulder_link
+      origin:
+        position:
+          x: 0
+          y: 0
+          z: 0.163
+        orientation:
+          w: 1
+          x: 0
+          y: 0
+          z: 0
+      axis:
+        x: 1
+        y: 0
+        z: 0
+      limits:
+        position_lower: -3.1415
+        position_upper: 3.1415
+        velocity: 0
+        torque: 0
+      dynamics:
+        armature: 0.1
+    left_ur5e/wrist_1_joint:
+      type: revolute
+      name: left_ur5e/wrist_1_joint
+      parent_link: left_ur5e/forearm_link
+      child_link: left_ur5e/wrist_1_link
+      origin:
+        position:
+          x: 0
+          y: 0
+          z: 0.3919999999999999
+        orientation:
+          w: 0.7071067811865475
+          x: 0
+          y: 0.7071067811865475
+          z: 0
+      axis:
+        x: 0
+        y: -1
+        z: 0
+      limits:
+        position_lower: -3.1415
+        position_upper: 3.1415
+        velocity: 0
+        torque: 0
+      dynamics:
+        armature: 0.1
+    left_ur5e/wrist_2_joint:
+      type: revolute
+      name: left_ur5e/wrist_2_joint
+      parent_link: left_ur5e/wrist_1_link
+      child_link: left_ur5e/wrist_2_link
+      origin:
+        position:
+          x: 0
+          y: 0.127
+          z: 0
+        orientation:
+          w: 1
+          x: 0
+          y: 0
+          z: 0
+      axis:
+        x: 1
+        y: 0
+        z: 0
+      limits:
+        position_lower: -3.1415
+        position_upper: 3.1415
+        velocity: 0
+        torque: 0
+      dynamics:
+        armature: 0.1
+    left_ur5e/wrist_3_joint:
+      type: revolute
+      name: left_ur5e/wrist_3_joint
+      parent_link: left_ur5e/wrist_2_link
+      child_link: left_ur5e/wrist_3_link
+      origin:
+        position:
+          x: 0
+          y: 0
+          z: 0.1
+        orientation:
+          w: 1
+          x: 0
+          y: 0
+          z: 0
+      axis:
+        x: 0
+        y: -1
+        z: 0
+      limits:
+        position_lower: -3.1415
+        position_upper: 3.1415
+        velocity: 0
+        torque: 0
+      dynamics:
+        armature: 0.1
+    right_arm_linear_vention:
+      type: prismatic
+      name: right_arm_linear_vention
+      parent_link: vention_base
+      child_link: right_arm_vention_base
+      origin:
+        position:
+          x: 0.33
+          y: -0.848
+          z: 1.12
+        orientation:
+          w: 0
+          x: 0
+          y: 0
+          z: 1
+      axis:
+        x: 0
+        y: 0
+        z: 1
+      limits:
+        position_lower: 0
+        position_upper: 0.5
+        velocity: 0
+        torque: 0
+      dynamics:
+        damping: 5000
+    right_ur5e/_fixed:
+      type: fixed
+      name: right_ur5e/_fixed
+      parent_link: right_arm_vention_base
+      child_link: right_ur5e/
+      origin:
+        position:
+          x: 0
+          y: -0.030000000000000002
+          z: 1.734723475976807e-18
+        orientation:
+          w: 0
+          x: 0
+          y: -0.7070904020014415
+          z: 0.7071231599922605
+      axis:
+        x: 0
+        y: 0
+        z: 0
+      limits:
+        position_lower: 0
+        position_upper: 0
+        velocity: 0
+        torque: 0
+    right_ur5e/base_fixed:
+      type: fixed
+      name: right_ur5e/base_fixed
+      parent_link: right_ur5e/
+      child_link: right_ur5e/base
+      origin:
+        position:
+          x: 0
+          y: 0
+          z: 0
+        orientation:
+          w: 0
+          x: 0
+          y: 0
+          z: -1
+      axis:
+        x: 0
+        y: 0
+        z: 0
+      limits:
+        position_lower: 0
+        position_upper: 0
+        velocity: 0
+        torque: 0
+    right_ur5e/elbow_joint:
+      type: revolute
+      name: right_ur5e/elbow_joint
+      parent_link: right_ur5e/upper_arm_link
+      child_link: right_ur5e/forearm_link
+      origin:
+        position:
+          x: 0
+          y: -0.131
+          z: 0.425
+        orientation:
+          w: 1
+          x: 0
+          y: 0
+          z: 0
+      axis:
+        x: 0
+        y: -1
+        z: 0
+      limits:
+        position_lower: -3.1415
+        position_upper: 3.1415
+        velocity: 0
+        torque: 0
+      dynamics:
+        armature: 0.1
+    right_ur5e/endeffector_link_fixed:
+      type: fixed
+      name: right_ur5e/endeffector_link_fixed
+      parent_link: right_ur5e/gripper/base_mount
+      child_link: right_ur5e/endeffector_link
+      origin:
+        position:
+          x: 0
+          y: 0
+          z: 0
+        orientation:
+          w: 0.7071067811865476
+          x: 0
+          y: 0
+          z: -0.7071067811865476
+      axis:
+        x: 0
+        y: 0
+        z: 0
+      limits:
+        position_lower: 0
+        position_upper: 0
+        velocity: 0
+        torque: 0
+    right_ur5e/gripper/_fixed:
+      type: fixed
+      name: right_ur5e/gripper/_fixed
+      parent_link: right_ur5e/wrist_3_link
+      child_link: right_ur5e/gripper/
+      origin:
+        position:
+          x: 0
+          y: 0.09999999999999999
+          z: 0
+        orientation:
+          w: -0.7071067811865475
+          x: 0.7071067811865475
+          y: 0
+          z: 0
+      axis:
+        x: 0
+        y: 0
+        z: 0
+      limits:
+        position_lower: 0
+        position_upper: 0
+        velocity: 0
+        torque: 0
+    right_ur5e/gripper/base_mount_fixed:
+      type: fixed
+      name: right_ur5e/gripper/base_mount_fixed
+      parent_link: right_ur5e/gripper/
+      child_link: right_ur5e/gripper/base_mount
+      origin:
+        position:
+          x: 0
+          y: 0
+          z: 0.007
+        orientation:
+          w: 1
+          x: 0
+          y: 0
+          z: 0
+      axis:
+        x: 0
+        y: 0
+        z: 0
+      limits:
+        position_lower: 0
+        position_upper: 0
+        velocity: 0
+        torque: 0
+    right_ur5e/shoulder_lift_joint:
+      type: revolute
+      name: right_ur5e/shoulder_lift_joint
+      parent_link: right_ur5e/shoulder_link
+      child_link: right_ur5e/upper_arm_link
+      origin:
+        position:
+          x: 0
+          y: 0.13799999999999998
+          z: 0
+        orientation:
+          w: 0.7071067811865475
+          x: 0
+          y: 0.7071067811865475
+          z: 0
+      axis:
+        x: 0
+        y: -1
+        z: 0
+      limits:
+        position_lower: -3.1415
+        position_upper: 3.1415
+        velocity: 0
+        torque: 0
+      dynamics:
+        armature: 0.1
+    right_ur5e/shoulder_pan_joint:
+      type: revolute
+      name: right_ur5e/shoulder_pan_joint
+      parent_link: right_ur5e/base
+      child_link: right_ur5e/shoulder_link
+      origin:
+        position:
+          x: 0
+          y: 0
+          z: 0.163
+        orientation:
+          w: 1
+          x: 0
+          y: 0
+          z: 0
+      axis:
+        x: 1
+        y: 0
+        z: 0
+      limits:
+        position_lower: -3.1415
+        position_upper: 3.1415
+        velocity: 0
+        torque: 0
+      dynamics:
+        armature: 0.1
+    right_ur5e/wrist_1_joint:
+      type: revolute
+      name: right_ur5e/wrist_1_joint
+      parent_link: right_ur5e/forearm_link
+      child_link: right_ur5e/wrist_1_link
+      origin:
+        position:
+          x: 0
+          y: 0
+          z: 0.3919999999999999
+        orientation:
+          w: 0.7071067811865475
+          x: 0
+          y: 0.7071067811865475
+          z: 0
+      axis:
+        x: 0
+        y: -1
+        z: 0
+      limits:
+        position_lower: -3.1415
+        position_upper: 3.1415
+        velocity: 0
+        torque: 0
+      dynamics:
+        armature: 0.1
+    right_ur5e/wrist_2_joint:
+      type: revolute
+      name: right_ur5e/wrist_2_joint
+      parent_link: right_ur5e/wrist_1_link
+      child_link: right_ur5e/wrist_2_link
+      origin:
+        position:
+          x: 0
+          y: 0.127
+          z: 0
+        orientation:
+          w: 1
+          x: 0
+          y: 0
+          z: 0
+      axis:
+        x: 1
+        y: 0
+        z: 0
+      limits:
+        position_lower: -3.1415
+        position_upper: 3.1415
+        velocity: 0
+        torque: 0
+      dynamics:
+        armature: 0.1
+    right_ur5e/wrist_3_joint:
+      type: revolute
+      name: right_ur5e/wrist_3_joint
+      parent_link: right_ur5e/wrist_2_link
+      child_link: right_ur5e/wrist_3_link
+      origin:
+        position:
+          x: 0
+          y: 0
+          z: 0.1
+        orientation:
+          w: 1
+          x: 0
+          y: 0
+          z: 0
+      axis:
+        x: 0
+        y: -1
+        z: 0
+      limits:
+        position_lower: -3.1415
+        position_upper: 3.1415
+        velocity: 0
+        torque: 0
+      dynamics:
+        armature: 0.1
+  actuators:
+  - kind: position
+    name: left_linear_actuator_position
+    actuator_class: /
+    joint: left_arm_linear_vention
+    ctrlrange:
+    - 0
+    - 0.5
+    kp: 50000
+    kv: 0
+    group: 0
+  - kind: position
+    name: right_linear_actuator_position
+    actuator_class: /
+    joint: right_arm_linear_vention
+    ctrlrange:
+    - 0
+    - 0.5
+    kp: 50000
+    kv: 0
+    group: 0
+  - kind: motor
+    name: left_linear_actuator_motor
+    actuator_class: /
+    joint: left_arm_linear_vention
+    ctrlrange:
+    - 0
+    - 0.5
+    group: 0
+  - kind: motor
+    name: right_linear_actuator_motor
+    actuator_class: /
+    joint: right_arm_linear_vention
+    ctrlrange:
+    - 0
+    - 0.5
+    group: 0
+  - kind: position
+    name: left_ur5e/shoulder_pan_position
+    joint: left_ur5e/shoulder_pan_joint
+    forcerange:
+    - -300
+    - 300
+    kp: 3000
+    kv: 101
+    group: 1
+  - kind: position
+    name: left_ur5e/shoulder_lift_position
+    joint: left_ur5e/shoulder_lift_joint
+    forcerange:
+    - -300
+    - 300
+    kp: 3000
+    kv: 101
+    group: 1
+  - kind: position
+    name: left_ur5e/elbow_position
+    joint: left_ur5e/elbow_joint
+    forcerange:
+    - -300
+    - 300
+    kp: 3000
+    kv: 101
+    group: 1
+  - kind: position
+    name: left_ur5e/wrist_1_position
+    joint: left_ur5e/wrist_1_joint
+    forcerange:
+    - -56
+    - 56
+    kp: 500
+    kv: 11
+    group: 1
+  - kind: position
+    name: left_ur5e/wrist_2_position
+    joint: left_ur5e/wrist_2_joint
+    forcerange:
+    - -56
+    - 56
+    kp: 500
+    kv: 11
+    group: 1
+  - kind: position
+    name: left_ur5e/wrist_3_position
+    joint: left_ur5e/wrist_3_joint
+    forcerange:
+    - -56
+    - 56
+    kp: 500
+    kv: 11
+    group: 1
+  - kind: motor
+    name: left_ur5e/shoulder_pan_motor
+    joint: left_ur5e/shoulder_pan_joint
+    forcerange:
+    - -300
+    - 300
+    group: 0
+  - kind: motor
+    name: left_ur5e/shoulder_lift_motor
+    joint: left_ur5e/shoulder_lift_joint
+    forcerange:
+    - -300
+    - 300
+    group: 0
+  - kind: motor
+    name: left_ur5e/elbow_motor
+    joint: left_ur5e/elbow_joint
+    forcerange:
+    - -300
+    - 300
+    group: 0
+  - kind: motor
+    name: left_ur5e/wrist_1_motor
+    joint: left_ur5e/wrist_1_joint
+    forcerange:
+    - -56
+    - 56
+    group: 0
+  - kind: motor
+    name: left_ur5e/wrist_2_motor
+    joint: left_ur5e/wrist_2_joint
+    forcerange:
+    - -56
+    - 56
+    group: 0
+  - kind: motor
+    name: left_ur5e/wrist_3_motor
+    joint: left_ur5e/wrist_3_joint
+    forcerange:
+    - -56
+    - 56
+    group: 0
+  - kind: velocity
+    name: left_ur5e/shoulder_pan_velocity
+    joint: left_ur5e/shoulder_pan_joint
+    forcerange:
+    - -300
+    - 300
+    kv: 100
+    group: 0
+  - kind: velocity
+    name: left_ur5e/shoulder_lift_velocity
+    joint: left_ur5e/shoulder_lift_joint
+    forcerange:
+    - -300
+    - 300
+    kv: 100
+    group: 0
+  - kind: velocity
+    name: left_ur5e/elbow_velocity
+    joint: left_ur5e/elbow_joint
+    forcerange:
+    - -300
+    - 300
+    kv: 100
+    group: 0
+  - kind: velocity
+    name: left_ur5e/wrist_1_velocity
+    joint: left_ur5e/wrist_1_joint
+    forcerange:
+    - -56
+    - 56
+    kv: 100
+    group: 0
+  - kind: velocity
+    name: left_ur5e/wrist_2_velocity
+    joint: left_ur5e/wrist_2_joint
+    forcerange:
+    - -56
+    - 56
+    kv: 100
+    group: 0
+  - kind: velocity
+    name: left_ur5e/wrist_3_velocity
+    joint: left_ur5e/wrist_3_joint
+    forcerange:
+    - -56
+    - 56
+    kv: 100
+    group: 0
+  - kind: position
+    name: right_ur5e/shoulder_pan_position
+    joint: right_ur5e/shoulder_pan_joint
+    forcerange:
+    - -300
+    - 300
+    kp: 3000
+    kv: 101
+    group: 2
+  - kind: position
+    name: right_ur5e/shoulder_lift_position
+    joint: right_ur5e/shoulder_lift_joint
+    forcerange:
+    - -300
+    - 300
+    kp: 3000
+    kv: 101
+    group: 2
+  - kind: position
+    name: right_ur5e/elbow_position
+    joint: right_ur5e/elbow_joint
+    forcerange:
+    - -300
+    - 300
+    kp: 3000
+    kv: 101
+    group: 2
+  - kind: position
+    name: right_ur5e/wrist_1_position
+    joint: right_ur5e/wrist_1_joint
+    forcerange:
+    - -56
+    - 56
+    kp: 500
+    kv: 11
+    group: 2
+  - kind: position
+    name: right_ur5e/wrist_2_position
+    joint: right_ur5e/wrist_2_joint
+    forcerange:
+    - -56
+    - 56
+    kp: 500
+    kv: 11
+    group: 2
+  - kind: position
+    name: right_ur5e/wrist_3_position
+    joint: right_ur5e/wrist_3_joint
+    forcerange:
+    - -56
+    - 56
+    kp: 500
+    kv: 11
+    group: 2
+  - kind: motor
+    name: right_ur5e/shoulder_pan_motor
+    joint: right_ur5e/shoulder_pan_joint
+    forcerange:
+    - -300
+    - 300
+    group: 0
+  - kind: motor
+    name: right_ur5e/shoulder_lift_motor
+    joint: right_ur5e/shoulder_lift_joint
+    forcerange:
+    - -300
+    - 300
+    group: 0
+  - kind: motor
+    name: right_ur5e/elbow_motor
+    joint: right_ur5e/elbow_joint
+    forcerange:
+    - -300
+    - 300
+    group: 0
+  - kind: motor
+    name: right_ur5e/wrist_1_motor
+    joint: right_ur5e/wrist_1_joint
+    forcerange:
+    - -56
+    - 56
+    group: 0
+  - kind: motor
+    name: right_ur5e/wrist_2_motor
+    joint: right_ur5e/wrist_2_joint
+    forcerange:
+    - -56
+    - 56
+    group: 0
+  - kind: motor
+    name: right_ur5e/wrist_3_motor
+    joint: right_ur5e/wrist_3_joint
+    forcerange:
+    - -56
+    - 56
+    group: 0
+  - kind: velocity
+    name: right_ur5e/shoulder_pan_velocity
+    joint: right_ur5e/shoulder_pan_joint
+    forcerange:
+    - -300
+    - 300
+    kv: 100
+    group: 0
+  - kind: velocity
+    name: right_ur5e/shoulder_lift_velocity
+    joint: right_ur5e/shoulder_lift_joint
+    forcerange:
+    - -300
+    - 300
+    kv: 100
+    group: 0
+  - kind: velocity
+    name: right_ur5e/elbow_velocity
+    joint: right_ur5e/elbow_joint
+    forcerange:
+    - -300
+    - 300
+    kv: 100
+    group: 0
+  - kind: velocity
+    name: right_ur5e/wrist_1_velocity
+    joint: right_ur5e/wrist_1_joint
+    forcerange:
+    - -56
+    - 56
+    kv: 100
+    group: 0
+  - kind: velocity
+    name: right_ur5e/wrist_2_velocity
+    joint: right_ur5e/wrist_2_joint
+    forcerange:
+    - -56
+    - 56
+    kv: 100
+    group: 0
+  - kind: velocity
+    name: right_ur5e/wrist_3_velocity
+    joint: right_ur5e/wrist_3_joint
+    forcerange:
+    - -56
+    - 56
+    kv: 100
+    group: 0
+  - kind: velocity
+    name: left_linear_actuator_velocity
+    actuator_class: /
+    joint: left_arm_linear_vention
+    ctrlrange:
+    - 0
+    - 0.5
+    kv: 10
+    group: 0
+  - kind: velocity
+    name: right_linear_actuator_velocity
+    actuator_class: /
+    joint: right_arm_linear_vention
+    ctrlrange:
+    - 0
+    - 0.5
+    kv: 10
+    group: 0
+  attributes:
+    contacts:
+    - is_exclude: true
+      body1: vention_base
+      body2: left_arm_vention_base
+    - is_exclude: true
+      body1: vention_base
+      body2: right_arm_vention_base
+    - is_exclude: true
+      body1: left_ur5e/base
+      body2: left_ur5e/shoulder_link
+    - is_exclude: true
+      body1: left_ur5e/shoulder_link
+      body2: left_ur5e/upper_arm_link
+    - is_exclude: true
+      body1: left_ur5e/upper_arm_link
+      body2: left_ur5e/forearm_link
+    - is_exclude: true
+      body1: left_ur5e/forearm_link
+      body2: left_ur5e/wrist_1_link
+    - is_exclude: true
+      body1: left_ur5e/wrist_1_link
+      body2: left_ur5e/wrist_2_link
+    - is_exclude: true
+      body1: left_ur5e/wrist_2_link
+      body2: left_ur5e/wrist_3_link
+    - is_exclude: true
+      body1: right_ur5e/base
+      body2: right_ur5e/shoulder_link
+    - is_exclude: true
+      body1: right_ur5e/shoulder_link
+      body2: right_ur5e/upper_arm_link
+    - is_exclude: true
+      body1: right_ur5e/upper_arm_link
+      body2: right_ur5e/forearm_link
+    - is_exclude: true
+      body1: right_ur5e/forearm_link
+      body2: right_ur5e/wrist_1_link
+    - is_exclude: true
+      body1: right_ur5e/wrist_1_link
+      body2: right_ur5e/wrist_2_link
+    - is_exclude: true
+      body1: right_ur5e/wrist_2_link
+      body2: right_ur5e/wrist_3_link
+    - is_exclude: true
+      body1: vention_base
+      body2: left_ur5e/upper_arm_link
+    - is_exclude: true
+      body1: vention_base
+      body2: left_ur5e/shoulder_link
+    - is_exclude: true
+      body1: vention_base
+      body2: right_ur5e/upper_arm_link
+    - is_exclude: true
+      body1: vention_base
+      body2: right_ur5e/shoulder_link
+    equality_constraints: []
+    tendons: []
+    keyframes:
+      - name: home
+        qpos:
+          - 0.4
+          - -2.589130703602926
+          - -2.1601325474181117
+          - 1.8716824690448206
+          - -2.834
+          - -0.8690908590899866
+          - -0.061783615742818654
+          - 0.25
+          - 2.5312066078186035
+          - -1.025328592663147
+          - -1.8657585382461548
+          - -0.20165141046557622
+          - 0.9150075912475586
+          - -0.06137401262392217
+        ctrl:
+          - 0.4
+          - 0.25
+          - -2.589130703602926
+          - -2.1601325474181117
+          - 1.8716824690448206
+          - -2.834
+          - -0.8690908590899866
+          - -0.061783615742818654
+          - 2.5312066078186035
+          - -1.025328592663147
+          - -1.8657585382461548
+          - -0.20165141046557622
+          - 0.9150075912475586
+          - -0.06137401262392217
+    compiler:
+      angle: radian
+      meshdir: meshes/visual
+      autolimits: true
+    solver:
+      gravity: null
+      integrator: implicitfast
+      cone: elliptic
+      impratio: 10
+      wind: null
+      flags: null
+    default_classes:
+    - children:
+      - class: /
+        children:
+        - class: vention
+          elements:
+          - tag: material
+            attributes:
+              specular: 0.6
+              shininess: 0.3
+          children:
+          - class: visual
+            elements:
+            - tag: geom
+              attributes:
+                type: mesh
+                contype: 0
+                conaffinity: 0
+                group: 2
+          - class: collision
+            elements:
+            - tag: geom
+              attributes:
+                type: mesh
+                group: 3
+                rgba: 0.69999999999999996 0.69999999999999996 0.69999999999999996
+                  0.90000000000000002
+      - class: left_ur5e/
+        children:
+        - class: left_ur5e/ur5e
+          elements:
+          - tag: material
+            attributes:
+              specular: 0.9
+              shininess: 0.6
+          - tag: joint
+            attributes:
+              axis: 0 1 0
+              range: -3.1415000000000002 3.1415000000000002
+              armature: 0.1
+          - tag: site
+            attributes:
+              group: 4
+              rgba: 0.5 0.5 0.5 0.29999999999999999
+              size: 0.01
+          - tag: general
+            attributes:
+              ctrlrange: -3.1415000000000002 3.1415000000000002
+              forcerange: -300 300
+              gaintype: fixed
+              biastype: affine
+              gainprm: 3000
+              biasprm: 0 -3000 -101
+          children:
+          - class: left_ur5e/size1
+            elements:
+            - tag: general
+              attributes:
+                forcerange: -56 56
+                gainprm: 500
+                biasprm: 0 -500 -11
+          - class: left_ur5e/visual
+            elements:
+            - tag: geom
+              attributes:
+                type: mesh
+                contype: 0
+                conaffinity: 0
+                group: 2
+          - class: left_ur5e/collision
+            elements:
+            - tag: geom
+              attributes:
+                type: capsule
+                group: 3
+            children:
+            - class: left_ur5e/eef_collision
+              elements:
+              - tag: geom
+                attributes:
+                  type: cylinder
+      - class: left_ur5e/gripper/
+        children:
+        - class: left_ur5e/gripper/2f140
+          elements:
+          - tag: material
+            attributes:
+              specular: 0.7
+              shininess: 0.4
+          - tag: joint
+            attributes:
+              axis: 1 0 0
+          - tag: general
+            attributes:
+              biastype: affine
+          children:
+          - class: left_ur5e/gripper/driver
+            elements:
+            - tag: joint
+              attributes:
+                solreflimit: 0.0050000000000000001 1
+                solimplimit: 0.94999999999999996 0.98999999999999999 0.001
+                range: -0.80000000000000004 0
+                armature: 0.005
+                damping: 0.1
+          - class: left_ur5e/gripper/follower
+            elements:
+            - tag: joint
+              attributes:
+                pos: 0 0.0050000000000000001 -0.017500000000000002
+                solreflimit: 0.0050000000000000001 1
+                solimplimit: 0.94999999999999996 0.98999999999999999 0.001
+                range: -0.87570000000000003 0.87570000000000003
+                armature: 0.001
+          - class: left_ur5e/gripper/spring_link
+            elements:
+            - tag: joint
+              attributes:
+                stiffness: 0.05
+                range: -0.80000000000000004 0.29670597283
+                springref: -25.62
+                armature: 0.001
+                damping: 0.00125
+          - class: left_ur5e/gripper/coupler
+            elements:
+            - tag: joint
+              attributes:
+                solreflimit: 0.0050000000000000001 1
+                solimplimit: 0.94999999999999996 0.98999999999999999 0.001
+                range: 0 1.5700000000000001
+                armature: 0.001
+          - class: left_ur5e/gripper/visual
+            elements:
+            - tag: geom
+              attributes:
+                type: mesh
+                contype: 0
+                conaffinity: 0
+                group: 2
+          - class: left_ur5e/gripper/collision
+            elements:
+            - tag: geom
+              attributes:
+                type: mesh
+                group: 3
+            children:
+            - class: left_ur5e/gripper/pad_box1
+              elements:
+              - tag: geom
+                attributes:
+                  type: box
+                  priority: 1
+                  size: 0.0135 0.032500000000000001 0.0037499999999999999
+                  rgba: 0.55000000000000004 0.55000000000000004 0.55000000000000004
+                    1
+                  friction: 0.7
+                  mass: 0
+                  solref: 0.0040000000000000001 1
+                  solimp: 0.94999999999999996 0.98999999999999999 0.001
+                  pos: 0 0.045755400000000002 -0.027220299999999999
+      - class: right_ur5e/
+        children:
+        - class: right_ur5e/ur5e
+          elements:
+          - tag: material
+            attributes:
+              specular: 0.9
+              shininess: 0.6
+          - tag: joint
+            attributes:
+              axis: 0 1 0
+              range: -3.1415000000000002 3.1415000000000002
+              armature: 0.1
+          - tag: site
+            attributes:
+              group: 4
+              rgba: 0.5 0.5 0.5 0.29999999999999999
+              size: 0.01
+          - tag: general
+            attributes:
+              ctrlrange: -3.1415000000000002 3.1415000000000002
+              forcerange: -300 300
+              gaintype: fixed
+              biastype: affine
+              gainprm: 3000
+              biasprm: 0 -3000 -101
+          children:
+          - class: right_ur5e/size1
+            elements:
+            - tag: general
+              attributes:
+                forcerange: -56 56
+                gainprm: 500
+                biasprm: 0 -500 -11
+          - class: right_ur5e/visual
+            elements:
+            - tag: geom
+              attributes:
+                type: mesh
+                contype: 0
+                conaffinity: 0
+                group: 2
+          - class: right_ur5e/collision
+            elements:
+            - tag: geom
+              attributes:
+                type: capsule
+                group: 3
+            children:
+            - class: right_ur5e/eef_collision
+              elements:
+              - tag: geom
+                attributes:
+                  type: cylinder
+      - class: right_ur5e/gripper/
+        children:
+        - class: right_ur5e/gripper/2f140
+          elements:
+          - tag: material
+            attributes:
+              specular: 0.7
+              shininess: 0.4
+          - tag: joint
+            attributes:
+              axis: 1 0 0
+          - tag: general
+            attributes:
+              biastype: affine
+          children:
+          - class: right_ur5e/gripper/driver
+            elements:
+            - tag: joint
+              attributes:
+                solreflimit: 0.0050000000000000001 1
+                solimplimit: 0.94999999999999996 0.98999999999999999 0.001
+                range: -0.80000000000000004 0
+                armature: 0.005
+                damping: 0.1
+          - class: right_ur5e/gripper/follower
+            elements:
+            - tag: joint
+              attributes:
+                pos: 0 0.0050000000000000001 -0.017500000000000002
+                solreflimit: 0.0050000000000000001 1
+                solimplimit: 0.94999999999999996 0.98999999999999999 0.001
+                range: -0.87570000000000003 0.87570000000000003
+                armature: 0.001
+          - class: right_ur5e/gripper/spring_link
+            elements:
+            - tag: joint
+              attributes:
+                stiffness: 0.05
+                range: -0.80000000000000004 0.29670597283
+                springref: -25.62
+                armature: 0.001
+                damping: 0.00125
+          - class: right_ur5e/gripper/coupler
+            elements:
+            - tag: joint
+              attributes:
+                solreflimit: 0.0050000000000000001 1
+                solimplimit: 0.94999999999999996 0.98999999999999999 0.001
+                range: 0 1.5700000000000001
+                armature: 0.001
+          - class: right_ur5e/gripper/visual
+            elements:
+            - tag: geom
+              attributes:
+                type: mesh
+                contype: 0
+                conaffinity: 0
+                group: 2
+          - class: right_ur5e/gripper/collision
+            elements:
+            - tag: geom
+              attributes:
+                type: mesh
+                group: 3
+            children:
+            - class: right_ur5e/gripper/pad_box1
+              elements:
+              - tag: geom
+                attributes:
+                  type: box
+                  priority: 1
+                  size: 0.0135 0.032500000000000001 0.0037499999999999999
+                  rgba: 0.55000000000000004 0.55000000000000004 0.55000000000000004
+                    1
+                  friction: 0.7
+                  mass: 0
+                  solref: 0.0040000000000000001 1
+                  solimp: 0.94999999999999996 0.98999999999999999 0.001
+                  pos: 0 0.045755400000000002 -0.027220299999999999
+    meshes:
+    - name: vention_frame_visual_model
+      file: vention_frame_visual_model-3ad6025d0633a8c49789e10339a2c0fb6855dd81.stl
+    - name: left_ur5e/base_0
+      file: base_0-d5328a99917358d9aa384f12743fe73698461d1c.obj
+    - name: left_ur5e/base_1
+      file: base_1-d1c667ae5f87b9c900fdeadad850205153846396.obj
+    - name: left_ur5e/shoulder_0
+      file: shoulder_0-89051b80580d45ef39cb220bf068742b01770552.obj
+    - name: left_ur5e/shoulder_1
+      file: shoulder_1-50ba15e82459989cf7f17cba7b1aafbca2781206.obj
+    - name: left_ur5e/shoulder_2
+      file: shoulder_2-29ad171bec79e2912abb81d250aaf5ff9a67bc60.obj
+    - name: left_ur5e/upperarm_0
+      file: upperarm_0-16bfdf8d1b19d35ef0adbc4cf29ab0c7edb62dcf.obj
+    - name: left_ur5e/upperarm_1
+      file: upperarm_1-c53724435bec35e1b608145457af767b038f4fd1.obj
+    - name: left_ur5e/upperarm_2
+      file: upperarm_2-199e0d0c1baa55a078742ed298800ff26d072c09.obj
+    - name: left_ur5e/upperarm_3
+      file: upperarm_3-62f2bba935d9ab94800a49bcb6ede7b0fa9dd071.obj
+    - name: left_ur5e/forearm_0
+      file: forearm_0-7994229075bdd0e4a5c860ca174278ee8eda8229.obj
+    - name: left_ur5e/forearm_1
+      file: forearm_1-c72848167eef89e0d9801ddd7da516e7e878776e.obj
+    - name: left_ur5e/forearm_2
+      file: forearm_2-3a33518f421ed893ff9b0d759af07b0e5900e78c.obj
+    - name: left_ur5e/forearm_3
+      file: forearm_3-54cad2556a94cdda04a7cef5c84554a7d9f3ab03.obj
+    - name: left_ur5e/wrist1_0
+      file: wrist1_0-6876ccb9d0084054268dd6aec007e5a61aea6c2d.obj
+    - name: left_ur5e/wrist1_1
+      file: wrist1_1-0f7e6640a9dfb98e58078997f5f82bd433879387.obj
+    - name: left_ur5e/wrist1_2
+      file: wrist1_2-3f6dcae8c736e2c42db3746db7f24ac4516aaca7.obj
+    - name: left_ur5e/wrist2_0
+      file: wrist2_0-fdb3f7bc360f8f37f6be6270c8b507291dc9b01c.obj
+    - name: left_ur5e/wrist2_1
+      file: wrist2_1-258ca475798c530d954723dc29f3d67086ead0d9.obj
+    - name: left_ur5e/wrist2_2
+      file: wrist2_2-c6734971531db7f2f09e746377aa9faccb69b192.obj
+    - name: left_ur5e/wrist3
+      file: wrist3-a1fffb4f599e121fb18be40e087b6fd7fb164e59.obj
+    - name: left_ur5e/gripper/base_mount
+      file: base_mount-492692230394a1ebdce431c652d89a9c9a4211b5.stl
+      scale:
+      - 0.001
+      - 0.001
+      - 0.001
+    - name: left_ur5e/gripper/base
+      file: base-89a0661a7293371ffe78c9605d5b7ccef2a78430.stl
+    - name: left_ur5e/gripper/driver
+      file: driver-a0c14c2ec91c3e05ccc3e9499456623628d28b1a.stl
+    - name: left_ur5e/gripper/follower
+      file: follower-90ac7cc434d804e958140d6f37fcc14bdbf74f5b.stl
+    - name: left_ur5e/gripper/coupler
+      file: coupler-e866eb8db5bf2b3f0922658edc8dd3dff1e96529.stl
+    - name: left_ur5e/gripper/pad
+      file: pad-0fb7d7243a94c9e197e05a09dc9b6de5c126cdfc.stl
+      scale:
+      - 0.001
+      - 0.001
+      - 0.001
+    - name: left_ur5e/gripper/spring_link
+      file: spring_link-3730a0af47afa032388b26d12d24919377c589c7.stl
+    - name: right_ur5e/base_0
+      file: base_0-d5328a99917358d9aa384f12743fe73698461d1c.obj
+    - name: right_ur5e/base_1
+      file: base_1-d1c667ae5f87b9c900fdeadad850205153846396.obj
+    - name: right_ur5e/shoulder_0
+      file: shoulder_0-89051b80580d45ef39cb220bf068742b01770552.obj
+    - name: right_ur5e/shoulder_1
+      file: shoulder_1-50ba15e82459989cf7f17cba7b1aafbca2781206.obj
+    - name: right_ur5e/shoulder_2
+      file: shoulder_2-29ad171bec79e2912abb81d250aaf5ff9a67bc60.obj
+    - name: right_ur5e/upperarm_0
+      file: upperarm_0-16bfdf8d1b19d35ef0adbc4cf29ab0c7edb62dcf.obj
+    - name: right_ur5e/upperarm_1
+      file: upperarm_1-c53724435bec35e1b608145457af767b038f4fd1.obj
+    - name: right_ur5e/upperarm_2
+      file: upperarm_2-199e0d0c1baa55a078742ed298800ff26d072c09.obj
+    - name: right_ur5e/upperarm_3
+      file: upperarm_3-62f2bba935d9ab94800a49bcb6ede7b0fa9dd071.obj
+    - name: right_ur5e/forearm_0
+      file: forearm_0-7994229075bdd0e4a5c860ca174278ee8eda8229.obj
+    - name: right_ur5e/forearm_1
+      file: forearm_1-c72848167eef89e0d9801ddd7da516e7e878776e.obj
+    - name: right_ur5e/forearm_2
+      file: forearm_2-3a33518f421ed893ff9b0d759af07b0e5900e78c.obj
+    - name: right_ur5e/forearm_3
+      file: forearm_3-54cad2556a94cdda04a7cef5c84554a7d9f3ab03.obj
+    - name: right_ur5e/wrist1_0
+      file: wrist1_0-6876ccb9d0084054268dd6aec007e5a61aea6c2d.obj
+    - name: right_ur5e/wrist1_1
+      file: wrist1_1-0f7e6640a9dfb98e58078997f5f82bd433879387.obj
+    - name: right_ur5e/wrist1_2
+      file: wrist1_2-3f6dcae8c736e2c42db3746db7f24ac4516aaca7.obj
+    - name: right_ur5e/wrist2_0
+      file: wrist2_0-fdb3f7bc360f8f37f6be6270c8b507291dc9b01c.obj
+    - name: right_ur5e/wrist2_1
+      file: wrist2_1-258ca475798c530d954723dc29f3d67086ead0d9.obj
+    - name: right_ur5e/wrist2_2
+      file: wrist2_2-c6734971531db7f2f09e746377aa9faccb69b192.obj
+    - name: right_ur5e/wrist3
+      file: wrist3-a1fffb4f599e121fb18be40e087b6fd7fb164e59.obj
+    - name: right_ur5e/gripper/base_mount
+      file: base_mount-492692230394a1ebdce431c652d89a9c9a4211b5.stl
+      scale:
+      - 0.001
+      - 0.001
+      - 0.001
+    - name: right_ur5e/gripper/base
+      file: base-89a0661a7293371ffe78c9605d5b7ccef2a78430.stl
+    - name: right_ur5e/gripper/driver
+      file: driver-a0c14c2ec91c3e05ccc3e9499456623628d28b1a.stl
+    - name: right_ur5e/gripper/follower
+      file: follower-90ac7cc434d804e958140d6f37fcc14bdbf74f5b.stl
+    - name: right_ur5e/gripper/coupler
+      file: coupler-e866eb8db5bf2b3f0922658edc8dd3dff1e96529.stl
+    - name: right_ur5e/gripper/pad
+      file: pad-0fb7d7243a94c9e197e05a09dc9b6de5c126cdfc.stl
+      scale:
+      - 0.001
+      - 0.001
+      - 0.001
+    - name: right_ur5e/gripper/spring_link
+      file: spring_link-3730a0af47afa032388b26d12d24919377c589c7.stl
+    materials:
+    - name: blue
+      rgba:
+      - 0.12
+      - 0.18
+      - 0.38
+      - 1
+      specular: 0.5
+      shininess: 0.3
+    - name: red
+      rgba:
+      - 0.12
+      - 0.18
+      - 0.38
+      - 1
+      specular: 0.5
+      shininess: 0.3
+    - name: left_ur5e/black
+      rgba:
+      - 0.033
+      - 0.033
+      - 0.033
+      - 1
+    - name: left_ur5e/jointgray
+      rgba:
+      - 0.278
+      - 0.278
+      - 0.278
+      - 1
+    - name: left_ur5e/linkgray
+      rgba:
+      - 0.65
+      - 0.65
+      - 0.65
+      - 1
+    - name: left_ur5e/urblue
+      rgba:
+      - 0.49
+      - 0.678
+      - 0.8
+      - 1
+    - name: left_ur5e/gripper/metal
+      rgba:
+      - 0.58
+      - 0.58
+      - 0.58
+      - 1
+    - name: left_ur5e/gripper/silicone
+      rgba:
+      - 0.1882
+      - 0.1882
+      - 0.1882
+      - 1
+    - name: left_ur5e/gripper/gray
+      rgba:
+      - 0.4627
+      - 0.4627
+      - 0.4627
+      - 1
+    - name: left_ur5e/gripper/black
+      rgba:
+      - 0.149
+      - 0.149
+      - 0.149
+      - 1
+    - name: right_ur5e/black
+      rgba:
+      - 0.033
+      - 0.033
+      - 0.033
+      - 1
+    - name: right_ur5e/jointgray
+      rgba:
+      - 0.278
+      - 0.278
+      - 0.278
+      - 1
+    - name: right_ur5e/linkgray
+      rgba:
+      - 0.65
+      - 0.65
+      - 0.65
+      - 1
+    - name: right_ur5e/urblue
+      rgba:
+      - 0.49
+      - 0.678
+      - 0.8
+      - 1
+    - name: right_ur5e/gripper/metal
+      rgba:
+      - 0.58
+      - 0.58
+      - 0.58
+      - 1
+    - name: right_ur5e/gripper/silicone
+      rgba:
+      - 0.1882
+      - 0.1882
+      - 0.1882
+      - 1
+    - name: right_ur5e/gripper/gray
+      rgba:
+      - 0.4627
+      - 0.4627
+      - 0.4627
+      - 1
+    - name: right_ur5e/gripper/black
+      rgba:
+      - 0.149
+      - 0.149
+      - 0.149
+      - 1
+    textures:
+    - name: light_skybox
+      type: skybox
+      builtin: flat
+      size:
+      - 1
+      - 1
+      rgb1:
+      - 0.92
+      - 0.92
+      - 0.92
+    statistic_attributes:
+      extent: 3.5
+      center: 0 0 1
+    sensors:
+    - kind: force
+      name: left_ur5e/ft_sensor_force
+      objname: left_ur5e/ft_sensor_site
+      objattr: site
+      noise: 3.5
+    - kind: torque
+      name: left_ur5e/ft_sensor_torque
+      objname: left_ur5e/ft_sensor_site
+      objattr: site
+      noise: 0.2
+    - kind: force
+      name: right_ur5e/ft_sensor_force
+      objname: right_ur5e/ft_sensor_site
+      objattr: site
+      noise: 3.5
+    - kind: torque
+      name: right_ur5e/ft_sensor_torque
+      objname: right_ur5e/ft_sensor_site
+      objattr: site
+      noise: 0.2

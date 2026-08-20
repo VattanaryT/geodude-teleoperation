@@ -1,0 +1,49 @@
+# Hardware config for geodude's two UR5e arms, pointed at the two URSim containers
+# geodude-gafro/examples/ursim/docker-compose.yml brings up. Passed as
+# robot_interface.Configuration's `hardware_config` (see
+# examples/hardware_object_contact_teleop.py) -- loaded automatically, so the only thing
+# that changes between simulating in MuJoCo and driving the real arms is Configuration.type
+# ("mujoco" -> "hardware"). Copied verbatim from geodude-gafro's own
+# assets/robots/geodude/geodude_hardware.yaml (same robot, same control-group names).
+#
+# Top-level keys are geodude.yaml's control_groups names; each entry's `driver:` selects the
+# vendor (currently only "ur" exists). See hardware::URRobot::parseConfiguration in
+# robot_interface's URRobot.cpp for the full field list -- only robot_ip and script_file are
+# required. output_recipe/input_recipe are deliberately omitted here: URRobot::Configuration
+# already defaults both to a generally-useful RTDE variable list (embedded as YAML sequences
+# if you ever need to override them, not file paths -- see Configuration's doc comment).
+#
+# reverse_port/script_sender_port/trajectory_port/script_command_port are given distinct
+# values per arm: both drivers run in the SAME process here, and urcl's defaults
+# (50001-50004) would otherwise collide on the second arm's socket bind.
+#
+# No control_mode field: which of servoj/speedj/direct_torque a driver streams is read live
+# from whichever gafro::control::Controller is actually driving that arm's control group --
+# not fixed here. examples/hardware_object_contact_teleop.py's two controllers are both
+# velocity controllers, so both stream speedj.
+#
+# script_file points at ur_client_library's standard from-source install location
+# (CMAKE_INSTALL_PREFIX=/usr/local, its default) -- override with --script-file if yours
+# lives elsewhere. For real hardware, just point robot_ip at each arm's actual IP and pass
+# --no-bring-up if it's already powered and running (the dashboard bring-up sequence here is
+# ursim-specific -- real arms are normally already brought up through PolyScope).
+
+left_ur5e:
+  driver: ur
+  robot_ip: 192.168.1.103
+  script_file: /usr/local/share/ur_client_library/resources/external_control.urscript
+  headless_mode: true
+  reverse_port: 50001
+  script_sender_port: 50002
+  trajectory_port: 50003
+  script_command_port: 50004
+
+right_ur5e:
+  driver: ur
+  robot_ip: 192.168.1.102
+  script_file: /usr/local/share/ur_client_library/resources/external_control.urscript
+  headless_mode: true
+  reverse_port: 50011
+  script_sender_port: 50012
+  trajectory_port: 50013
+  script_command_port: 50014

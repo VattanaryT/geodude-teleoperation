@@ -35,7 +35,7 @@ def main():
         robot_viz = viz.add_robot(robot.get_system())
 
         position = task_space.extract_configuration(robot.get_state().get_position())
-        ee_line = task_space.compute_ee_motor(position).apply_to_line(ga.Line.Z())
+        ee_line = task_space.compute_ee_motor(position).transform_line(ga.Line.Z())
 
         viz.add_line(target)
         ee_viz = viz.add_line(ee_line)
@@ -45,7 +45,7 @@ def main():
             robot_viz.update(q)
 
             position = task_space.extract_configuration(robot.get_state().get_position())
-            ee_line = task_space.compute_ee_motor(position).apply_to_line(ga.Line.Z())
+            ee_line = task_space.compute_ee_motor(position).transform_line(ga.Line.Z())
             ee_viz.update(ee_line)
 
         viz.add_ticker(lambda: update())

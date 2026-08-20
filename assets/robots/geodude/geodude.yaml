@@ -56,6 +56,25 @@ system:
     left_arm_vention_base:
       name: left_arm_vention_base
       parent_joint: left_arm_linear_vention
+      inertial:
+        mass: 18.57
+        inertia:
+          xx: 0.0789611875
+          xy: 0
+          xz: 0
+          yy: 0.15668437500000001
+          yz: 0
+          zz: 0.0789611875
+        origin:
+          position:
+            x: -0
+            y: -0
+            z: -0
+          orientation:
+            w: 1
+            x: -0
+            y: 0
+            z: -0
       geometries:
         - origin:
             position:
@@ -441,6 +460,25 @@ system:
     left_ur5e/gripper/base_mount:
       name: left_ur5e/gripper/base_mount
       parent_joint: left_ur5e/gripper/base_mount_fixed
+      inertial:
+        mass: 0.01
+        inertia:
+          xx: 4.4e-05
+          xy: 0
+          xz: 0
+          yy: 2.7e-05
+          yz: 0
+          zz: 2.7e-05
+        origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: -0
+            y: 0
+            z: -0
       geometries:
         - origin:
             position:
@@ -517,14 +555,14 @@ system:
       name: left_ur5e/gripper/left_coupler
       parent_joint: left_ur5e/gripper/left_coupler_joint
       inertial:
-        mass: 0.0311462
+        mass: 0.0140974
         inertia:
-          xx: 2.960160426225457e-05
-          xy: 1.0975487850624091e-07
-          xz: 7.404500238482022e-08
-          yy: 1.162147171390913e-05
-          yz: -1.0876222091595813e-05
-          zz: 2.0750794023836305e-05
+          xx: 3.52216e-06
+          xy: -3.4013352132631573e-25
+          xz: 1.3103833695879896e-23
+          yy: 4.10784788185829e-06
+          yz: 4.1778902807776345e-07
+          zz: 9.423431181417107e-07
         origin:
           position:
             x: 0.00016387500000000004
@@ -587,6 +625,25 @@ system:
     left_ur5e/gripper/left_driver:
       name: left_ur5e/gripper/left_driver
       parent_joint: left_ur5e/gripper/left_driver_joint
+      inertial:
+        mass: 0.00899563
+        inertia:
+          xx: 1.72352e-06
+          xy: -0
+          xz: 0
+          yy: 3.286147391312246e-07
+          yz: 9.198982933397986e-08
+          zz: 1.6024512608687745e-06
+        origin:
+          position:
+            x: -0
+            y: 0.017754699999999998
+            z: 0.0010731399999999985
+          orientation:
+            w: 1
+            x: -0
+            y: 0
+            z: -0
       geometries:
         - origin:
             position:
@@ -642,14 +699,14 @@ system:
       name: left_ur5e/gripper/left_follower
       parent_joint: left_ur5e/gripper/left_follower_joint
       inertial:
-        mass: 0.0261503
+        mass: 0.0125222
         inertia:
-          xx: 1.5913229040447478e-05
-          xy: -5.589529969586323e-08
-          xz: -2.541690883521763e-08
-          yy: 3.170713746693241e-06
-          yz: -3.1950793422868735e-06
-          zz: 1.5459317212859274e-05
+          xx: 2.67415e-06
+          xy: 0
+          xz: 0
+          yy: 2.2614883459183203e-06
+          yz: -5.679945840392976e-07
+          zz: 7.964426540816798e-07
         origin:
           position:
             x: 0.00011931400000000057
@@ -798,14 +855,14 @@ system:
       name: left_ur5e/gripper/left_spring_link
       parent_joint: left_ur5e/gripper/left_spring_link_joint
       inertial:
-        mass: 0.0271177
+        mass: 0.0221642
         inertia:
-          xx: 2.6191060507906588e-05
-          xy: 2.436097253060534e-07
-          xz: -6.378096055067248e-09
-          yy: 2.827022285768501e-06
-          yz: 5.371742804416477e-07
-          zz: 2.836960720632488e-05
+          xx: 6.71733e-06
+          xy: 3.062262621503804e-23
+          xz: -1.5586384879667995e-22
+          yy: 6.299061790003088e-06
+          yz: 3.125634505167317e-06
+          zz: 5.308778209996911e-06
         origin:
           position:
             x: 0.0001230120000000022
@@ -871,14 +928,14 @@ system:
       name: left_ur5e/gripper/right_coupler
       parent_joint: left_ur5e/gripper/right_coupler_joint
       inertial:
-        mass: 0.0311462
+        mass: 0.0140974
         inertia:
-          xx: 2.960160426225457e-05
-          xy: 1.0975487850624091e-07
-          xz: 7.404500238482022e-08
-          yy: 1.162147171390913e-05
-          yz: -1.0876222091595813e-05
-          zz: 2.0750794023836305e-05
+          xx: 3.52216e-06
+          xy: -3.4013352132631573e-25
+          xz: 1.3103833695879896e-23
+          yy: 4.10784788185829e-06
+          yz: 4.1778902807776345e-07
+          zz: 9.423431181417107e-07
         origin:
           position:
             x: 0.00016387500000000004
@@ -941,6 +998,25 @@ system:
     left_ur5e/gripper/right_driver:
       name: left_ur5e/gripper/right_driver
       parent_joint: left_ur5e/gripper/right_driver_joint
+      inertial:
+        mass: 0.00899563
+        inertia:
+          xx: 1.72352e-06
+          xy: -0
+          xz: 0
+          yy: 3.286147391312246e-07
+          yz: 9.198982933397986e-08
+          zz: 1.6024512608687745e-06
+        origin:
+          position:
+            x: -0
+            y: 0.017754699999999998
+            z: 0.0010731399999999985
+          orientation:
+            w: 1
+            x: -0
+            y: 0
+            z: -0
       geometries:
         - origin:
             position:
@@ -996,14 +1072,14 @@ system:
       name: left_ur5e/gripper/right_follower
       parent_joint: left_ur5e/gripper/right_follower_joint
       inertial:
-        mass: 0.0261503
+        mass: 0.0125222
         inertia:
-          xx: 1.5913229040447478e-05
-          xy: -5.589529969586323e-08
-          xz: -2.541690883521763e-08
-          yy: 3.170713746693241e-06
-          yz: -3.1950793422868735e-06
-          zz: 1.5459317212859274e-05
+          xx: 2.67415e-06
+          xy: 0
+          xz: 0
+          yy: 2.2614883459183203e-06
+          yz: -5.679945840392976e-07
+          zz: 7.964426540816798e-07
         origin:
           position:
             x: 0.00011931400000000057
@@ -1152,14 +1228,14 @@ system:
       name: left_ur5e/gripper/right_spring_link
       parent_joint: left_ur5e/gripper/right_spring_link_joint
       inertial:
-        mass: 0.0271177
+        mass: 0.0221642
         inertia:
-          xx: 2.6191060507906588e-05
-          xy: 2.436097253060534e-07
-          xz: -6.378096055067248e-09
-          yy: 2.827022285768501e-06
-          yz: 5.371742804416477e-07
-          zz: 2.836960720632488e-05
+          xx: 6.71733e-06
+          xy: 3.062262621503804e-23
+          xz: -1.5586384879667995e-22
+          yy: 6.299061790003088e-06
+          yz: 3.125634505167317e-06
+          zz: 5.308778209996911e-06
         origin:
           position:
             x: 0.0001230120000000022
@@ -1869,6 +1945,25 @@ system:
     right_arm_vention_base:
       name: right_arm_vention_base
       parent_joint: right_arm_linear_vention
+      inertial:
+        mass: 18.57
+        inertia:
+          xx: 0.0789611875
+          xy: 0
+          xz: 0
+          yy: 0.15668437500000001
+          yz: 0
+          zz: 0.0789611875
+        origin:
+          position:
+            x: -0
+            y: -0
+            z: -0
+          orientation:
+            w: 1
+            x: -0
+            y: 0
+            z: -0
       geometries:
         - origin:
             position:
@@ -2254,6 +2349,25 @@ system:
     right_ur5e/gripper/base_mount:
       name: right_ur5e/gripper/base_mount
       parent_joint: right_ur5e/gripper/base_mount_fixed
+      inertial:
+        mass: 0.01
+        inertia:
+          xx: 4.4e-05
+          xy: 0
+          xz: 0
+          yy: 2.7e-05
+          yz: 0
+          zz: 2.7e-05
+        origin:
+          position:
+            x: 0
+            y: 0
+            z: 0
+          orientation:
+            w: 1
+            x: -0
+            y: 0
+            z: -0
       geometries:
         - origin:
             position:
@@ -2330,14 +2444,14 @@ system:
       name: right_ur5e/gripper/left_coupler
       parent_joint: right_ur5e/gripper/left_coupler_joint
       inertial:
-        mass: 0.0311462
+        mass: 0.0140974
         inertia:
-          xx: 2.960160426225457e-05
-          xy: 1.0975487850624091e-07
-          xz: 7.404500238482022e-08
-          yy: 1.162147171390913e-05
-          yz: -1.0876222091595813e-05
-          zz: 2.0750794023836305e-05
+          xx: 3.52216e-06
+          xy: -3.4013352132631573e-25
+          xz: 1.3103833695879896e-23
+          yy: 4.10784788185829e-06
+          yz: 4.1778902807776345e-07
+          zz: 9.423431181417107e-07
         origin:
           position:
             x: 0.00016387500000000004
@@ -2400,6 +2514,25 @@ system:
     right_ur5e/gripper/left_driver:
       name: right_ur5e/gripper/left_driver
       parent_joint: right_ur5e/gripper/left_driver_joint
+      inertial:
+        mass: 0.00899563
+        inertia:
+          xx: 1.72352e-06
+          xy: -0
+          xz: 0
+          yy: 3.286147391312246e-07
+          yz: 9.198982933397986e-08
+          zz: 1.6024512608687745e-06
+        origin:
+          position:
+            x: -0
+            y: 0.017754699999999998
+            z: 0.0010731399999999985
+          orientation:
+            w: 1
+            x: -0
+            y: 0
+            z: -0
       geometries:
         - origin:
             position:
@@ -2455,14 +2588,14 @@ system:
       name: right_ur5e/gripper/left_follower
       parent_joint: right_ur5e/gripper/left_follower_joint
       inertial:
-        mass: 0.0261503
+        mass: 0.0125222
         inertia:
-          xx: 1.5913229040447478e-05
-          xy: -5.589529969586323e-08
-          xz: -2.541690883521763e-08
-          yy: 3.170713746693241e-06
-          yz: -3.1950793422868735e-06
-          zz: 1.5459317212859274e-05
+          xx: 2.67415e-06
+          xy: 0
+          xz: 0
+          yy: 2.2614883459183203e-06
+          yz: -5.679945840392976e-07
+          zz: 7.964426540816798e-07
         origin:
           position:
             x: 0.00011931400000000057
@@ -2611,14 +2744,14 @@ system:
       name: right_ur5e/gripper/left_spring_link
       parent_joint: right_ur5e/gripper/left_spring_link_joint
       inertial:
-        mass: 0.0271177
+        mass: 0.0221642
         inertia:
-          xx: 2.6191060507906588e-05
-          xy: 2.436097253060534e-07
-          xz: -6.378096055067248e-09
-          yy: 2.827022285768501e-06
-          yz: 5.371742804416477e-07
-          zz: 2.836960720632488e-05
+          xx: 6.71733e-06
+          xy: 3.062262621503804e-23
+          xz: -1.5586384879667995e-22
+          yy: 6.299061790003088e-06
+          yz: 3.125634505167317e-06
+          zz: 5.308778209996911e-06
         origin:
           position:
             x: 0.0001230120000000022
@@ -2684,14 +2817,14 @@ system:
       name: right_ur5e/gripper/right_coupler
       parent_joint: right_ur5e/gripper/right_coupler_joint
       inertial:
-        mass: 0.0311462
+        mass: 0.0140974
         inertia:
-          xx: 2.960160426225457e-05
-          xy: 1.0975487850624091e-07
-          xz: 7.404500238482022e-08
-          yy: 1.162147171390913e-05
-          yz: -1.0876222091595813e-05
-          zz: 2.0750794023836305e-05
+          xx: 3.52216e-06
+          xy: -3.4013352132631573e-25
+          xz: 1.3103833695879896e-23
+          yy: 4.10784788185829e-06
+          yz: 4.1778902807776345e-07
+          zz: 9.423431181417107e-07
         origin:
           position:
             x: 0.00016387500000000004
@@ -2754,6 +2887,25 @@ system:
     right_ur5e/gripper/right_driver:
       name: right_ur5e/gripper/right_driver
       parent_joint: right_ur5e/gripper/right_driver_joint
+      inertial:
+        mass: 0.00899563
+        inertia:
+          xx: 1.72352e-06
+          xy: -0
+          xz: 0
+          yy: 3.286147391312246e-07
+          yz: 9.198982933397986e-08
+          zz: 1.6024512608687745e-06
+        origin:
+          position:
+            x: -0
+            y: 0.017754699999999998
+            z: 0.0010731399999999985
+          orientation:
+            w: 1
+            x: -0
+            y: 0
+            z: -0
       geometries:
         - origin:
             position:
@@ -2809,14 +2961,14 @@ system:
       name: right_ur5e/gripper/right_follower
       parent_joint: right_ur5e/gripper/right_follower_joint
       inertial:
-        mass: 0.0261503
+        mass: 0.0125222
         inertia:
-          xx: 1.5913229040447478e-05
-          xy: -5.589529969586323e-08
-          xz: -2.541690883521763e-08
-          yy: 3.170713746693241e-06
-          yz: -3.1950793422868735e-06
-          zz: 1.5459317212859274e-05
+          xx: 2.67415e-06
+          xy: 0
+          xz: 0
+          yy: 2.2614883459183203e-06
+          yz: -5.679945840392976e-07
+          zz: 7.964426540816798e-07
         origin:
           position:
             x: 0.00011931400000000057
@@ -2965,14 +3117,14 @@ system:
       name: right_ur5e/gripper/right_spring_link
       parent_joint: right_ur5e/gripper/right_spring_link_joint
       inertial:
-        mass: 0.0271177
+        mass: 0.0221642
         inertia:
-          xx: 2.6191060507906588e-05
-          xy: 2.436097253060534e-07
-          xz: -6.378096055067248e-09
-          yy: 2.827022285768501e-06
-          yz: 5.371742804416477e-07
-          zz: 2.836960720632488e-05
+          xx: 6.71733e-06
+          xy: 3.062262621503804e-23
+          xz: -1.5586384879667995e-22
+          yy: 6.299061790003088e-06
+          yz: 3.125634505167317e-06
+          zz: 5.308778209996911e-06
         origin:
           position:
             x: 0.0001230120000000022

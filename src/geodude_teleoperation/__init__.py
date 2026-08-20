@@ -1,4 +1,9 @@
-from geodude_teleoperation.controller import AdmittanceTeleoperationController, TeleoperationController
+from geodude_teleoperation.controller import (
+    AdmittanceTeleoperationController,
+    ContactTeleoperationController,
+    LineAdmittanceTeleoperationController,
+    TeleoperationController,
+)
 from geodude_teleoperation.keyboard import KeyboardTeleop
 from geodude_teleoperation.mesh_fixture import (
     compute_resting_orientation,
@@ -12,6 +17,8 @@ from geodude_teleoperation.virtual_fixture import OrientationField
 __all__ = [
     "TeleoperationController",
     "AdmittanceTeleoperationController",
+    "LineAdmittanceTeleoperationController",
+    "ContactTeleoperationController",
     "SpaceMouseTeleop",
     "KeyboardTeleop",
     "OrientationField",
