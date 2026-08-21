@@ -15,17 +15,28 @@ from geodude_teleoperation import (
     KeyboardTeleop,
     OrientationField,
     SpaceMouseTeleop,
+    apply_vention_heights,
     compute_resting_orientation,
     load_object_mesh,
     load_points,
 )
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-DEFAULT_OBJECT = str(ROOT / "assets" / "objects" / "banana_half.ply")
+DEFAULT_OBJECT = str(ROOT / "assets" / "objects" / "hemisphere.stl")
 MODEL = str(ROOT / "assets" / "robots" / "geodude" / "geodude.yaml")
 DEFAULT_HARDWARE_CONFIG = str(ROOT / "assets" / "robots" / "geodude" / "geodude_hardware.yaml")
 
 DEFAULT_VENTION_HEIGHT = 0.25
+
+
+def is_idle_twist(twist, atol=1e-9) -> bool:
+    """True when the device is sending a zero command.
+
+    SpaceMouseTeleop calls on_twist at 50 Hz including zeros. Approach mode's
+    virtual fixture replaces orientation on every update, so forwarding idle
+    packets at startup would immediately servo the arm onto the field.
+    """
+    return bool(np.allclose(np.asarray(twist.to_array()), 0.0, atol=atol))
 
 
 def _dashboard_bring_up(ip: str) -> None:
@@ -78,6 +89,17 @@ def main():
         help="spacemouse button index that toggles between approach and contact mode")
     parser.add_argument("--no-viz", action="store_true",
                         help="disable the viser visualization")
+    parser.add_argument(
+        "--vention-height", type=float, default=DEFAULT_VENTION_HEIGHT,
+        help="physical vention rail height in meters for both arms (hardware does "
+             "not sense these joints; used for visualization FK). Default matches "
+             "geodude.yaml keyframe 'ready'.")
+    parser.add_argument(
+        "--left-vention-height", type=float, default=None,
+        help="override --vention-height for the left rail only")
+    parser.add_argument(
+        "--right-vention-height", type=float, default=None,
+        help="override --vention-height for the right rail only")
     args = parser.parse_args()
 
     if args.bring_up:
@@ -90,6 +112,16 @@ def main():
     interface = ri.RobotInterface(config)
     interface.initialize()
 
+    left_vention = args.left_vention_height if args.left_vention_height is not None else args.vention_height
+    right_vention = args.right_vention_height if args.right_vention_height is not None else args.vention_height
+    print(f"hardware does not report vention rails; drawing them at "
+          f"left={left_vention:.3f}m right={right_vention:.3f}m")
+
+    def q_with_vention():
+        return apply_vention_heights(
+            interface.get_system(), interface.get_state().get_position(),
+            left_vention, right_vention)
+
     task_space = interface.get_task_space(args.task_space)
     if task_space is None:
         raise RuntimeError(f"task space '{args.task_space}' not found in {MODEL}")
@@ -97,11 +129,17 @@ def main():
     joint_idx = np.array(task_space.get_joint_indices())
     live_position = interface.get_state().get_position()[joint_idx]
     home_ee_motor = task_space.compute_ee_motor(live_position)
-    home_translator = home_ee_motor.get_translator()
-    home_xyz = np.array(
-        [home_translator.x(), home_translator.y(), home_translator.z()])
 
-    vention_offset = interface.get_state().get_position()[0] - DEFAULT_VENTION_HEIGHT
+    # Object / table pose in the same frame viser uses (rails overlaid). The
+    # hold-pose objective stays on unpatched hardware FK so the C++ loop does
+    # not see a 0.25 m z-error and command the UR joints up.
+    viz_position = q_with_vention()[joint_idx]
+    viz_ee_motor = task_space.compute_ee_motor(viz_position)
+    viz_translator = viz_ee_motor.get_translator()
+    home_xyz = np.array(
+        [viz_translator.x(), viz_translator.y(), viz_translator.z()])
+    rail_height = left_vention if args.task_space == "left_ee" else right_vention
+    vention_offset = float(viz_position[0]) - rail_height
     table_reference_xyz = home_xyz - np.array([0.0, 0.0, vention_offset])
     plane_z = table_reference_xyz[2]
 
@@ -125,14 +163,15 @@ def main():
 
     vf = OrientationField(object_surface, key_direction=key_direction)
 
-    initial_target = vf.project(home_ee_motor)
-
+    # Hold the live pose. vf.project() replaces orientation with the field's
+    # local approach basis; using that as the first objective would immediately
+    # servo the arm, before viser is even up.
     approach_controller = AdmittanceTeleoperationController()
     approach_controller.set_virtual_fixture(vf)
     approach_controller.set_task_space(task_space)
     approach_controller.set_interface(interface)
     approach_controller.set_objective(
-        ga.control.SingleArmMotorControlObjective(initial_target))
+        ga.control.SingleArmMotorControlObjective(home_ee_motor))
 
     contact_stiffness = np.diag([3000.0] * 5 + [0.0])
     contact_damping = np.diag([20.0] * 5 + [20.0])
@@ -143,20 +182,25 @@ def main():
     contact_config.admittance = ga.control.AdmittanceConfig(
         inertia=1.0 * np.eye(6), damping=contact_damping, stiffness=contact_stiffness)
 
-    initial_line = initial_target.transform_line(ga.Line.Z())
-
     contact_controller = ContactTeleoperationController(
         vf, contact_config, target_force=args.target_force)
     contact_controller.set_task_space(task_space)
     contact_controller.set_interface(interface)
     contact_controller.set_objective(
-        ga.control.SingleArmLineControlObjective(initial_line))
-
-    interface.control(approach_controller, blocking=False)
+        ga.control.SingleArmLineControlObjective(
+            vf.project(home_ee_motor).transform_line(ga.Line.Z())))
 
     mode = {"active": "approach"}
+    device = None
+    viz = None
+
+    def live_ee_motor():
+        position = interface.get_state().get_position()[joint_idx]
+        return task_space.compute_ee_motor(position)
 
     def on_twist(twist):
+        if is_idle_twist(twist):
+            return
         active = approach_controller if mode["active"] == "approach" else contact_controller
         active.update_command(twist)
 
@@ -165,6 +209,8 @@ def main():
             return
         if mode["active"] == "approach":
             mode["active"] = "contact"
+            contact_controller.get_objective().set_target(
+                vf.project(live_ee_motor()).transform_line(ga.Line.Z()))
             interface.control(contact_controller, blocking=False)
             contact_controller.start()
             print(f"-> contact mode: pressing at {args.target_force:.1f}N "
@@ -172,51 +218,58 @@ def main():
         else:
             contact_controller.stop()
             mode["active"] = "approach"
+            approach_controller.get_objective().set_target(live_ee_motor())
             interface.control(approach_controller, blocking=False)
-            print("-> approach mode: free 6-DOF admittance, no contact force")
+            print("-> approach mode: holding live pose, field orientation on spacemouse input")
 
-    device = KeyboardTeleop(
-        step=0.0025) if args.device == "keyboard" else SpaceMouseTeleop()
-    device.start(on_twist, on_button)
+    def start_control_and_device():
+        nonlocal device
+        interface.control(approach_controller, blocking=False)
+        device = KeyboardTeleop(
+            step=0.0025) if args.device == "keyboard" else SpaceMouseTeleop()
+        device.start(on_twist, on_button)
 
     try:
         if args.no_viz:
             print(f"Teleoperating '{args.task_space}' on real geodude (headless) "
-                  f"-- starting in approach mode, button {args.mode_button} toggles contact. "
-                  "Ctrl+C to quit.")
+                  f"-- holding live pose until spacemouse input; "
+                  f"button {args.mode_button} toggles contact. Ctrl+C to quit.")
+            start_control_and_device()
             while True:
                 time.sleep(0.1)
         else:
             viz = gafropy_viz.Visualizer()
+            print(f"viser running at http://localhost:{viz.port} -- "
+                  "holding pose; open the page before moving the spacemouse.")
 
             robot = viz.add_robot(interface.get_system(),
                                   name="geodude", joint_sliders=False)
+            robot.update(q_with_vention())
 
             viz.scene.add_point_cloud(
                 "/object", points=object_surface.vertices, colors=(200, 200, 200), point_size=0.002
             )
 
-            position = interface.get_state().get_position()[joint_idx]
-            ee = task_space.compute_ee_motor(position)
-            eeviz = viz.add_motor(ee)
+            eeviz = viz.add_motor(viz_ee_motor)
 
             def update():
-                q = interface.get_state().get_position()
+                q = q_with_vention()
                 robot.update(q)
-                position = q[joint_idx]
-                ee = task_space.compute_ee_motor(position)
-                eeviz.update(ee)
+                eeviz.update(task_space.compute_ee_motor(q[joint_idx]))
 
             viz.add_ticker(lambda: update())
 
+            start_control_and_device()
+
             viz.show(message=f"Teleoperating '{args.task_space}' on real geodude "
-                     f"-- starting in approach mode, button {args.mode_button} toggles "
-                     f"contact. viser running at http://localhost:{viz.port} -- "
-                     "ctrl-c to quit.")
+                     f"-- holding live pose until spacemouse input; "
+                     f"button {args.mode_button} toggles contact. "
+                     f"viser at http://localhost:{viz.port} -- ctrl-c to quit.")
     except KeyboardInterrupt:
         pass
     finally:
-        device.stop()
+        if device is not None:
+            device.stop()
         contact_controller.stop()
         interface.shutdown()
 

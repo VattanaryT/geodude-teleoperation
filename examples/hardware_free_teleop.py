@@ -14,6 +14,8 @@ from geodude_teleoperation import (
     KeyboardTeleop,
     SpaceMouseTeleop,
     TeleoperationController,
+    DEFAULT_VENTION_HEIGHT,
+    apply_vention_heights,
 )
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -61,6 +63,12 @@ def main():
         help="skip the dashboard power-on/brake-release sequence (already-running real hardware)")
     parser.add_argument("--no-viz", action="store_true",
                         help="disable the viser visualization")
+    parser.add_argument(
+        "--vention-height", type=float, default=DEFAULT_VENTION_HEIGHT,
+        help="physical vention rail height in meters for both arms (hardware does "
+             "not sense these joints; used for visualization FK)")
+    parser.add_argument("--left-vention-height", type=float, default=None)
+    parser.add_argument("--right-vention-height", type=float, default=None)
     args = parser.parse_args()
 
     if args.bring_up:
@@ -72,6 +80,16 @@ def main():
     config = ri.Configuration(MODEL, "hardware", args.hardware_config)
     interface = ri.RobotInterface(config)
     interface.initialize()
+
+    left_vention = args.left_vention_height if args.left_vention_height is not None else args.vention_height
+    right_vention = args.right_vention_height if args.right_vention_height is not None else args.vention_height
+    print(f"hardware does not report vention rails; drawing them at "
+          f"left={left_vention:.3f}m right={right_vention:.3f}m")
+
+    def q_with_vention():
+        return apply_vention_heights(
+            interface.get_system(), interface.get_state().get_position(),
+            left_vention, right_vention)
 
     task_space = interface.get_task_space(args.task_space)
     if task_space is None:
@@ -113,15 +131,14 @@ def main():
 
             robot = viz.add_robot(interface.get_system(),
                                   name="geodude", joint_sliders=False)
+            robot.update(q_with_vention())
 
             eeviz = viz.add_motor(home_ee_motor)
 
             def update():
-                q = interface.get_state().get_position()
+                q = q_with_vention()
                 robot.update(q)
-                position = q[joint_idx]
-                ee = task_space.compute_ee_motor(position)
-                eeviz.update(ee)
+                eeviz.update(task_space.compute_ee_motor(q[joint_idx]))
 
             viz.add_ticker(lambda: update())
 

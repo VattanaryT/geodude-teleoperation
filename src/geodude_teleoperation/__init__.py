@@ -12,6 +12,11 @@ from geodude_teleoperation.mesh_fixture import (
     read_ascii_pcd,
 )
 from geodude_teleoperation.spacemouse import SpaceMouseTeleop
+from geodude_teleoperation.vention import (
+    DEFAULT_VENTION_HEIGHT,
+    apply_vention_heights,
+    vention_dof_indices,
+)
 from geodude_teleoperation.virtual_fixture import OrientationField
 
 __all__ = [
@@ -26,4 +31,7 @@ __all__ = [
     "load_object_mesh",
     "load_points",
     "read_ascii_pcd",
+    "DEFAULT_VENTION_HEIGHT",
+    "apply_vention_heights",
+    "vention_dof_indices",
 ]
