@@ -49,6 +49,21 @@ class SpaceMouseTeleop:
             while self._running.is_set():
                 state = device.read()
 
+                # Drain any backlog: keep reading while the HID queue still has new reports
+                # waiting (state.t only advances inside pyspacemouse's _process(), i.e. only
+                # when read() actually consumed new data -- not just returned the cached
+                # state), so on_twist always acts on the freshest report rather than a
+                # queued-but-stale one. Without this, if the device emits reports faster than
+                # this loop polls, a backlog can build up and playback lags behind real-time --
+                # visible as the controlled object still moving for a while after the user
+                # releases the device. Bounded (not `while True`) so a device streaming faster
+                # than we can ever fully drain can't starve this loop of reaching on_twist/sleep.
+                for _ in range(64):
+                    previous_t = state.t
+                    state = device.read()
+                    if state.t == previous_t:
+                        break
+
                 axes = np.array([state.x, state.y, state.z, state.roll, state.pitch, state.yaw])
                 axes = np.where(np.abs(axes) < self._deadzone, 0.0, axes)
 

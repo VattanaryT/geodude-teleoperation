@@ -6,7 +6,6 @@ import time
 import gafropy as ga
 import numpy as np
 import yaml
-from diffused_fields.manifold._rotor_interop import as_scipy_rotation
 from gafropy import robot_interface as ri
 from gafropy import viz as gafropy_viz
 
@@ -17,7 +16,7 @@ from geodude_teleoperation import (
     OrientationField,
     SpaceMouseTeleop,
     compute_resting_orientation,
-    load_object_pointcloud,
+    load_object_mesh,
     load_points,
 )
 
@@ -118,16 +117,13 @@ def main():
     translation[2] = plane_z - \
         (rotated_centered[:, 2].min() + object_centroid_raw[2])
 
-    object_surface = load_object_pointcloud(
+    object_surface = load_object_mesh(
         args.object, rotation=rotation, translation=translation,
         normal_orientation=args.normal_orientation)
 
-    key_direction = as_scipy_rotation(
-        home_ee_motor.get_rotor()).as_matrix()[:, 0]
+    key_direction = np.asarray(home_ee_motor.get_rotor().to_rotation_matrix())[:, 0]
 
-    vf = OrientationField(
-        object_surface, key_direction=key_direction,
-        batch_size=256, max_iterations=48, convergence_threshold=0.001)
+    vf = OrientationField(object_surface, key_direction=key_direction)
 
     initial_target = vf.project(home_ee_motor)
 

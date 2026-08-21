@@ -5,11 +5,12 @@ requires-python = ">=3.10"
 dependencies = [
     "gafropy",
     "numpy",
+    "scipy",
     "viser",
     "trimesh",
     "rtree",
     "pyspacemouse",
-    "diffused_fields @ git+https://github.com/loewt/diffused_fields",
+    "pymeshlab",
 ]
 
 [project.optional-dependencies]

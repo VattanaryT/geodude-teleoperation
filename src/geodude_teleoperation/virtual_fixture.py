@@ -1,10 +1,6 @@
 import gafropy
 import numpy as np
-from diffused_fields.manifold._rotor_interop import as_scipy_rotation
-from diffused_fields.manifold.pointcloud import Pointcloud
-from diffused_fields.problem import DiffusionProblem
-from diffused_fields.solver import LaplacianSolver, WalkOnSpheresSolver, farthest_from_boundary_vertex
-from scipy.spatial.transform import Rotation
+from scipy.spatial import cKDTree
 
 
 def _orient_approach_into_surface(local_basis):
@@ -21,77 +17,174 @@ def _motor_position(motor):
 
 
 def _nlerp_matrices(old, new, t):
-    q_old = as_scipy_rotation(old).as_quat()
-    q_new = as_scipy_rotation(new).as_quat()
+    q_old = np.asarray(gafropy.Rotor.from_matrix(old).to_quaternion())
+    q_new = np.asarray(gafropy.Rotor.from_matrix(new).to_quaternion())
     if np.dot(q_old, q_new) < 0:
         q_new = -q_new
     q = (1 - t) * q_old + t * q_new
     q /= np.linalg.norm(q)
-    return Rotation.from_quat(q).as_matrix()
+    x, y, z, w = q
+    return np.asarray(gafropy.Rotor.from_quaternion(float(w), float(x), float(y), float(z)).to_rotation_matrix())
 
 
-def _subsample_boundary(pointcloud, num_points, seed):
-    n = min(num_points, len(pointcloud.vertices))
-    if n >= len(pointcloud.vertices):
-        return pointcloud
-    indices = np.random.default_rng(seed).choice(
-        len(pointcloud.vertices), size=n, replace=False)
-    boundary = Pointcloud(
-        vertices=pointcloud.vertices[indices].copy(), is_cluster_points=False)
-    boundary.local_bases = pointcloud.local_bases[indices].copy()
-    return boundary
+def _tangent_direction(mesh, vertex_index, reference):
+    """A unit tangent vector at a single vertex: `reference` projected onto that vertex's own
+    tangent plane, falling back to a different reference if nearly parallel to the normal."""
+    normal = np.asarray(mesh.vertex_normals[vertex_index])
+    ref = reference
+    if abs(np.dot(ref, normal)) > 0.99:
+        ref = np.array([1.0, 0.0, 0.0])
+    tangent = ref - np.dot(ref, normal) * normal
+    return tangent / np.linalg.norm(tangent)
+
+
+def _boundary_frame(tangent, normal):
+    """Exact orthonormal frame at a surface point: columns [tangent, y, normal]."""
+    t = tangent / np.linalg.norm(tangent)
+    n = normal - np.dot(normal, t) * t
+    n = n / np.linalg.norm(n)
+    y = np.cross(n, t)
+    y = y / np.linalg.norm(y)
+    return np.column_stack([t, y, n])
+
+
+def _quaternion_to_fiber_rotor(w, x, y, z):
+    """gafro's raw Cl(3,0,0) rotor representation (blade 0 = scalar, blade 3 = e12, blade 5 =
+    e13, blade 6 = e23) -- the representation RotorFieldDiffusion consumes directly -- from a
+    standard Hamilton quaternion. See gafropy's own rotor sign convention: blade0=w, blade3=-z,
+    blade5=y, blade6=-x."""
+    r = gafropy.FiberMultivector()
+    r.set(0, float(w))
+    r.set(3, -float(z))
+    r.set(5, float(y))
+    r.set(6, -float(x))
+    return r
+
+
+def _fiber_rotor_to_rotation_matrix(rotor):
+    w = rotor.get(0)
+    z = -rotor.get(3)
+    y = rotor.get(5)
+    x = -rotor.get(6)
+    return np.asarray(gafropy.Rotor.from_quaternion(float(w), float(x), float(y), float(z)).to_rotation_matrix())
+
+
+def _continuous_boundary_rotors(mesh, tangent, normal):
+    """Per-vertex boundary rotors (as gafropy.FiberMultivector), made sign-continuous across the
+    mesh via face-adjacency BFS -- needed because RotorFieldDiffusion's Riemannian mean is
+    sign-sensitive (R and -R are the same physical rotation but sit at S^3-geodesic distance pi
+    apart)."""
+    n = len(tangent)
+    quats_wxyz = np.zeros((n, 4))
+    for i in range(n):
+        cga_rotor = gafropy.Rotor.from_matrix(_boundary_frame(tangent[i], normal[i]))
+        x, y, z, w = cga_rotor.to_quaternion()
+        quats_wxyz[i] = [w, x, y, z]
+
+    fixed = np.zeros(n, dtype=bool)
+    faces = mesh.faces
+    num_faces = len(faces)
+    face_neighbors = [[] for _ in range(num_faces)]
+    for f1, f2 in mesh.face_adjacency:
+        face_neighbors[f1].append(f2)
+        face_neighbors[f2].append(f1)
+
+    face_visited = np.zeros(num_faces, dtype=bool)
+    for seed in range(num_faces):
+        if face_visited[seed]:
+            continue
+        face_visited[seed] = True
+        for v in faces[seed]:
+            fixed[v] = True
+        queue = [seed]
+        while queue:
+            f = queue.pop()
+            for nb in face_neighbors[f]:
+                if face_visited[nb]:
+                    continue
+                face_visited[nb] = True
+                queue.append(nb)
+                verts = faces[nb]
+                reference = next((v for v in verts if fixed[v]), None)
+                for v in verts:
+                    if fixed[v]:
+                        continue
+                    if reference is not None and np.dot(quats_wxyz[v], quats_wxyz[reference]) < 0.0:
+                        quats_wxyz[v] = -quats_wxyz[v]
+                    fixed[v] = True
+
+    return [_quaternion_to_fiber_rotor(*quats_wxyz[i]) for i in range(n)]
 
 
 class OrientationField:
+    """Ambient orientation field around a mesh's surface, via gafropy.RotorFieldDiffusion.
 
-    def __init__(self, pointcloud, key_direction, source_vertex=None,
-                 diffusion_scalar=100, smoothing=0.75, num_boundary_points=3000,
-                 boundary_seed=0, **wos_kwargs):
-        vertex = source_vertex if source_vertex is not None else farthest_from_boundary_vertex(pointcloud)
-        if not hasattr(pointcloud, "normals"):
-            pointcloud.get_normals()
+    A tangent direction (`key_direction`, projected onto a source vertex's tangent plane) is
+    diffused across the mesh surface via gafropy.ConnectionLaplacian (the Vector Heat Method)
+    into a per-vertex boundary rotor, combining tangent + surface normal. That boundary rotor
+    field is then extended into ambient R^3 via gafropy.RotorFieldDiffusion: a spatial-heat-
+    kernel-weighted Riemannian (Frechet-mean) average over the boundary rotors, which by
+    construction never leaves the unit-rotor manifold (see
+    gafro/geometry/RotorFieldDiffusion.hpp's own docstring for the exact math).
 
-        direction = np.asarray(key_direction, dtype=float)
-        normal = pointcloud.normals[vertex]
-        tangent = direction - np.dot(direction, normal) * normal
-        tangent_norm = np.linalg.norm(tangent)
-        if tangent_norm < 1e-9:
-            raise ValueError(
-                "OrientationField: key_direction is parallel to the surface "
-                "normal at the source vertex -- no tangential component left to diffuse"
-            )
-        tangent = tangent / tangent_norm
+    Deterministic -- unlike the previous diffused_fields Walk-on-Spheres implementation,
+    rerunning gives bit-for-bit identical results, and there is no Monte Carlo
+    batch_size/convergence_threshold to tune.
+    """
 
-        solver = LaplacianSolver(diffusion_scalar=diffusion_scalar)
-        tangent_problem = DiffusionProblem(
-            pointcloud, source_vertices=[vertex], source_values=tangent[np.newaxis, :])
-        tangent_field = solver.solve_vector(tangent_problem)
-        pointcloud.get_bases_from_tangent_vector_and_normal(tangent_field.values)
+    def __init__(self, mesh, key_direction, source_vertex=None, t_surface=None, t_spatial=None,
+                 num_boundary_samples=None, max_iterations=50, smoothing=0.75):
+        vertices = np.asarray(mesh.vertices, dtype=np.float64)
+        normals = np.asarray(mesh.vertex_normals, dtype=np.float64)
+        normals = normals / np.linalg.norm(normals, axis=1, keepdims=True)
+        mean_edge = float(mesh.edges_unique_length.mean())
 
-        wos_boundary = _subsample_boundary(
-            pointcloud, num_boundary_points, boundary_seed)
-        wos_kwargs.setdefault(
-            "convergence_threshold", pointcloud.get_mean_edge_length() * 2)
-        wos_solver = WalkOnSpheresSolver(**wos_kwargs)
+        vertex = source_vertex if source_vertex is not None else int(np.argmax(vertices[:, 2]))
 
-        self._pointcloud = pointcloud
-        self._solver = solver
-        self._field = wos_solver.solve_quaternion(DiffusionProblem(wos_boundary))
+        direction = np.asarray(key_direction, dtype=np.float64)
+        direction = direction / np.linalg.norm(direction)
+        v0 = _tangent_direction(mesh, vertex, direction)
+
+        complex_ = gafropy.SimplicialComplex.build_from_faces(len(vertices), mesh.faces.tolist())
+        connection = gafropy.ConnectionLaplacian.build(complex_, list(vertices))
+        t_surface = t_surface if t_surface is not None else 5.0 * connection.get_mean_edge_length_squared()
+
+        diffused = np.asarray(connection.diffuse_vector(v0, vertex, t_surface))
+        magnitude = np.linalg.norm(diffused, axis=1)
+        degenerate = magnitude < 1e-9
+        tangent = np.where(degenerate[:, None], v0[None, :], diffused / np.maximum(magnitude, 1e-30)[:, None])
+
+        rotors = _continuous_boundary_rotors(mesh, tangent, normals)
+
+        if num_boundary_samples is not None:
+            n = min(num_boundary_samples, len(vertices))
+            indices = np.unique(np.linspace(0, len(vertices) - 1, n, dtype=int))
+        else:
+            indices = np.arange(len(vertices))
+
+        positions = [vertices[i] for i in indices]
+        self._field = gafropy.RotorFieldDiffusion(positions, [rotors[i] for i in indices])
+        self._t_spatial = t_spatial if t_spatial is not None else mean_edge ** 2
+        self._max_iterations = max_iterations
+        self._kdtree = cKDTree(np.asarray(positions))
         self._smoothing = smoothing
         self._last_basis = np.eye(3)
         self._has_last = False
 
     def get_distance(self, position):
-        distances, _ = self._field.manifold.get_closest_points(
-            np.asarray(position)[np.newaxis, :])
-        return float(np.asarray(distances).reshape(-1)[0])
+        distance, _ = self._kdtree.query(np.asarray(position))
+        return float(distance)
 
     def project(self, proposed_reference):
         translator, position = _motor_position(proposed_reference)
 
         try:
-            local_basis = as_scipy_rotation(self._field(position)).as_matrix()
-        except ValueError:
+            rotor = self._field.diffuse(position, self._t_spatial, max_iterations=self._max_iterations)
+            local_basis = _fiber_rotor_to_rotation_matrix(rotor)
+        except RuntimeError:
+            # Every boundary sample's spatial weight underflowed to zero -- position too far
+            # from the object at this t_spatial. Fall back to the last known-good orientation
+            # rather than raising through this control-critical call path.
             local_basis = self._last_basis if self._has_last else np.eye(3)
 
         if self._has_last and self._smoothing > 0:

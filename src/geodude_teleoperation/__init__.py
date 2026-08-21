@@ -7,7 +7,7 @@ from geodude_teleoperation.controller import (
 from geodude_teleoperation.keyboard import KeyboardTeleop
 from geodude_teleoperation.mesh_fixture import (
     compute_resting_orientation,
-    load_object_pointcloud,
+    load_object_mesh,
     load_points,
     read_ascii_pcd,
 )
@@ -23,7 +23,7 @@ __all__ = [
     "KeyboardTeleop",
     "OrientationField",
     "compute_resting_orientation",
-    "load_object_pointcloud",
+    "load_object_mesh",
     "load_points",
     "read_ascii_pcd",
 ]
