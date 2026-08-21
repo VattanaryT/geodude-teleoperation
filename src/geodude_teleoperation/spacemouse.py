@@ -12,7 +12,7 @@ import numpy as np
 
 
 class SpaceMouseTeleop:
-    def __init__(self, linear_scale=0.05, angular_scale=0.5, deadzone=0.05, frequency=50.0):
+    def __init__(self, linear_scale=0.01, angular_scale=0.1, deadzone=0.05, frequency=50.0):
         self._linear_scale = linear_scale
         self._angular_scale = angular_scale
         self._deadzone = deadzone
