@@ -64,7 +64,7 @@ class SpaceMouseTeleop:
                     if state.t == previous_t:
                         break
 
-                axes = np.array([state.x, state.y, state.z, state.roll, state.pitch, state.yaw])
+                axes = np.array([-state.x, state.y, -state.z, state.yaw, -state.roll, state.pitch])
                 axes = np.where(np.abs(axes) < self._deadzone, 0.0, axes)
 
                 linear = axes[:3] * self._linear_scale

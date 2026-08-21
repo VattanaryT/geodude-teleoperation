@@ -22,16 +22,18 @@
 # not fixed here. examples/hardware_object_contact_teleop.py's two controllers are both
 # velocity controllers, so both stream speedj.
 #
-# script_file points at ur_client_library's standard from-source install location
-# (CMAKE_INSTALL_PREFIX=/usr/local, its default) -- override with --script-file if yours
-# lives elsewhere. For real hardware, just point robot_ip at each arm's actual IP and pass
-# --no-bring-up if it's already powered and running (the dashboard bring-up sequence here is
-# ursim-specific -- real arms are normally already brought up through PolyScope).
+# script_file is the URScript UrDriver pushes in headless_mode. This stack talks to the
+# controllers directly via ur_client_library (RTDE + reverse socket) -- do NOT also launch
+# ROS2 bimanual/ur_robot_driver on the same arms, or the two clients fight and the unused
+# arm often protective-stops with "position deviates from path". The file itself is shipped
+# by the ur_client_library package; on this machine that is the ROS Humble install, not the
+# from-source default of /usr/local/share/.... For already-powered real hardware, pass
+# --no-bring-up (the dashboard power-on/brake-release sequence is ursim-oriented).
 
 left_ur5e:
   driver: ur
-  robot_ip: 192.168.1.103
-  script_file: /usr/local/share/ur_client_library/resources/external_control.urscript
+  robot_ip: 192.168.1.3
+  script_file: /opt/ros/humble/share/ur_client_library/resources/external_control.urscript
   headless_mode: true
   reverse_port: 50001
   script_sender_port: 50002
@@ -40,8 +42,8 @@ left_ur5e:
 
 right_ur5e:
   driver: ur
-  robot_ip: 192.168.1.102
-  script_file: /usr/local/share/ur_client_library/resources/external_control.urscript
+  robot_ip: 192.168.1.2
+  script_file: /opt/ros/humble/share/ur_client_library/resources/external_control.urscript
   headless_mode: true
   reverse_port: 50011
   script_sender_port: 50012

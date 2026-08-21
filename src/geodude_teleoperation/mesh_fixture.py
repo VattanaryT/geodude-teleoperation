@@ -6,10 +6,12 @@
 # process, so pymeshlab's own bundled copy never gets the chance to shadow it. Reproduced and
 # confirmed directly: `python -c "import pymeshlab; import ssl"` fails with exactly this error;
 # `python -c "import ssl; import pymeshlab"` does not.
+#
+# pymeshlab itself is imported lazily in reconstruct_mesh_from_points: free-space teleop (and
+# any other caller that never reconstructs a point cloud) must not require it at package import.
 import ssl  # noqa: F401
 
 import numpy as np
-import pymeshlab
 import trimesh
 from scipy.spatial.transform import Rotation
 
@@ -31,8 +33,8 @@ def read_ascii_pcd(path):
             if not in_data:
                 if line.startswith("DATA"):
                     if "ascii" not in line:
-                        raise ValueError(f"read_ascii_pcd: {
-                                         path} is not ASCII-encoded (binary .pcd not supported)")
+                        raise ValueError(
+                            f"read_ascii_pcd: {path} is not ASCII-encoded (binary .pcd not supported)")
                     in_data = True
                 continue
             values = line.split()
@@ -58,6 +60,13 @@ def reconstruct_mesh_from_points(points: np.ndarray) -> trimesh.Trimesh:
     stack (SimplicialComplex/ConnectionLaplacian) requires genuine triangle faces -- so raw
     point-cloud input (e.g. a .pcd scan) is triangulated once here instead of diffused directly.
     """
+    try:
+        import pymeshlab
+    except ImportError as exc:
+        raise ImportError(
+            "pymeshlab is required to reconstruct a mesh from a point cloud. "
+            "Install it with: pip install pymeshlab"
+        ) from exc
     ms = pymeshlab.MeshSet()
     ms.add_mesh(pymeshlab.Mesh(vertex_matrix=points))
     ms.compute_normal_for_point_clouds()

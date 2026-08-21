@@ -120,8 +120,8 @@ def main():
 
     try:
         if args.no_viz:
-            print(f"Teleoperating the line on '{
-                  robot_cfg['task_space']}' (headless). Ctrl+C to quit.")
+            print(
+                f"Teleoperating the line on '{robot_cfg['task_space']}' (headless). Ctrl+C to quit.")
             while True:
                 time.sleep(0.1)
         else:
@@ -151,8 +151,8 @@ def main():
 
             viz.add_ticker(lambda: update())
 
-            viz.show(message=f"Teleoperating the line on '{
-                     robot_cfg['task_space']}'. viser running at http://localhost:{viz.port} -- ctrl-c to quit.")
+            viz.show(
+                message=f"Teleoperating the line on '{robot_cfg['task_space']}'. viser running at http://localhost:{viz.port} -- ctrl-c to quit.")
     except KeyboardInterrupt:
         pass
     finally:
