@@ -7,9 +7,11 @@ import time
 from pathlib import Path
 from typing import Sequence
 
+from geodude_teleoperation.df_runtime import prefer_env_diffused_fields
 from geodude_teleoperation.paths import (
     default_ply_path,
     default_T_tag0_base_path,
+    resolve_repo_path,
     ssot_dof_config_path,
 )
 from geodude_teleoperation.ssot_dof import load_flat_ssot
@@ -31,7 +33,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     pre_args, remaining = pre.parse_known_args(
         list(argv) if argv is not None else None
     )
-    cfg_path = pre_args.config if pre_args.config is not None else ssot_dof_config_path()
+    if pre_args.config is not None:
+        cfg_path = resolve_repo_path(pre_args.config) or Path(pre_args.config)
+    else:
+        cfg_path = ssot_dof_config_path()
     try:
         flat = load_flat_ssot(cfg_path)
     except FileNotFoundError as exc:
@@ -836,6 +841,7 @@ def run_rtde(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    prefer_env_diffused_fields(warn=True)
     args = parse_args(argv)
     validate_args(args)
 

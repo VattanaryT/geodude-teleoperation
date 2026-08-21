@@ -235,11 +235,19 @@ def open(
     dry_run: bool,
     accel: float = 0.5,
     speedj_time: float = 0.02,
+    control_frequency: float | None = None,
 ) -> RtdeTeleopSession:
     global _active_session
     RTDEControlInterface, RTDEReceiveInterface = _import_rtde()
     receive = RTDEReceiveInterface(str(ip))
-    control = None if dry_run else RTDEControlInterface(str(ip))
+    control = None
+    if not dry_run:
+        # DTC needs the control script paced at robot Hz (500 on e-Series).
+        freq = -1.0 if control_frequency is None else float(control_frequency)
+        try:
+            control = RTDEControlInterface(str(ip), freq)
+        except TypeError:
+            control = RTDEControlInterface(str(ip))
     session = RtdeTeleopSession(
         ip,
         receive,
@@ -557,6 +565,17 @@ def should_run_dry_vf_query(now: float, last_t: float, period_s: float) -> bool:
     return (float(now) - float(last_t)) >= max(0.0, float(period_s))
 
 
+def sync_vf_freeze_with_n_star(vf, n_frozen: bool) -> None:
+    """Mirror contact ``n_frozen`` onto the VF (WoS on during ALIGN, off in SEEK).
+
+    ``freeze_n_on_arm`` locks ``R*`` when SEEK starts; ``f`` toggles immediately.
+    Without this, Walk-on-Spheres still runs every relock after the lock.
+    """
+    setter = getattr(vf, "set_frozen", None)
+    if callable(setter):
+        setter(bool(n_frozen))
+
+
 def should_run_vf_query(
     *,
     dry_run: bool,
@@ -575,6 +594,9 @@ def should_run_vf_query(
     post-settle hold, and VF freeze (``f``). A multi-100ms query blocks
     ``speedJ``, the watchdog zeros q̇, then catch-up looks like oscillation.
     Dry-run still uses ``dry_query_period_s``.
+
+    When VF is already ``set_frozen`` (in-contact ``n*`` freeze), callers may
+    still invoke ``update_from_state`` — that path is a cache hit (no WoS).
     """
     if has_lock_R_star and (orient_locking or awaiting_approve or vf_frozen):
         return False
@@ -812,6 +834,7 @@ def run_rtde_loop(
     from geodude_teleoperation.teleop.direct_torque import (
         DirectTorqueBridge,
         HostDirectTorqueStreamer,
+        install_dtc_latch_control_script,
         print_control_rate_report,
         print_dtc_rate_verification,
         polyscope_supports_dtc,
@@ -837,8 +860,11 @@ def run_rtde_loop(
     from geodude_teleoperation.teleop.contact_teleop import (
         ContactTeleopBridge,
         config_from_args as contact_cfg_from_args,
+        is_dtc_actuation,
+        is_dtc_pure_actuation,
         vf_R_field_or_none,
         vf_approach_R,
+        print_pendant_tcp_dbg,
     )
     from geodude_teleoperation.teleop.keyboard import (
         contact_field_linear_from_twist_coeffs,
@@ -855,7 +881,7 @@ def run_rtde_loop(
     contact_use_dtc = False
     if in_contact:
         contact_bridge = ContactTeleopBridge(contact_cfg_from_args(args))
-        contact_use_dtc = contact_bridge.actuation == "dtc"
+        contact_use_dtc = is_dtc_actuation(contact_bridge.actuation)
         from geodude_teleoperation.teleop.contact_teleop import print_actuation_banner
 
         print_actuation_banner(
@@ -995,19 +1021,42 @@ def run_rtde_loop(
         dry_run=args.dry_run,
         accel=args.rtde_accel,
         speedj_time=1.0 / args.control_hz,
+        control_frequency=500.0 if contact_use_dtc else None,
     )
 
     dtc_streamer: HostDirectTorqueStreamer | None = None
+    dtc_latch_ok = False
     if contact_use_dtc and session.control_open and not args.dry_run:
+        try:
+            latch_path = install_dtc_latch_control_script(session._control)
+            dtc_latch_ok = True
+            print(
+                "\033[93mWARNING: uploaded on-robot DTC latch script "
+                f"({latch_path.name}) — τ held @ 500 Hz; host publishes @ "
+                f"{float(args.control_hz):g} Hz.\033[0m",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                "\033[91mERROR: failed to install DTC latch script "
+                f"({exc}). Falling back to host-500 streamer — expect "
+                "dtc_hz ≪ 500 and no motion.\033[0m",
+                flush=True,
+            )
+        pub_hz = float(args.control_hz) if dtc_latch_ok else 500.0
         dtc_streamer = HostDirectTorqueStreamer(
-            session._control, friction_comp=True, target_hz=500.0
+            session._control,
+            friction_comp=True,
+            target_hz=pub_hz,
+            robot_latch=dtc_latch_ok,
         )
-        print(
-            "\033[93mWARNING: DTC needs ~500 Hz directTorque; "
-            f"main control.hz={float(args.control_hz):g} only latches τ — "
-            "host streamer will run at 500 Hz when armed.\033[0m",
-            flush=True,
-        )
+        if not dtc_latch_ok:
+            print(
+                "\033[93mWARNING: DTC needs ~500 Hz directTorque; "
+                f"main control.hz={float(args.control_hz):g} only latches τ — "
+                "host streamer will run at 500 Hz when armed.\033[0m",
+                flush=True,
+            )
 
     if verify_500 is True:
         if args.dry_run or not session.control_open:
@@ -1176,8 +1225,10 @@ def run_rtde_loop(
         elif index == 2:
             if contact_bridge is not None:
                 frozen = contact_bridge.toggle_freeze()
+                sync_vf_freeze_with_n_star(vf, frozen)
                 print(
-                    f"info: n* freeze={format_toggle(frozen)}",
+                    f"info: n* freeze={format_toggle(frozen)}  "
+                    f"VF queries={format_toggle(not frozen, on_label='ON', off_label='FROZEN')}",
                     flush=True,
                 )
                 return
@@ -1288,6 +1339,7 @@ def run_rtde_loop(
     tcp_sim: np.ndarray | None = None
     T_flange_tcp: np.ndarray | None = None
     last_dry_vf_query_t = float("-inf")
+    last_async_vf_t = float("-inf")
     dry_vf_period_s = float(getattr(args, "vf_dry_query_period_s", 1.0))
 
     try:
@@ -1653,8 +1705,23 @@ def run_rtde_loop(
                 and orient_lock.R_star is not None,
             )
             if run_vf_query:
-                vf.update_from_state(ee, T_tag0_base)
+                # In-contact ALIGN must not block this 50 Hz tick on WoS
+                # (query_ms≈2 s). Cache here; live n* refreshes on a worker.
+                contact_armed = bool(
+                    contact_bridge is not None
+                    and (contact_bridge.armed or pending_contact_arm["arm"])
+                )
+                vf.update_from_state(ee, T_tag0_base, allow_wos=not contact_armed)
                 last_dry_vf_query_t = now
+                if (
+                    contact_armed
+                    and not contact_bridge.n_frozen
+                    and hasattr(vf, "query_async")
+                    and (now - last_async_vf_t)
+                    >= max(0.2, float(getattr(vf, "_relock_period_s", 0.5)))
+                ):
+                    if vf.query_async(ee, T_tag0_base):
+                        last_async_vf_t = now
                 if (
                     args.dry_run
                     and sim_active
@@ -1722,10 +1789,23 @@ def run_rtde_loop(
                     force_bias_samples=bias_samples,
                     wrench_bias_samples=wrench_bias,
                 )
+                try:
+                    T_fl_arm, _ = forward_kinematics(live_q)
+                    print_pendant_tcp_dbg(
+                        p_tcp,
+                        T_fl_arm[:3, 3],
+                        getattr(args, "tip_offset", None),
+                    )
+                except Exception:
+                    pass
+                # ALIGN: n* live via async WoS (control thread never blocks).
+                # SEEK / f: freeze VF so the 50 Hz tick stays a cache hit.
+                sync_vf_freeze_with_n_star(vf, contact_bridge.n_frozen)
                 print(
                     f"info: in-contact armed (Fd={contact_bridge.cfg.desired_force_n:g} N, "
                     f"force_sign={contact_bridge.cfg.force_sign:g}, "
                     f"n_freeze={int(contact_bridge.n_frozen)}, "
+                    f"vf_frozen={int(bool(getattr(vf, 'frozen', False)))}, "
                     f"phase={contact_bridge.phase}, "
                     f"actuation={contact_bridge.actuation}, "
                     f"send_ok={int(send_ok)} tf_ok={int(tf_ok)} fault={int(fault)} "
@@ -1737,15 +1817,25 @@ def run_rtde_loop(
                         session.zero_speed()
                     except Exception:
                         pass
-                    # Do not start DTC streamer yet — align + free-space seek use speedJ.
-                    print(
-                        "\033[93mWARNING: DTC hybrid — DualLoop speedJ for align/"
-                        f"approach until Fs≥contact; "
-                        f"geom gate d≤{contact_bridge.cfg.dtc_contact_dist_m:g} m, "
-                        "then Eq.56 directTorque.\033[0m",
-                        flush=True,
-                    )
-                    contact_bridge._dtc_first_tau_logged = False
+                    if is_dtc_pure_actuation(contact_bridge.actuation):
+                        print(
+                            "\033[93mWARNING: DTC_PURE — ALIGN=W_L only; "
+                            "SEEK=W_L+W_C; τ slew=dtc_max_dtau_nm_s "
+                            "(control.* vel/accel are speedJ-only).\033[0m",
+                            flush=True,
+                        )
+                        contact_bridge._dtc_first_tau_logged = False
+                    else:
+                        # Hybrid: do not start DTC streamer yet — align +
+                        # free-space seek use speedJ.
+                        print(
+                            "\033[93mWARNING: DTC hybrid — DualLoop speedJ for align/"
+                            f"approach until Fs≥contact; "
+                            f"geom gate d≤{contact_bridge.cfg.dtc_contact_dist_m:g} m, "
+                            "then Eq.56 directTorque.\033[0m",
+                            flush=True,
+                        )
+                        contact_bridge._dtc_first_tau_logged = False
                 elif contact_use_dtc and not send_ok:
                     print(
                         "\033[93mWARNING: DTC armed but send_ok=0 "
@@ -1839,8 +1929,10 @@ def run_rtde_loop(
                                 qdot_meas = np.zeros(6, dtype=float)
                         if contact_use_dtc:
                             sd = None
+                            tip_nn = None
                             if isinstance(vf.status, dict):
                                 sd = vf.status.get("signed_d")
+                                tip_nn = vf.status.get("tip_nn")
                             qdot = contact_bridge.step(
                                 p_tcp=p_tcp,
                                 R_tcp=R_tcp,
@@ -1851,6 +1943,9 @@ def run_rtde_loop(
                                 wrench6=ft6,
                                 qdot_meas=qdot_meas,
                                 signed_d=float(sd) if sd is not None else None,
+                                tip_nn=float(tip_nn)
+                                if tip_nn is not None
+                                else None,
                             )
                         else:
                             qdot = contact_bridge.step(
@@ -1861,6 +1956,7 @@ def run_rtde_loop(
                                 jacobian=J_tcp,
                                 dt=dt,
                             )
+                        sync_vf_freeze_with_n_star(vf, contact_bridge.n_frozen)
                         control_diag = dict(contact_bridge.last_diag or {})
                         if float(control_diag.get("phase_changed", 0.0)) > 0.5:
                             ph = (
@@ -1967,10 +2063,14 @@ def run_rtde_loop(
                     ):
                         d = contact_bridge.last_diag or {}
                         aligning = float(d.get("phase_align", 0.0)) > 0.5
-                        use_speedj = (
-                            aligning
-                            or float(d.get("dtc_use_speedj", 0.0)) > 0.5
-                            or str(d.get("actuation", "")).endswith("speedj")
+                        # dtc_pure air SEEK sets dtc_use_speedj; hybrid ALIGN/SEEK
+                        # air also uses speedJ. Do not gate pure on actuation name.
+                        use_speedj = float(d.get("dtc_use_speedj", 0.0)) > 0.5 or (
+                            not is_dtc_pure_actuation(contact_bridge.actuation)
+                            and (
+                                aligning
+                                or str(d.get("actuation", "")).endswith("speedj")
+                            )
                         )
                         if use_speedj:
                             # Align / free-space seek via DualLoop speedJ.
@@ -2021,36 +2121,61 @@ def run_rtde_loop(
                             if age > watchdog_s:
                                 tau = np.zeros(6, dtype=float)
                             if dtc_streamer is not None:
-                                dtc_streamer.set_tau(tau)
-                                if not dtc_streamer.active:
-                                    try:
-                                        session.zero_speed()
-                                    except Exception:
-                                        pass
-                                    dtc_streamer.start()
-                                st = dtc_streamer.stats()
-                                if st["n_fail"] > 0 and (
-                                    st["n_fail"] == 1 or st["n_fail"] % 250 == 0
-                                ):
-                                    print(
-                                        f"warning: DTC streamer fail "
-                                        f"n_fail={st['n_fail']} n_ok={st['n_ok']}: "
-                                        f"{st['last_error']}",
-                                        flush=True,
+                                # Never arm DTC with near-zero τ under SEEK load
+                                # (speedStop + τ≈0 → path deviation). Hold speedJ.
+                                tau_n = float(np.linalg.norm(tau))
+                                min_start = max(
+                                    0.5,
+                                    0.25
+                                    * float(
+                                        getattr(
+                                            contact_bridge.cfg,
+                                            "dtc_startup_tau_nm",
+                                            5.0,
+                                        )
+                                    ),
+                                )
+                                if not dtc_streamer.active and tau_n < min_start:
+                                    session.speedj(
+                                        np.zeros(6),
+                                        float(general_limits.rtde_accel),
                                     )
+                                    qdot_norm = 0.0
+                                else:
+                                    dtc_streamer.set_tau(tau)
+                                    if not dtc_streamer.active:
+                                        try:
+                                            session.zero_speed()
+                                        except Exception:
+                                            pass
+                                        dtc_streamer.start()
+                                    st = dtc_streamer.stats()
+                                    if st["n_fail"] > 0 and (
+                                        st["n_fail"] == 1
+                                        or st["n_fail"] == 5
+                                        or st["n_fail"] % 50 == 0
+                                    ):
+                                        print(
+                                            f"warning: DTC streamer fail "
+                                            f"n_fail={st['n_fail']} "
+                                            f"n_ok={st['n_ok']}: "
+                                            f"{st['last_error']}",
+                                            flush=True,
+                                        )
+                                    qdot_norm = float(np.linalg.norm(tau))
                             else:
                                 session.direct_torque(tau)
-                            qdot_norm = float(np.linalg.norm(tau))
+                                qdot_norm = float(np.linalg.norm(tau))
                             send_qdot = np.zeros(6)
-                            if not getattr(
-                                contact_bridge, "_dtc_first_tau_logged", True
+                            if (
+                                dtc_streamer is not None
+                                and dtc_streamer.active
+                                and not getattr(
+                                    contact_bridge, "_dtc_first_tau_logged", True
+                                )
                             ):
                                 contact_bridge._dtc_first_tau_logged = True
-                                st = (
-                                    dtc_streamer.stats()
-                                    if dtc_streamer is not None
-                                    else {}
-                                )
+                                st = dtc_streamer.stats()
                                 print(
                                     f"info: DTC seek τ ‖τ‖={qdot_norm:.4f} Nm  "
                                     f"ang_z={d.get('ang_z_deg', float('nan')):.1f}deg  "
@@ -2093,6 +2218,7 @@ def run_rtde_loop(
                         f"Fd={d.get('Fd_N', float('nan')):.2f}  "
                         f"Fs={d.get('Fs_comp', d.get('Fs_ee_z', d.get('Fs_N', float('nan')))):.2f}  "
                         f"W_C={d.get('W_C_norm', float('nan')):.2f}  "
+                        f"W_tan={d.get('W_tan_norm', d.get('v_tan_norm', float('nan'))):.2f}  "
                         f"f_b=[{d.get('f_cmd_base_x', float('nan')):.1f},"
                         f"{d.get('f_cmd_base_y', float('nan')):.1f},"
                         f"{d.get('f_cmd_base_z', float('nan')):.1f}]  "
@@ -2102,10 +2228,24 @@ def run_rtde_loop(
                     )
                     if contact_use_dtc and dtc_streamer is not None:
                         st = dtc_streamer.stats()
+                        hz = st.get("measured_hz", float("nan"))
+                        hz_s = f"{hz:.0f}" if hz == hz else "n/a"
+                        latch = int(bool(st.get("robot_latch")))
+                        scale = d.get("command_scale", float("nan"))
+                        scale_s = f"{scale:.2f}" if scale == scale else "n/a"
+                        tlim = d.get("max_tau_limit", float("nan"))
+                        tlim_s = f"{tlim:.1f}" if tlim == tlim else "n/a"
                         line += (
                             f"  act={d.get('actuation', 'dtc')}  "
                             f"dtc_on={int(bool(st.get('active')))}  "
-                            f"dtc_ok={st['n_ok']} fail={st['n_fail']}"
+                            f"dtc_ok={st['n_ok']} fail={st['n_fail']}  "
+                            f"dtc_hz={hz_s}  dtc_latch={latch}  "
+                            f"scale={scale_s}  tau_cap={tlim_s}  "
+                            f"F={'1' if float(d.get('force_enable', 0)) > 0.5 else '0'}  "
+                            f"air={int(float(d.get('in_air', 0)) > 0.5)}  "
+                            f"W_L={float(d.get('W_L_norm', float('nan'))):.2f}  "
+                            f"slew={int(float(d.get('tau_slew', 0)) > 0.5)}  "
+                            f"cga={int(float(d.get('cga_tan', 0)) > 0.5)}"
                         )
                     elif contact_use_dtc:
                         line += f"  act={d.get('actuation', 'dtc')}"

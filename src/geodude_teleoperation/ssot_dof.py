@@ -6,7 +6,7 @@ from typing import Any, Mapping
 
 import yaml
 
-from geodude_teleoperation.paths import ssot_dof_config_path
+from geodude_teleoperation.paths import resolve_repo_path, ssot_dof_config_path
 
 # Nested YAML path → argparse / Namespace attribute name used by teleop + viz.
 _FLAT_MAP: tuple[tuple[str, str], ...] = (
@@ -137,6 +137,14 @@ _FLAT_MAP: tuple[tuple[str, str], ...] = (
     ("in_contact.force_max_v", "force_max_v"),
     ("in_contact.dtc_contact_dist_m", "dtc_contact_dist_m"),
     ("in_contact.dtc_require_force", "dtc_require_force"),
+    ("in_contact.dtc_min_fs_frac_of_fd", "dtc_min_fs_frac_of_fd"),
+    ("in_contact.dtc_exit_fs_frac_of_enter", "dtc_exit_fs_frac_of_enter"),
+    ("in_contact.dtc_min_hold_s", "dtc_min_hold_s"),
+    ("in_contact.dtc_exit_hold_s", "dtc_exit_hold_s"),
+    ("in_contact.dtc_startup_ramp_s", "dtc_startup_ramp_s"),
+    ("in_contact.dtc_startup_tau_nm", "dtc_startup_tau_nm"),
+    ("in_contact.dtc_max_dtau_nm_s", "dtc_max_dtau_nm_s"),
+    ("in_contact.approach_stiffness_n_per_m", "approach_stiffness_n_per_m"),
     ("in_contact.tangent_scale", "tangent_scale"),
     ("in_contact.tangent_hold_s", "tangent_hold_s"),
     ("in_contact.max_linear_m_s", "contact_max_linear_m_s"),
@@ -199,6 +207,13 @@ def flatten_ssot(cfg: Mapping[str, Any]) -> dict[str, Any]:
         "in_contact.wrench_kd": 0.0,
         "in_contact.tangent_force_gain": 50.0,
         "in_contact.max_tau_nm": 20.0,
+        "in_contact.max_wrench_n": 12.0,
+        "in_contact.dtc_contact_dist_m": 0.008,
+        "in_contact.dtc_require_force": True,
+        "in_contact.dtc_startup_ramp_s": 3.0,
+        "in_contact.dtc_startup_tau_nm": 2.0,
+        "in_contact.dtc_max_dtau_nm_s": 8.0,
+        "in_contact.approach_stiffness_n_per_m": 400.0,
         "in_contact.K_line": None,
         "in_contact.D_twist": None,
     }
@@ -260,7 +275,7 @@ def flatten_ssot(cfg: Mapping[str, Any]) -> dict[str, Any]:
         if val is None or val == "":
             out[key] = None
         else:
-            out[key] = Path(val)
+            out[key] = resolve_repo_path(val)
 
     # YAML 1.1 may parse bare off/on as bool — normalize viz.laser.
     laser = out.get("viz_laser")

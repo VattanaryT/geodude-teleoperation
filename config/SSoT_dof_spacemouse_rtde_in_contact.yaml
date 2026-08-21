@@ -1,10 +1,12 @@
 # =============================================================================
 # Snapshot: SpaceMouse live RTDE in-contact (2026-08-13)
 # =============================================================================
-# Dual path: in_contact.actuation = speedj | dtc
-#   speedj — DualLoop tip twist → q̇ → RTDE speedJ
-#   dtc    — hybrid: DualLoop speedJ for align + approach/teleop until Fs shows
-#            compression (≥ force_contact_threshold_N); then Eq.56 directTorque
+# Dual path: in_contact.actuation = speedj | dtc | dtc_pure
+#   speedj   — DualLoop tip twist → q̇ → RTDE speedJ
+#   dtc      — hybrid: DualLoop speedJ for align + approach/teleop until Fs shows
+#              compression (≥ force_contact_threshold_N); then Eq.56 directTorque
+#   dtc_pure — Eq.56 ALIGN=W_L only, SEEK=W_L+W_C; τ slew via dtc_max_dtau_nm_s
+#              (control.max_joint_velocity / rtde_accel are speedJ-only)
 # Yellow terminal banner states the active actuation on start / Enter.
 #
 # Replay:
@@ -65,6 +67,8 @@ control:
   # Contact DualLoop still commands speedJ — keep ‖q̇‖ modest.
   max_joint_velocity: 0.5
   rtde_accel: 0.5
+  # NOTE: max_joint_velocity / rtde_accel / startup_* apply to speedJ only.
+  # dtc_pure ignores them — use in_contact.dtc_max_dtau_nm_s + dtc_startup_*.
   pose_gain: 4.0
   max_linear_speed: 0.05
   max_angular_speed: 0.4
@@ -76,9 +80,11 @@ control:
   orient_lock_tol_deg: 2.0
   keyboard_step: 0.01
   spacemouse: true
-  spacemouse_linear_scale: 0.01
+  # Contact SM feel: tip ≈ linear_scale × tangent_scale (m/s at full deflect).
+  # Was 0.01×8≈0.08; raise both if still sluggish after DTC handoff.
+  spacemouse_linear_scale: 0.03
   spacemouse_angular_scale: 0.05
-  spacemouse_deadzone: 0.08
+  spacemouse_deadzone: 0.05
   spacemouse_hz: 50.0
   spacemouse_axis_sign: [1, -1, -1, 1, 1, 1]
   spacemouse_path: null
@@ -121,6 +127,7 @@ record:
   plot_motion: false
 
 line_tracking:
+  # Free-space only. Forced OFF when in_contact.enabled (do not tune here).
   enabled: false
   soft_standoff: false
   standoff_distance: 0.002
@@ -129,8 +136,9 @@ line_tracking:
   no_keyboard_normal_ff: false
 
 tactile:
+  # Free-space Phase-3a only. Forced OFF when in_contact.enabled.
+  # desired_normal_force is a fallback Fd if in_contact.desired_force is unset.
   enabled: false
-  # Free-space tactile path only; DualLoop Fd is in_contact.desired_force.
   desired_normal_force: 5.0
   wrench_kp: 0.02
   wrench_ki: 0.0
@@ -141,33 +149,52 @@ tactile:
 
 in_contact:
   enabled: true
-  # speedj = DualLoop→q̇; dtc = Eq.56/pygafro→directTorque (yellow banner on start)
+  # speedj | dtc (hybrid) | dtc_pure (Eq.56; ALIGN=W_L only, SEEK=W_L+W_C)
+  # dtc_pure uploads on-robot DTC latch (500 Hz); host publishes τ @ control.hz
   actuation: dtc
-  # DTC handoff: require real compression (Fs), not VF d alone (Polyscope mismatch).
+  # DTC hybrid: handoff ONLY when |Fs| ≥ max(threshold, frac·Fd). Geom alone
+  # must not trigger DTC (early handoff dumped |τ|=max and killed RTDE).
   dtc_contact_dist_m: 0.015
   dtc_require_force: true
+  # Stay on DualLoop until |Fs| ≥ max(threshold, frac·Fd) — teleop + approach live.
+  dtc_min_fs_frac_of_fd: 0.25
+  # Once on DTC, stay until |Fs| < exit_frac × enter (kills DualLoop↔DTC bounce).
+  dtc_exit_fs_frac_of_enter: 0.35
+  # Ignore brief Fs dips after handoff (speedJ→DTC bounce).
+  dtc_min_hold_s: 3
+  dtc_exit_hold_s: 0.35
+  # Soft τ ramp after first DTC handoff (not reset on hysteresis dips).
+  dtc_startup_ramp_s: 1.5
+  dtc_startup_tau_nm: 8.0
+  # DTC analog of control.rtde_accel: max ‖Δτ‖/dt [Nm/s]. Applies to hybrid too.
+  dtc_max_dtau_nm_s: 20.0
   # -------------------------------------------------------------------------
   # Force / wrench (DTC uses wrench_*; speedj uses force_kp → v∥)
   # -------------------------------------------------------------------------
-  desired_force: 5.0              # Fd [N]
-  force_sign: 1.0                 # Fs = sign · (F−bias)·n*; −1 if Enter seeks away
-  force_kp: 0.001                 # speedj only: (m/s) / N
+  desired_force: 20.0              # Fd [N] — raise toward 70 after stable DTC
+  # Prefer +1 when DualLoop builds Fs>0 under load (earlier run: Fs≈+45).
+  # Use -1 only if status shows WARN=force_sign? with large negative Fs.
+  force_sign: -1.0
+  force_kp: 0.0005                # slower DualLoop approach (anti-slam)
   force_ki: 0.0
   force_kd: 0.0
   force_deadband_N: 0.35
   force_lpf_hz: 5.0
   force_contact_threshold_N: 0.6
   wrench_in_tool_frame: true
-  wrench_kp: 0.25                 # dtc normal-force PID only (was 1.0 → τ saturate)
+  wrench_kp: 0.25
   wrench_ki: 0.0
   wrench_kd: 0.0
-  tangent_force_gain: 50.0        # N per (m/s) tangent → W_tan
-  max_tau_nm: 20.0                # joint ‖τ‖ clamp; 40 let W_C wind into hard push
-  max_wrench_n: 12.0              # clamp ‖W_C‖ force (N)
-  K_line: [30.0, 30.0, 30.0, 750.0, 750.0, 300.0]
+  tangent_force_gain: 350.0       # N per (m/s) tangent — more SM feel under DTC
+  max_tau_nm: 15.0                # bring-up cap (was 40 — overshoot yank)
+  max_wrench_n: 25.0
+  # Air SEEK: f = max(Fd, k·signed_d) along n* [N/m]. Closes gap when Fd alone stalls.
+  approach_stiffness_n_per_m: 100.0
+  # Linear K_line now used: Align orbits behind pendant TCP so proximal joints help.
+  K_line: [200.0, 200.0, 200.0, 80.0, 80.0, 80.0]
   D_twist: [10.0, 10.0, 10.0, 150.0, 150.0, 50.0]
-  approach_v_max: 0.006
-  force_max_v: 0.010
+  approach_v_max: 0.03           # 3 mm/s DualLoop crawl near surface
+  force_max_v: 0.006
   # -------------------------------------------------------------------------
   # Align (speedj DualLoop) / phase gate (both)
   # -------------------------------------------------------------------------
@@ -183,11 +210,14 @@ in_contact:
   # -------------------------------------------------------------------------
   # Tangent FF
   # -------------------------------------------------------------------------
-  tangent_scale: 8.0
+  tangent_scale: 12.0             # with SM linear_scale 0.03 → snappier tip
   tangent_hold_s: 0.12
-  max_linear_m_s: 0.04
+  max_linear_m_s: 0.06
   max_angular_deg_s: 12.0
   damping: 0.05
+  # ALIGN always re-queries the field at the tip so n* stays on the current
+  # end-line as the TCP rotates. Lock that live n* when SEEK / force starts.
+  # Press f to freeze/unfreeze immediately.
   freeze_n_on_arm: true
   bias_skip_load_N: 2.0
 

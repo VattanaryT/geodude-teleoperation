@@ -1,6 +1,11 @@
 import numpy as np
 import trimesh
-from diffused_fields.manifold.pointcloud import Pointcloud
+
+from geodude_teleoperation.df_runtime import prefer_env_diffused_fields
+
+prefer_env_diffused_fields()
+
+from diffused_fields.manifold.pointcloud import Pointcloud  # noqa: E402
 from scipy.spatial.transform import Rotation
 
 

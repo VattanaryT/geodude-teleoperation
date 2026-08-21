@@ -31,7 +31,7 @@ paths:
   record_output_dir: null
 
 pointcloud:
-  voxel_size: 0.001
+  voxel_size: 0.01
   normal_orientation: 1
 
 field:
@@ -39,11 +39,11 @@ field:
   flow: width
   end_line_fraction: 0.06
   swap_end_lines: false
-  diffusion_scalar: 500.0
+  diffusion_scalar: 50.0
 
 wos:
-  batch_size: 16
-  convergence_threshold_edge_mult: 0.75
+  batch_size: 128
+  convergence_threshold_edge_mult: 2.0
 
 query:
   contact_threshold_m: 0.001
@@ -51,7 +51,7 @@ query:
   fit_mode: sphere
 
 vf:
-  r_field_smoothing: 0.2
+  r_field_smoothing: 0.5
   relock_dist_m: 0.1
   relock_period_s: 0.5
   # Clipped to [0, 1] in code; 10.0 → snap R_motion to R_field
@@ -65,8 +65,8 @@ control:
   max_joint_velocity: 1.0
   rtde_accel: 1.0
   pose_gain: 4.0
-  max_linear_speed: 0.05
-  max_angular_speed: 0.4
+  max_linear_speed: 3.0
+  max_angular_speed: 1.0
   orient_lock_on_enable: true
   startup_max_joint_velocity: 0.15
   startup_rtde_accel: 0.15
@@ -83,7 +83,7 @@ control:
   # Device poll Hz. null → follow control.hz.
   spacemouse_hz: 50.0
   # [x, y, z, roll, pitch, yaw]; flip an axis with -1 if it feels inverted.
-  spacemouse_axis_sign: [1, -1, 1, 1, 1, 1]
+  spacemouse_axis_sign: [1, -1, -1, 1, 1, 1]
   # HID path, or null for auto. List devices: pyspacemouse --list-spacemouse
   spacemouse_path: null
   max_twist_scale: 2.0
@@ -155,6 +155,10 @@ in_contact:
   wrench_in_tool_frame: true
   approach_v_max: 0.006
   force_max_v: 0.010
+  dtc_min_fs_frac_of_fd: 0.25
+  dtc_exit_fs_frac_of_enter: 0.35
+  dtc_min_hold_s: 1.5
+  dtc_exit_hold_s: 0.35
   align_first: true
   align_enter_tol_deg: 5.0
   align_exit_tol_deg: 12.0

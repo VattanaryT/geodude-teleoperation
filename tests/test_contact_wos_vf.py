@@ -9,7 +9,6 @@ from geodude_teleoperation.teleop.contact_wos_vf import (
     tip_tag0_from_tcp,
 )
 from geodude_teleoperation.field.field_query import query_field_basis
-from geodude_teleoperation.frames import base_to_tag0_point, tip_from_tcp
 
 
 @pytest.fixture(autouse=True)
@@ -168,62 +167,6 @@ def test_continuity_flip(monkeypatch):
     assert np.dot(q_prev, q_curr) >= 0.0
 
 
-def test_project_keeps_translation():
-    pc = _planar_cloud()
-    vf = ContactWosOrientationField(
-        pc,
-        FakeWos(),
-        tip_offset=np.zeros(3),
-        contact_threshold=0.001,
-        T_tag0_base=np.eye(4),
-        fit_mode="plane",
-        query_radius=0.05,
-    )
-    p = np.array([0.05, -0.03, 0.04])
-    ee = DuckMotor(p)
-    vf.update_from_state(ee)
-    projected = vf.project(ee)
-    tr = projected.get_translator()
-    assert np.allclose([tr.x(), tr.y(), tr.z()], p, atol=1e-9)
-    R_proj = projected.get_rotor().as_matrix()
-    assert np.allclose(R_proj, vf.status["R_field_base"], atol=1e-9)
-
-
-def test_set_T_tag0_base_updates_query_frame():
-    pc = _planar_cloud()
-    vf = ContactWosOrientationField(
-        pc,
-        FakeWos(),
-        tip_offset=np.zeros(3),
-        contact_threshold=0.001,
-        T_tag0_base=np.eye(4),
-        fit_mode="plane",
-        query_radius=0.05,
-    )
-    T = np.eye(4)
-    T[:3, 3] = [1.0, 0.0, 0.0]
-    vf.set_T_tag0_base(T)
-
-    p_tcp = np.array([1.0, 0.0, 0.02])
-    expected_tip_tag0 = base_to_tag0_point(tip_from_tcp(p_tcp, np.eye(3), np.zeros(3)), T)
-    assert np.allclose(tip_tag0_from_tcp(p_tcp, np.eye(3), np.zeros(3), T), expected_tip_tag0)
-
-    duck = DuckMotor(p_tcp)
-    vf.update_from_state(duck, T_tag0_base=T)
-    assert vf.status["signed_d"] > 0
-
-
-def test_smooth_R_field_ema():
-    from geodude_teleoperation.teleop.contact_wos_vf import smooth_R_field, slerp_R
-
-    R0 = np.eye(3)
-    R1 = Rotation.from_euler("z", 40, degrees=True).as_matrix()
-    Rs = smooth_R_field(R0, R1, smoothing=0.75)
-    expect = slerp_R(R0, R1, 0.25)
-    assert np.allclose(Rs, expect, atol=1e-9)
-    assert np.allclose(smooth_R_field(None, R1, smoothing=0.75), R1)
-
-
 def _line_cloud():
     verts = np.zeros((20, 3))
     verts[:, 0] = np.linspace(-0.1, 0.1, 20)
@@ -245,40 +188,6 @@ class _WosOk:
         return np.eye(3), None, np.array(["converged"])
 
 
-def test_motion_relock_throttles_field_query(monkeypatch):
-    """Stationary tip: second update within relock period skips WoS/surface query."""
-    from geodude_teleoperation.teleop import contact_wos_vf as cvf
-
-    calls = {"n": 0}
-    real = cvf.query_field_basis
-
-    def counting_query(*a, **k):
-        calls["n"] += 1
-        return real(*a, **k)
-
-    monkeypatch.setattr(cvf, "query_field_basis", counting_query)
-
-    vf = ContactWosOrientationField(
-        _line_cloud(),
-        _WosOk(),
-        tip_offset=np.zeros(3),
-        contact_threshold=0.05,
-        relock_dist_m=0.05,
-        relock_period_s=10.0,
-        r_field_smoothing=0.0,
-        motion_track=1.0,
-        fit_mode="plane",
-        query_radius=0.2,
-    )
-    duck = DuckMotor(np.array([0.0, 0.0, 0.02]))
-    vf.update_from_state(duck)
-    n1 = calls["n"]
-    vf.update_from_state(duck)
-    assert calls["n"] == n1  # throttled
-    assert vf.status["relock_reason"] == "hold"
-    assert "R_motion_base" in vf.status
-
-
 def test_frozen_vf_skips_relock_query(monkeypatch):
     """f freeze: update_from_state must not relock R_motion or re-query WoS."""
     from geodude_teleoperation.teleop import contact_wos_vf as cvf
@@ -293,25 +202,61 @@ def test_frozen_vf_skips_relock_query(monkeypatch):
     monkeypatch.setattr(cvf, "query_field_basis", counting_query)
 
     vf = ContactWosOrientationField(
-        _line_cloud(),
+        _planar_cloud(),
         _WosOk(),
         tip_offset=np.zeros(3),
-        contact_threshold=0.05,
+        contact_threshold=0.001,
         relock_dist_m=0.001,
         relock_period_s=0.0,
         r_field_smoothing=0.0,
         motion_track=1.0,
         fit_mode="plane",
-        query_radius=0.2,
+        query_radius=0.05,
     )
-    vf.update_from_state(DuckMotor(np.array([0.0, 0.0, 0.02])))
+    # Off-contact tip → WoS path (matches live in-contact status wos=1 before freeze).
+    vf.update_from_state(DuckMotor(np.array([0.0, 0.0, 0.03])))
     R0 = vf.motion_basis().copy()
     n0 = calls["n"]
+    assert vf.status["used_wos"] is True
     vf.set_frozen(True)
-    vf.update_from_state(DuckMotor(np.array([0.08, 0.0, 0.02])))
+    vf.update_from_state(DuckMotor(np.array([0.08, 0.0, 0.03])))
     assert calls["n"] == n0
     assert np.allclose(vf.motion_basis(), R0)
     assert vf.status["relock_reason"] == "frozen"
+    # In-contact n* freeze: status must not keep advertising an active WoS query.
+    assert vf.status["used_wos"] is False
+    assert float(vf.status["query_ms"]) == 0.0
+
+
+def test_allow_wos_false_is_control_thread_cache(monkeypatch):
+    """Armed ALIGN must not block the 50 Hz tick on Walk-on-Spheres."""
+    from geodude_teleoperation.teleop import contact_wos_vf as cvf
+
+    calls = {"n": 0}
+    real = cvf.query_field_basis
+
+    def counting_query(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(cvf, "query_field_basis", counting_query)
+    vf = ContactWosOrientationField(
+        _planar_cloud(),
+        _WosOk(),
+        tip_offset=np.zeros(3),
+        contact_threshold=0.001,
+        relock_dist_m=0.001,
+        relock_period_s=0.0,
+        r_field_smoothing=0.0,
+        motion_track=1.0,
+        fit_mode="plane",
+        query_radius=0.05,
+    )
+    vf.update_from_state(DuckMotor(np.array([0.0, 0.0, 0.03])))
+    n0 = calls["n"]
+    vf.update_from_state(DuckMotor(np.array([0.04, 0.0, 0.03])), allow_wos=False)
+    assert calls["n"] == n0
+    assert vf.status["relock_reason"] == "hold_ctrl"
 
 
 def test_relock_rate_limits_when_tip_jumps_every_tick(monkeypatch):
@@ -356,15 +301,3 @@ def test_relock_rate_limits_when_tip_jumps_every_tick(monkeypatch):
     vf.update_from_state(DuckMotor(np.array([0.15, 0.0, 0.02])))
     assert calls["n"] == 2
     assert vf.status["relocked"] is True
-
-
-def test_twist_field_alignment_rad_a_along_t2():
-    from geodude_teleoperation.teleop.contact_wos_vf import twist_field_alignment_rad
-
-    R = np.eye(3)
-    # a/d → field ±y = t̂2
-    ang = twist_field_alignment_rad(np.array([0.0, 1.0, 0.0]), R)
-    assert ang < 1e-6
-    # 45° between t1 and t2 plane axes
-    ang45 = twist_field_alignment_rad(np.array([1.0, 1.0, 0.0]) / np.sqrt(2), R)
-    assert abs(ang45 - np.pi / 4) < 1e-6

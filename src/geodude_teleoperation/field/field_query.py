@@ -4,8 +4,12 @@ from __future__ import annotations
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
-from diffused_fields.diffusion import WalkOnSpheresDiffusion
-from diffused_fields.manifold import Pointcloud
+from geodude_teleoperation.df_runtime import prefer_env_diffused_fields
+
+prefer_env_diffused_fields()
+
+from diffused_fields.diffusion import WalkOnSpheresDiffusion  # noqa: E402
+from diffused_fields.manifold import Pointcloud  # noqa: E402
 
 
 def _mean_quaternion(quats: np.ndarray) -> np.ndarray:

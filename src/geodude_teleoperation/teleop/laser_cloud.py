@@ -7,23 +7,23 @@ import numpy as np
 import open3d as o3d
 
 from geodude_teleoperation.frames import (
-    _PACKAGE_ROOT,
     left_base_to_vention_points,
     load_T_left_base_vention,
     transform_points,
     vention_to_tag0_points,
 )
+from geodude_teleoperation.paths import data_processed_dir, resolve_repo_path
 
-DEFAULT_LASER_PLY = (
-    _PACKAGE_ROOT / "data" / "processed" / "laser_profilometer" / "merged.ply"
-)
+DEFAULT_LASER_PLY = data_processed_dir() / "laser_profilometer" / "merged.ply"
 DEFAULT_LASER_VOXEL_M = 0.002
 
 
 def resolve_laser_ply(path: Path | str | None) -> Path:
     """Explicit path, else worktree default ``data/processed/laser_profilometer/merged.ply``."""
     if path is not None:
-        return Path(path)
+        resolved = resolve_repo_path(path)
+        if resolved is not None:
+            return resolved
     return Path(DEFAULT_LASER_PLY)
 
 
@@ -35,7 +35,7 @@ def is_laser_left_base_ply(path: Path | str | None) -> bool:
     """
     if path is None:
         return False
-    p = Path(path)
+    p = resolve_repo_path(path) or Path(path)
     try:
         if p.resolve() == Path(DEFAULT_LASER_PLY).resolve():
             return True

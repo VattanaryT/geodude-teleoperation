@@ -40,8 +40,12 @@ def test_rotor_roundtrip_to_matrix():
 def test_field_tangent_world_uses_cga_local_frame():
     R = Rotation.from_euler("xyz", [10.0, 20.0, -30.0], degrees=True).as_matrix()
     # SpaceMouse / WASD: +local-x only.
-    v_cga = field_tangent_world([1.0, 0.0, 0.0], R, scale=1.0, use_cga_motor=True)
-    v_se3 = field_tangent_world([1.0, 0.0, 0.0], R, scale=1.0, use_cga_motor=False)
+    v_cga, used = field_tangent_world([1.0, 0.0, 0.0], R, scale=1.0, use_cga_motor=True)
+    v_se3, used_off = field_tangent_world(
+        [1.0, 0.0, 0.0], R, scale=1.0, use_cga_motor=False
+    )
+    assert used is True
+    assert used_off is False
     assert np.allclose(v_cga, v_se3, atol=1e-12)
     # Local +x → R column 0, with n* (col 2) killed (already ⊥ if orthonormal).
     assert np.allclose(v_cga, R[:, 0], atol=1e-12)
@@ -63,6 +67,10 @@ def test_spacemouse_coeffs_map_through_cga_local_frame():
     bridge.arm([0, 0, 0], R, R)
     bridge.push_tangent_field_linear(lin, R, n_approach=R[:, 2], continuous=True)
     v = bridge._consume_tangent(0.02, aligning=False)
-    expect = field_tangent_world(lin, R, scale=1.0, n_approach=R[:, 2], use_cga_motor=True)
+    expect, used = field_tangent_world(
+        lin, R, scale=1.0, n_approach=R[:, 2], use_cga_motor=True
+    )
+    assert used is True
+    assert bridge._last_cga_tan is True
     assert np.allclose(v, expect, atol=1e-12)
     assert abs(float(np.dot(v, R[:, 2]))) < 1e-12

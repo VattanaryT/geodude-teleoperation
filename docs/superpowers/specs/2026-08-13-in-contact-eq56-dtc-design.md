@@ -8,7 +8,7 @@
 | Choice | Value |
 |--------|--------|
 | Algebra | `pygafro` (PyPI `gafropy` SIGILLs on this CPU) |
-| Actuation dual-path | `in_contact.actuation: speedj \| dtc` |
+| Actuation dual-path | `in_contact.actuation: speedj \| dtc \| dtc_pure` |
 | Terminal clarity | Yellow `\033[93m` banner on start / Enter |
 | Tangent in DTC | Extra wrench \(W_\text{tan}\) in Eq. 56 |
 | 500 Hz | Host `directTorque` now; URScript consumer later |

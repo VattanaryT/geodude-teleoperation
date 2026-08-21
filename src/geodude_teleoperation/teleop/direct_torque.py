@@ -5,8 +5,14 @@ UR Direct Torque Control (PolyScope ≥ 5.23 / PolyScope X ≥ 10.10) accepts
 timestep. Gravity is compensated on-controller — do **not** include gravity in
 ``tau``. The call must land every robot timestep or the arm leaves torque mode.
 
+Stock ur_rtde applies **one** ``direct_torque`` per host ``directTorque()``
+(unlike ``servoJ``, which has an on-robot latch thread). Host RTDE rarely
+sustains 500 Hz, so this module patches the control script to latch τ on-robot
+(same pattern as ``servo_thread``). Host then publishes τ at ``control.hz``.
+
 This module:
 - documents the bridge contract
+- patches / uploads the DTC-latch control script
 - verifies host ``--control-hz`` vs 500 Hz
 - optionally parses PolyScope version for readiness
 - can **command** zero-torque DTC on a live UR and measure achieved rate
@@ -16,6 +22,7 @@ from __future__ import annotations
 import time
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
@@ -28,6 +35,244 @@ DTC_MIN_POLYSCOPE_X = (10, 10, 0)
 DEFAULT_VISCOUS_SCALE = (0.9, 0.9, 0.8, 0.9, 0.9, 0.9)
 DEFAULT_COULOMB_SCALE = (0.8, 0.8, 0.7, 0.8, 0.8, 0.8)
 
+# Marker embedded in patched URScript (idempotency + diagnostics).
+DTC_LATCH_MARKER = "# geodude DTC latch (on-robot 500 Hz thread)"
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_STOCK_RTDE_SCRIPT = (
+    _REPO_ROOT / "assets" / "urscript" / "rtde_control.script"
+)
+DEFAULT_DTC_LATCH_SCRIPT = (
+    _REPO_ROOT / "assets" / "urscript" / "rtde_control_dtc_latch.script"
+)
+
+_DTC_GLOBALS = """\
+    global dtc_target = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    global dtc_friction_comp = True
+    global dtc_thrd = 0
+    global is_dtc = 0
+"""
+
+_DTC_THREAD = f"""\
+    {DTC_LATCH_MARKER}
+    thread dtc_thread():
+        while (True):
+            enter_critical
+            tau = dtc_target
+            fc = dtc_friction_comp
+            exit_critical
+$5.23         direct_torque(tau, fc)
+        end
+    end
+"""
+
+_DTC_CMD66 = """\
+        elif cmd == 66:
+              # direct_torque — latched on-robot @ 500 Hz (geodude DTC latch)
+              dummy_op = 1
+$5.23         torque = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+$5.23         torque = q_from_input_float_registers(0)
+$5.23         friction_comp = True
+$5.23         friction_comp_val = read_input_integer_reg(1)
+$5.23         if friction_comp_val == 1:
+$5.23             friction_comp = True
+$5.23         elif friction_comp_val == 0:
+$5.23             friction_comp = False
+$5.23         end
+$5.23         enter_critical
+$5.23         dtc_target = torque
+$5.23         dtc_friction_comp = friction_comp
+$5.23         exit_critical
+$5.23         if is_dtc == 0:
+$5.23             is_dtc = 1
+$5.23             if dtc_thrd == 0:
+$5.23                 global dtc_thrd = run dtc_thread()
+$5.23             end
+$5.23         end
+"""
+
+
+def patch_rtde_control_script_for_dtc_latch(source: str) -> str:
+    """Patch stock ur_rtde ``rtde_control.script`` so cmd 66 latches like servoJ.
+
+    Host ``directTorque`` then only updates ``dtc_target``; ``dtc_thread`` calls
+    ``direct_torque`` every robot timestep (~500 Hz).
+    """
+    if DTC_LATCH_MARKER in source:
+        return source
+    text = source
+
+    needle_globals = "    global speed_thrd = 0\n"
+    if needle_globals not in text:
+        raise ValueError("stock script missing global speed_thrd (unexpected layout)")
+    if "global dtc_thrd" not in text:
+        text = text.replace(
+            needle_globals, needle_globals + _DTC_GLOBALS, 1
+        )
+
+    # Insert thread after servo_thread() definition.
+    servo_end = (
+        "            servoj(q, t=dt, lookahead_time=lh_time, gain=g)\n"
+        "        end\n"
+        "    end\n"
+    )
+    if "thread dtc_thread():" not in text:
+        if servo_end not in text:
+            raise ValueError("stock script missing servo_thread body (unexpected layout)")
+        text = text.replace(servo_end, servo_end + "\n" + _DTC_THREAD, 1)
+
+    # Replace one-shot cmd == 66 block with latch+thread start.
+    start = text.find("        elif cmd == 66:")
+    if start < 0:
+        raise ValueError("stock script missing cmd == 66 (direct_torque)")
+    end = text.find("        elif cmd == 67:", start)
+    if end < 0:
+        raise ValueError("stock script missing cmd == 67 after direct_torque")
+    text = text[:start] + _DTC_CMD66 + "\n" + text[end:]
+
+    # Kill DTC latch on speed_stop / servo_stop (same as leaving torque mode).
+    speed_kill = (
+        "            is_speeding = 0\n"
+        "            kill speed_thrd\n"
+        "            speed_thrd = 0\n"
+    )
+    speed_kill_with_dtc = (
+        "            is_speeding = 0\n"
+        "            kill speed_thrd\n"
+        "            speed_thrd = 0\n"
+        "            is_dtc = 0\n"
+        "            kill dtc_thrd\n"
+        "            dtc_thrd = 0\n"
+    )
+    if "kill dtc_thrd" not in text.split("speed_stop")[1].split("servo_stop")[0]:
+        if speed_kill not in text:
+            raise ValueError("stock script missing speed_stop kill block")
+        text = text.replace(speed_kill, speed_kill_with_dtc, 1)
+
+    servo_kill = (
+        "            is_servoing = 0\n"
+        "            kill servo_thrd\n"
+        "            kill servoc_thrd\n"
+        "            servo_thrd = 0\n"
+        "            servoc_thrd = 0\n"
+    )
+    servo_kill_with_dtc = (
+        "            is_servoing = 0\n"
+        "            kill servo_thrd\n"
+        "            kill servoc_thrd\n"
+        "            servo_thrd = 0\n"
+        "            servoc_thrd = 0\n"
+        "            is_dtc = 0\n"
+        "            kill dtc_thrd\n"
+        "            dtc_thrd = 0\n"
+    )
+    if servo_kill not in text:
+        raise ValueError("stock script missing servo_stop kill block")
+    # Only first occurrence (servo_stop); avoid double-patch if re-run failed earlier.
+    if text.count("kill dtc_thrd") < 2:
+        text = text.replace(servo_kill, servo_kill_with_dtc, 1)
+
+    if DTC_LATCH_MARKER not in text:
+        raise RuntimeError("DTC latch patch failed to embed marker")
+    return text
+
+
+def wrap_rtde_control_script(body: str) -> str:
+    """Wrap script body in ``def rtde_control(): … end``.
+
+    ur_rtde only auto-wraps the *compiled-in* script. ``setCustomScriptFile``
+    uploads the file bytes as-is — a bare body (stock ``rtde_control.script``)
+    is invalid URScript and the control program never runs, so every
+    ``directTorque`` returns False.
+    """
+    text = body.strip("\n") + "\n"
+    stripped = text.lstrip()
+    if stripped.startswith("def rtde_control("):
+        if not stripped.rstrip().endswith("end"):
+            raise ValueError("rtde_control script missing trailing end")
+        return text if text.endswith("\n") else text + "\n"
+    return f"def rtde_control():\n{text}end\n"
+
+
+def resolve_stock_rtde_script(
+    stock_script: str | Path | None = None,
+) -> Path:
+    """Return path to stock ``rtde_control.script`` (bundled or explicit)."""
+    if stock_script is not None:
+        path = Path(stock_script)
+        if not path.is_file():
+            raise FileNotFoundError(f"stock RTDE script not found: {path}")
+        return path
+    if DEFAULT_STOCK_RTDE_SCRIPT.is_file():
+        return DEFAULT_STOCK_RTDE_SCRIPT
+    raise FileNotFoundError(
+        f"bundled stock RTDE script missing: {DEFAULT_STOCK_RTDE_SCRIPT}"
+    )
+
+
+def install_dtc_latch_control_script(
+    control: Any,
+    *,
+    stock_script: str | Path | None = None,
+    out_dir: str | Path | None = None,
+    ready_timeout_s: float = 5.0,
+) -> Path:
+    """Patch stock control script and ``setCustomScriptFile`` on ``control``.
+
+    Returns the written patched script path. Raises if the control program is
+    not running after upload (invalid script / pendant stop).
+    """
+    set_fn = getattr(control, "setCustomScriptFile", None)
+    if not callable(set_fn):
+        raise RuntimeError(
+            "control interface has no setCustomScriptFile(); "
+            "cannot install on-robot DTC latch (upgrade ur_rtde)"
+        )
+
+    if isinstance(stock_script, str) and "\n" in stock_script:
+        source = stock_script
+        stock_path = None
+    else:
+        stock_path = resolve_stock_rtde_script(stock_script)
+        source = stock_path.read_text(encoding="utf-8")
+
+    # Strip an existing wrapper so patching sees the stock body layout.
+    src_body = source
+    if src_body.lstrip().startswith("def rtde_control("):
+        lines = src_body.strip().splitlines()
+        if lines and lines[0].startswith("def rtde_control(") and lines[-1].strip() == "end":
+            src_body = "\n".join(lines[1:-1]) + "\n"
+
+    patched = wrap_rtde_control_script(
+        patch_rtde_control_script_for_dtc_latch(src_body)
+    )
+    if out_dir is not None:
+        out_path = Path(out_dir) / "rtde_control_dtc_latch.script"
+    elif stock_path is not None:
+        out_path = stock_path.with_name("rtde_control_dtc_latch.script")
+    else:
+        out_path = DEFAULT_DTC_LATCH_SCRIPT
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(patched, encoding="utf-8")
+    set_fn(str(out_path))
+
+    is_running = getattr(control, "isProgramRunning", None)
+    if callable(is_running):
+        deadline = time.perf_counter() + float(ready_timeout_s)
+        while time.perf_counter() < deadline:
+            try:
+                if bool(is_running()):
+                    break
+            except Exception:
+                break
+            time.sleep(0.05)
+        else:
+            raise RuntimeError(
+                "DTC latch script uploaded but RTDE control program not running "
+                f"(check teach pendant / script syntax). path={out_path}"
+            )
+    return out_path
+
 
 def call_direct_torque(
     control: Any,
@@ -37,9 +282,10 @@ def call_direct_torque(
     viscous_scale: Sequence[float] | None = None,
     coulomb_scale: Sequence[float] | None = None,
 ) -> bool:
-    """Call ur_rtde ``directTorque`` with the real signature (not a bool flag).
+    """Call ur_rtde ``directTorque``.
 
-    ``directTorque(torque, viscous_scale=[...], coulomb_scale=[...]) -> bool``
+    Prefer ``directTorque(tau, friction_comp=bool)`` (PolyScope ≥5.23 script).
+    Fall back to viscous/coulomb scales (PolyScope ≥5.26 / newer ur_rtde).
     """
     direct = getattr(control, "directTorque", None)
     if not callable(direct):
@@ -50,6 +296,12 @@ def call_direct_torque(
     tau6 = [float(v) for v in np.asarray(tau, dtype=float).reshape(6)]
     if not np.isfinite(tau6).all():
         raise ValueError("direct_torque command contains non-finite values")
+    # Bool friction_comp matches ur_rtde control script cmd==66 on ≥5.23.
+    try:
+        ok = direct(tau6, bool(friction_comp))
+        return ok is not False
+    except TypeError:
+        pass
     if friction_comp:
         vs = list(
             DEFAULT_VISCOUS_SCALE
@@ -201,21 +453,26 @@ class DirectTorqueBridge:
 
     def urscript_snippet(self) -> str:
         return (
-            "# Phase 2 DTC skeleton — run on robot (500 Hz) OR use ur_rtde:\n"
-            "#   ctrl.directTorque(tau, viscous_scale, coulomb_scale) every timestep\n"
-            "# Stream target_tau[0:6] via RTDE input registers / socket if URScript.\n"
+            "# Phase 2 DTC — prefer patched rtde_control (geodude DTC latch):\n"
+            "#   host directTorque() latches dtc_target; dtc_thread @ 500 Hz\n"
+            "#   calls direct_torque(tau) every timestep (see assets/urscript/).\n"
             "while (True):\n"
-            "  tau = get_target_tau_from_host()  # replace with RTDE read\n"
+            "  enter_critical\n"
+            "  tau = dtc_target\n"
+            "  exit_critical\n"
             "  direct_torque(tau)\n"
-            "  sync()\n"
         )
 
 
 class HostDirectTorqueStreamer:
-    """Background 500 Hz ``directTorque`` loop that streams a latched τ.
+    """Background ``directTorque`` loop that streams a latched τ.
 
-    The main teleop tick (~50 Hz) only updates ``set_tau``; this thread keeps
-    calling ur_rtde every ~2 ms so the arm stays in torque mode.
+    Prefer ``robot_latch=True`` (default): on-robot ``dtc_thread`` applies τ at
+    500 Hz; this host loop only republishes at ``target_hz`` (e.g. 50–125).
+
+    With ``robot_latch=False`` (legacy / verify), the host must call near
+    **500 Hz** or the arm leaves torque mode. Pace on ``sendCommand``'s
+    ready-wait inside ``directTorque`` — do **not** also ``waitPeriod``.
     """
 
     def __init__(
@@ -224,10 +481,12 @@ class HostDirectTorqueStreamer:
         *,
         friction_comp: bool = True,
         target_hz: float = UR_SYSTEM_HZ,
+        robot_latch: bool = True,
     ):
         self._control = control
         self._friction_comp = bool(friction_comp)
         self._target_hz = float(target_hz)
+        self._robot_latch = bool(robot_latch)
         self._tau = np.zeros(6, dtype=float)
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -236,10 +495,18 @@ class HostDirectTorqueStreamer:
         self._n_fail = 0
         self._last_error: str | None = None
         self._active = False
+        self._t_rate0: float | None = None
+        self._n_ok_rate0 = 0
+        self._measured_hz = float("nan")
+        self._rate_warn_logged = False
 
     @property
     def active(self) -> bool:
         return self._active and self._thread is not None and self._thread.is_alive()
+
+    @property
+    def robot_latch(self) -> bool:
+        return self._robot_latch
 
     def set_tau(self, tau: Sequence[float]) -> None:
         arr = np.asarray(tau, dtype=float).reshape(6)
@@ -251,6 +518,8 @@ class HostDirectTorqueStreamer:
     def start(self) -> None:
         if self.active:
             return
+        with self._lock:
+            tau0 = self._tau.copy()
         # Leave any prior speedJ / jog mode before entering DTC.
         for name, args in (("speedStop", ()), ("speedStop", (1.0,))):
             fn = getattr(self._control, name, None)
@@ -266,17 +535,48 @@ class HostDirectTorqueStreamer:
         self._n_ok = 0
         self._n_fail = 0
         self._last_error = None
+        # Synchronous first latch — thread start alone left a gap after speedStop
+        # with τ≈0 under contact → UR "position deviation from path".
+        try:
+            ok0 = call_direct_torque(
+                self._control, tau0, friction_comp=self._friction_comp
+            )
+            if ok0 is False:
+                self._n_fail = 1
+                self._last_error = "directTorque returned False (sync start)"
+            else:
+                self._n_ok = 1
+        except Exception as exc:
+            self._n_fail = 1
+            self._last_error = f"{type(exc).__name__}: {exc}"
+        self._t_rate0 = None
+        self._n_ok_rate0 = 0
+        self._measured_hz = float("nan")
+        self._rate_warn_logged = False
+        thr_name = (
+            "host-dtc-latch-pub" if self._robot_latch else "host-dtc-500hz"
+        )
         self._thread = threading.Thread(
-            target=self._run, name="host-dtc-500hz", daemon=True
+            target=self._run, name=thr_name, daemon=True
         )
         self._active = True
         self._thread.start()
-        print(
-            "\033[93mWARNING: host DTC streamer @ "
-            f"{self._target_hz:g} Hz started (main loop only latches τ)."
-            "\033[0m",
-            flush=True,
-        )
+        if self._robot_latch:
+            print(
+                "\033[93mWARNING: DTC latch publisher started "
+                f"(host publish {self._target_hz:g} Hz → on-robot 500 Hz "
+                "dtc_thread; dtc_hz in status is host publish rate)."
+                "\033[0m",
+                flush=True,
+            )
+        else:
+            print(
+                "\033[93mWARNING: host DTC streamer started "
+                f"(target {self._target_hz:g} Hz; no on-robot latch — "
+                "watch dtc_hz; <400 Hz → arm leaves torque mode)."
+                "\033[0m",
+                flush=True,
+            )
 
     def stop(self, *, zero: bool = True) -> None:
         self._stop.set()
@@ -303,37 +603,64 @@ class HostDirectTorqueStreamer:
             "n_ok": self._n_ok,
             "n_fail": self._n_fail,
             "last_error": self._last_error,
+            "measured_hz": float(self._measured_hz),
+            "robot_latch": bool(self._robot_latch),
         }
 
     def _run(self) -> None:
-        dt = 1.0 / max(self._target_hz, 1.0)
-        init_period = getattr(self._control, "initPeriod", None)
-        wait_period = getattr(self._control, "waitPeriod", None)
-        use_period = callable(init_period) and callable(wait_period)
+        # robot_latch: pace host publishes with sleep (on-robot thread holds τ).
+        # legacy: pace only on failure — directTorque ready-wait is the clock.
+        dt_pub = 1.0 / max(self._target_hz, 1.0)
+        dt_fail = dt_pub
         while not self._stop.is_set():
             t0 = time.perf_counter()
             with self._lock:
                 tau = self._tau.copy()
             try:
-                t_mark = init_period() if use_period else None
                 ok = call_direct_torque(
                     self._control, tau, friction_comp=self._friction_comp
                 )
                 if ok is False:
                     self._n_fail += 1
                     self._last_error = "directTorque returned False"
+                    time.sleep(dt_fail)
                 else:
                     self._n_ok += 1
-                if use_period:
-                    wait_period(t_mark)
-                else:
-                    remain = dt - (time.perf_counter() - t0)
-                    if remain > 0:
-                        time.sleep(remain)
+                    now = time.perf_counter()
+                    if self._t_rate0 is None:
+                        self._t_rate0 = now
+                        self._n_ok_rate0 = self._n_ok
+                    else:
+                        elapsed = now - float(self._t_rate0)
+                        if elapsed >= 0.1:
+                            dn = self._n_ok - int(self._n_ok_rate0)
+                            self._measured_hz = float(dn) / elapsed
+                            self._t_rate0 = now
+                            self._n_ok_rate0 = self._n_ok
+                            if (
+                                not self._robot_latch
+                                and not self._rate_warn_logged
+                                and self._measured_hz < 400.0
+                                and self._n_ok > 50
+                            ):
+                                self._rate_warn_logged = True
+                                print(
+                                    "\033[93mWARNING: DTC streamer measured "
+                                    f"{self._measured_hz:.0f} Hz (need ~500). "
+                                    "Arm leaves torque mode between calls — "
+                                    "no motion. Install DTC latch script or "
+                                    "check network / RTDE load."
+                                    "\033[0m",
+                                    flush=True,
+                                )
+                    if self._robot_latch:
+                        remain = dt_pub - (time.perf_counter() - t0)
+                        if remain > 0.0:
+                            time.sleep(remain)
             except Exception as exc:
                 self._n_fail += 1
                 self._last_error = str(exc)
-                time.sleep(dt)
+                time.sleep(dt_fail)
         self._active = False
 
 

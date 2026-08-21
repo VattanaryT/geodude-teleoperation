@@ -83,7 +83,7 @@ class ForcePIDConfig:
     wrong_sign_fd_frac: float = 0.5
     # High |Fs| trip: retract-only (never freeze — freeze traps the load).
     fault_abs_fs_N: float = 40.0
-    fault_fd_mult: float = 6.0  # also trip at mult*|Fd| if larger
+    fault_fd_mult: float = 1.35  # trip near |Fd|; was 6.0 (never tripped at Fd=70)
     # Oscillation: many Fe sign flips → scale down Kp/Ki in real time
     osc_window_s: float = 0.45
     osc_sign_flips_trigger: int = 3
@@ -275,7 +275,8 @@ class ForcePIDController:
 
             # Safety trips on RAW Fs (not LPF)
             overshoot = fs_raw > (fd + float(c.overshoot_margin_N))
-            if overshoot:
+            mag_overload = abs(fs_raw) > (abs(fd) + float(c.overshoot_margin_N))
+            if overshoot or mag_overload:
                 self._integral = 0.0
             ws_thresh = min(
                 float(c.wrong_sign_fs_N),
@@ -291,11 +292,12 @@ class ForcePIDController:
                 self._wrong_sign_prev = False
             if self._soft_approach_timer > 0.0:
                 self._soft_approach_timer = max(0.0, self._soft_approach_timer - dt)
+            # Cap absolute trip near Fd (fault_fd_mult≪6 when Fd is large).
             fault_thresh = max(
                 float(c.fault_abs_fs_N),
                 abs(float(c.fault_fd_mult) * fd),
             )
-            fault_fs = abs(fs_raw) >= fault_thresh
+            fault_fs = abs(fs_raw) >= fault_thresh or mag_overload
             if fault_fs:
                 self._integral = 0.0
         else:
@@ -304,6 +306,7 @@ class ForcePIDController:
             self._osc_hold_timer = 0.0
             self._soft_approach_timer = 0.0
             overshoot = False
+            mag_overload = False
             wrong_sign = False
             fault_fs = False
 
@@ -374,19 +377,29 @@ class ForcePIDController:
                 if v_along < 1e-9:
                     v_along = unload
 
-            # Wrong-sign / absolute overload: never push into the load; allow retract
-            if wrong_sign and v_along > 0.0 and fd >= 0.0:
-                v_along = min(v_along, 0.0)
+            # Wrong-sign / |Fs| overload: actively unload. Freezing alone left the
+            # arm jammed at |Fs|≫Fd (logs: Fs≈−115 with WARN=force_sign?) while
+            # lateral teleop still ran and tripped the UR protective stop.
+            if wrong_sign and fd >= 0.0:
+                if abs(fs_raw) >= float(c.contact_threshold_N):
+                    v_along = -unload
+                elif v_along > 0.0:
+                    v_along = min(v_along, 0.0)
+            if mag_overload and fd >= 0.0 and not overshoot:
+                v_along = -unload
             if fault_fs:
                 # Do not freeze — freezing traps |Fs| high (see FAULT=|Fs| with Fe≪0).
                 if fd >= 0.0:
-                    v_along = min(v_along, 0.0)
-                    if v_along > -1e-9 and fs_raw > fd:
-                        v_along = -float(c.approach_v_max_m_s)
+                    v_along = -unload
                 else:
-                    v_along = max(v_along, 0.0)
-                    if v_along < 1e-9 and fs_raw < fd:
-                        v_along = float(c.approach_v_max_m_s)
+                    v_along = unload
+
+            # Near / above target: stop pushing into the surface. DualLoop was
+            # still driving approach when Fs jumped 0.6→22 N before DTC handoff.
+            if fd >= 0.0 and fs_raw >= 0.5 * abs(fd) and v_along > 0.0:
+                v_along = 0.0
+            if fd < 0.0 and fs_raw <= 0.5 * fd and v_along < 0.0:
+                v_along = 0.0
 
         # Clip along-line speed
         vmax = float(c.max_v_along_m_s)

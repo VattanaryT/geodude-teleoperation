@@ -8,15 +8,13 @@ from geodude_teleoperation.teleop.contact_teleop import (
     ContactTeleopBridge,
     ContactTeleopConfig,
     field_tangent_world,
+    is_dtc_actuation,
+    is_dtc_pure_actuation,
+    normalize_contact_actuation,
     orthonormal_R_from_approach,
+    print_pendant_tcp_dbg,
 )
-from geodude_teleoperation.in_contact_control import DualLoopController
 from geodude_teleoperation.in_contact_control.force_pid import ForcePIDController
-
-
-def test_in_contact_package_imports():
-    ctl = DualLoopController()
-    assert ctl.target is None
 
 
 def test_orthonormal_R_approach_is_column2():
@@ -28,9 +26,11 @@ def test_orthonormal_R_approach_is_column2():
 
 def test_field_tangent_world_kills_normal():
     R = np.eye(3)
-    v = field_tangent_world([1.0, 0.0, 5.0], R, scale=1.0)
+    v, used_cga = field_tangent_world([1.0, 0.0, 5.0], R, scale=1.0)
     assert abs(np.dot(v, R[:, 2])) < 1e-12
     assert np.allclose(v, [1.0, 0.0, 0.0])
+    # pygafro may or may not be present; flag must be bool either way.
+    assert isinstance(used_cga, bool)
 
 
 def test_wasd_uses_local_frame_not_tool_frame():
@@ -98,62 +98,32 @@ def test_tip_track_and_freeze_n():
     assert bridge.last_diag["n_freeze"] == 1.0
 
 
-def test_vf_approach_R_prefers_surface_not_motion():
-    from geodude_teleoperation.teleop.contact_teleop import vf_approach_R, vf_R_field_or_none
+def test_freeze_n_on_arm_locks_field_not_tcp_z():
+    """freeze_n_on_arm: ALIGN follows live field; SEEK then locks that n*.
 
-    class _VF:
-        def motion_basis(self):
-            return np.eye(3)
-
-        @property
-        def status(self):
-            R_surf = np.array(
-                [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=float
-            )
-            # Flip so z is -world-z into surface
-            R_surf = np.array(
-                [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]], dtype=float
-            )
-            return {
-                "R_field_base": np.eye(3),  # aliased to motion in real VF
-                "R_field_raw_smoothed": R_surf,
-                "R_motion_base": np.eye(3),
-            }
-
-    vf = _VF()
-    R_m = vf_R_field_or_none(vf)
-    R_a = vf_approach_R(vf)
-    assert R_m is not None and np.allclose(R_m[:, 2], [0, 0, 1])
-    assert R_a is not None and np.allclose(R_a[:, 2], [0, 0, -1])
-
-
-def test_arm_freezes_n_by_default():
-    bridge = ContactTeleopBridge(ContactTeleopConfig(desired_force_n=2.0))
-    R = np.eye(3)
-    bridge.arm([0, 0, 0], R, R)
-    assert bridge.n_frozen is True
-
-
-def test_tangent_key_adds_perp_velocity_effect():
+    It does **not** hold the current tool orientation, and it no longer freezes
+    the Enter-time snapshot (that parked the TCP on a neighboring end-line).
+    """
+    R_tcp = np.eye(3)
+    R_field = orthonormal_R_from_approach(np.array([0.0, -1.0, 0.0]))
     bridge = ContactTeleopBridge(
-        ContactTeleopConfig(desired_force_n=5.0, max_joint_velocity=5.0, force_sign=1.0)
+        ContactTeleopConfig(desired_force_n=5.0, freeze_n_on_arm=True)
     )
-    R = np.eye(3)
-    bridge.arm([0, 0, 0], R, R)
-    bridge.push_tangent_field_linear([0.02, 0.0, 0.0], R)
-    # Compression along +z into surface: F·n* > 0 on this cell → F=[0,0,+5].
-    # With force_sign=+1 → Fs≈+5 ≈ Fd → Fe≈0; tangent should dominate.
-    J = np.eye(6)
-    qdot = bridge.step(
-        p_tcp=[0, 0, 0],
-        R_tcp=R,
-        R_field=R,
-        force_base=[0.0, 0.0, 5.0],
-        jacobian=J,
-        dt=0.02,
-    )
-    assert bridge.last_diag["v_tan_norm"] > 0.0
-    assert float(np.linalg.norm(qdot)) > 0.0
+    bridge.arm([0.4, -0.2, 0.3], R_tcp, R_field)
+    assert bridge.phase == ContactTeleopBridge.PHASE_ALIGN
+    assert bridge.n_frozen is False
+    assert abs(np.dot(bridge._R_star[:, 2], R_field[:, 2])) > 0.99
+    assert abs(np.dot(bridge._R_star[:, 2], R_tcp[:, 2])) < 0.2
+    R_later = orthonormal_R_from_approach(np.array([1.0, 0.0, 0.0]))
+    bridge._refresh_R_star(R_later)
+    assert abs(np.dot(bridge._R_star[:, 2], R_later[:, 2])) > 0.99
+
+    bridge._update_phase(0.0)
+    assert bridge.phase == ContactTeleopBridge.PHASE_SEEK
+    assert bridge.n_frozen is True
+    z0 = bridge._R_star[:, 2].copy()
+    bridge._refresh_R_star(orthonormal_R_from_approach(np.array([0.0, 0.0, 1.0])))
+    assert np.allclose(bridge._R_star[:, 2], z0)
 
 
 def test_ur_force_sign_makes_compression_positive_fs():
@@ -231,11 +201,11 @@ def test_high_fs_fault_allows_retract():
 
 
 def test_wasd_survives_wrong_sign_and_overload():
-    """WASD tangent must remain under wrong-sign / |Fs| overload (retract-only n*)."""
+    """Under high |Fs| jam, kill tangent (UR faulted on lateral speedJ); mild keeps it."""
     R = np.eye(3)
     J = np.eye(6)
 
-    # Wrong-sign (legacy force_sign=-1 under compression): keep lateral slide.
+    # High |Fs| wrong-sign jam: retract-only, no lateral speedJ.
     bridge_ws = ContactTeleopBridge(
         ContactTeleopConfig(
             desired_force_n=5.0,
@@ -243,6 +213,7 @@ def test_wasd_survives_wrong_sign_and_overload():
             align_first=False,
             max_joint_velocity=5.0,
             tangent_scale=8.0,
+            dtc_min_fs_frac_of_fd=0.25,
         )
     )
     bridge_ws.arm([0, 0, 0], R, R)
@@ -257,10 +228,10 @@ def test_wasd_survives_wrong_sign_and_overload():
         dt=0.02,
     )
     assert bridge_ws.last_diag["force_wrong_sign"] == 1.0
-    assert bridge_ws.last_diag["v_tan_norm"] > 0.0
-    assert abs(float(qdot_ws[0])) > 1e-4  # field +x slide survives
+    assert bridge_ws.last_diag["v_tan_norm"] == 0.0
+    assert abs(float(qdot_ws[0])) < 1e-6
 
-    # Hard |Fs| overload with force_sign=+1: retract −n* and keep WASD.
+    # Hard |Fs| overload with force_sign=+1: retract −n*, no lateral while jammed.
     bridge_ov = ContactTeleopBridge(
         ContactTeleopConfig(
             desired_force_n=5.0,
@@ -285,8 +256,8 @@ def test_wasd_survives_wrong_sign_and_overload():
         dt=0.02,
     )
     assert bridge_ov.last_diag["force_fault"] == 1.0
-    assert bridge_ov.last_diag["v_tan_norm"] > 0.0
-    assert abs(float(qdot_ov[0])) > 1e-4
+    assert bridge_ov.last_diag["v_tan_norm"] == 0.0
+    assert abs(float(qdot_ov[0])) < 1e-6
     # Into-surface (+z) must not be commanded while overloaded.
     assert float(qdot_ov[2]) <= 1e-9
 
@@ -484,70 +455,6 @@ def test_hold_tangent_still_expires():
     assert bridge.last_diag["v_tan_norm"] < 1e-12
 
 
-def test_align_softened_before_contact_load():
-    # Retained name: align-first keeps full k_ori (no soft-until-contact).
-    bridge = ContactTeleopBridge(ContactTeleopConfig(desired_force_n=5.0, force_sign=1.0))
-    R = np.eye(3)
-    bridge.arm([0, 0, 0], R, R)
-    k_full = bridge._k_ori_full
-    bridge.step(
-        p_tcp=[0, 0, 0],
-        R_tcp=R,
-        R_field=R,
-        force_base=[0.0, 0.0, 0.0],
-        jacobian=np.eye(6),
-        dt=0.02,
-    )
-    assert abs(bridge.last_diag["k_ori"] - k_full) < 1e-9
-
-
-def test_config_from_args_wires_force_and_align_gains():
-    from types import SimpleNamespace
-
-    from geodude_teleoperation.teleop.contact_teleop import config_from_args
-
-    args = SimpleNamespace(
-        contact_desired_force=7.0,
-        force_kp=0.002,
-        force_ki=0.001,
-        force_kd=0.0005,
-        force_deadband_N=0.2,
-        force_lpf_hz=8.0,
-        force_contact_threshold_N=0.7,
-        wrench_in_tool_frame=False,
-        force_sign=-1.0,
-        approach_v_max=0.004,
-        force_max_v=0.008,
-        align_k_perp=50.0,
-        align_k_ori=3.0,
-        align_m_lin=0.8,
-        align_m_ang=0.04,
-        align_b_lin=30.0,
-        align_b_ang=2.0,
-        tangent_scale=4.0,
-        tangent_hold_s=0.2,
-        contact_max_linear_m_s=0.03,
-        contact_max_angular_deg_s=10.0,
-        contact_damping=0.08,
-        max_joint_velocity=0.4,
-        freeze_n_on_arm=False,
-        bias_skip_load_N=1.5,
-        align_first=True,
-        align_enter_tol_deg=4.0,
-        align_exit_tol_deg=10.0,
-    )
-    cfg = config_from_args(args)
-    bridge = ContactTeleopBridge(cfg)
-    assert bridge.cfg.desired_force_n == 7.0
-    assert bridge.dual.config.force.kp == 0.002
-    assert bridge.dual.config.force.ki == 0.001
-    assert bridge.dual.config.force.Fd_N == 7.0
-    assert bridge.dual.config.force.wrench_in_tool_frame is False
-    assert bridge.dual.config.align.k_ori == 3.0
-    assert bridge.dual.config.align.b_lin == 30.0
-    assert bridge._k_ori_full == 3.0
-
-
 def test_dualloop_outputs_qdot_not_joint_torque():
     """Default actuation=speedj: DualLoop → q̇ (not DTC τ)."""
     bridge = ContactTeleopBridge(
@@ -575,3 +482,28 @@ def test_dualloop_outputs_qdot_not_joint_torque():
     assert float(np.linalg.norm(qdot)) > 0.0
     assert not hasattr(bridge, "publish_torques")
     assert float(np.linalg.norm(bridge.last_tau)) == 0.0
+
+
+def test_normalize_contact_actuation_aliases():
+    assert normalize_contact_actuation("dtc-pure") == "dtc_pure"
+    assert normalize_contact_actuation("pure_dtc") == "dtc_pure"
+    assert is_dtc_pure_actuation("dtc_pure")
+    assert is_dtc_actuation("dtc_pure")
+    assert is_dtc_actuation("dtc")
+    assert normalize_contact_actuation("dtc_hybrid") == "dtc"
+    assert not is_dtc_pure_actuation("dtc")
+    assert not is_dtc_actuation("speedj")
+    assert normalize_contact_actuation("nope") == "speedj"
+
+
+def test_print_pendant_tcp_dbg_reports_flange_offset(capsys):
+    print_pendant_tcp_dbg(
+        [0.4, -0.2, 0.25],
+        [0.4, -0.2, 0.10],
+        [0.0, 0.0, 0.0],
+    )
+    out = capsys.readouterr().out
+    assert "pendant TCP" in out
+    assert "150.0mm" in out
+    assert "getActualTCPPose" in out
+

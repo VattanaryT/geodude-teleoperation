@@ -6,10 +6,16 @@ from pathlib import Path
 import numpy as np
 import open3d as o3d
 
-from diffused_fields.diffusion import PointcloudScalarDiffusion, WalkOnSpheresDiffusion
-from diffused_fields.manifold import Pointcloud
-
+from geodude_teleoperation.df_runtime import prefer_env_diffused_fields
 from geodude_teleoperation.paths import ssot_dof_config_path
+
+prefer_env_diffused_fields()
+
+from diffused_fields.diffusion import (  # noqa: E402
+    PointcloudScalarDiffusion,
+    WalkOnSpheresDiffusion,
+)
+from diffused_fields.manifold import Pointcloud  # noqa: E402
 
 _DEFAULTS = {"voxel_size": 0.004, "normal_orientation": 1}
 

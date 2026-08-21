@@ -33,6 +33,26 @@ def data_processed_dir() -> Path:
     return repo_root() / "data" / "processed"
 
 
+def resolve_repo_path(path: Path | str | None) -> Path | None:
+    """Resolve SSoT / CLI paths so relative entries work from any cwd.
+
+    Absolute paths are unchanged. Relative paths use an existing cwd file when
+    present, otherwise ``repo_root() / path`` (so ``data/processed/...`` in YAML
+    does not depend on launching from the worktree root).
+    """
+    if path is None:
+        return None
+    p = Path(path).expanduser()
+    if not p.parts:
+        return None
+    if p.is_absolute():
+        return p
+    cwd_p = Path.cwd() / p
+    if cwd_p.exists():
+        return cwd_p
+    return repo_root() / p
+
+
 def default_ply_path() -> Path:
     return data_processed_dir() / "object_tag0_crop_voxel0.0020.ply"
 

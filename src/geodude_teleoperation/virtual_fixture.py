@@ -1,11 +1,16 @@
 import gafropy
 import numpy as np
-from diffused_fields.diffusion.pointcloud_quaternion_diffusion import (
+
+from geodude_teleoperation.df_runtime import prefer_env_diffused_fields
+
+prefer_env_diffused_fields()
+
+from diffused_fields.diffusion.pointcloud_quaternion_diffusion import (  # noqa: E402
     PointcloudQuaternionDiffusion,
 )
-from diffused_fields.diffusion.walk_on_spheres import WalkOnSpheresDiffusion
-from diffused_fields.manifold._rotor_interop import as_scipy_rotation
-from diffused_fields.manifold.pointcloud import Pointcloud
+from diffused_fields.diffusion.walk_on_spheres import WalkOnSpheresDiffusion  # noqa: E402
+from diffused_fields.manifold._rotor_interop import as_scipy_rotation  # noqa: E402
+from diffused_fields.manifold.pointcloud import Pointcloud  # noqa: E402
 from scipy.spatial.transform import Rotation
 
 

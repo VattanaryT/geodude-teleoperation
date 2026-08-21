@@ -7,6 +7,7 @@ under ``data/processed/``; Polyscope helpers are in ``viz.polyscope_helpers``
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
 from typing import Any, Sequence
@@ -15,6 +16,10 @@ import numpy as np
 
 from geodude_teleoperation.frames import transform_points
 from geodude_teleoperation.tag_crosscheck import load_T_cam_EE
+from geodude_teleoperation.viz.display import (
+    ensure_gui_display,
+    viz_missing_display_message,
+)
 from geodude_teleoperation.viz.live_state import LiveVizState, latency_table_rows
 
 
@@ -82,6 +87,29 @@ def _ensure_polyscope() -> None:
     plot_orientation_field = _plot_orientation_field
     set_camera_and_plane = _set_camera_and_plane
     frame_camera_on_points = _frame_camera_on_points
+
+
+def _init_polyscope() -> None:
+    """``ps.init()`` after attaching to a local X11 session if DISPLAY is empty."""
+    _ensure_polyscope()
+    assert ps is not None
+    had_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    chosen = ensure_gui_display()
+    if not chosen:
+        raise SystemExit(viz_missing_display_message())
+    if not had_display:
+        print(
+            f"[viz] DISPLAY was unset; using {chosen} "
+            "(Polyscope window on that local desktop)",
+            flush=True,
+        )
+    try:
+        ps.init()
+    except RuntimeError as exc:
+        raise SystemExit(
+            f"error: --viz Polyscope failed to open a window ({exc}).\n"
+            "  Check DISPLAY / ssh -X, or omit --viz."
+        ) from exc
 
 
 def points_in_viz_frame(
@@ -1356,7 +1384,7 @@ def show_field_debug(
             flush=True,
         )
 
-    ps.init()
+    _init_polyscope()
     # Layup is roughly XY (thin in Z); z_up keeps it horizontal at startup.
     set_camera_and_plane(up="z_up")
     ps.set_ground_plane_mode("none")

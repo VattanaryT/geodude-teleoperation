@@ -4,10 +4,15 @@ Dedicated ``--in-contact`` path (not free-space pose-ref teleop).
 
 ``actuation``:
   - ``speedj`` — DualLoop tip twist → q̇ → RTDE ``speedJ`` (legacy).
-  - ``dtc`` — pygafro line tracking + Eq. 56 → τ → ``directTorque`` (research path).
+  - ``dtc`` — hybrid: DualLoop speedJ for ALIGN + unloaded SEEK; Eq. 56 after
+    compression (hardware bring-up default).
+  - ``dtc_pure`` — Eq. 56 / pygafro → τ → ``directTorque`` every tick.
+    ALIGN: ``W_L`` only (tool-Z → n*). SEEK: ``W_L``+``W_C``.
+    ``control.max_joint_velocity`` / ``rtde_accel`` are speedJ-only; DTC uses
+    ``dtc_startup_*`` and ``dtc_max_dtau_nm_s`` (τ slew).
 
-Align phase (speedj): ω only (tip holds). Keyboard tangent is one-shot hold;
-SpaceMouse uses ``continuous=True`` (cleared on deadzone / age-out).
+Align phase: ω / orientation only (tip holds). Keyboard tangent is
+one-shot hold; SpaceMouse uses ``continuous=True`` (cleared on deadzone / age-out).
 """
 from __future__ import annotations
 
@@ -28,13 +33,88 @@ _YELLOW = "\033[93m"
 _RESET = "\033[0m"
 
 
+def _print_dtc_dbg(msg: str) -> None:
+    """Low-rate operator debug (bright/light yellow)."""
+    print(f"{_YELLOW}[dtc-dbg] {msg}{_RESET}", flush=True)
+
+
+def _fmt3(v: np.ndarray) -> str:
+    a = np.asarray(v, dtype=float).reshape(-1)
+    return "[" + ", ".join(f"{float(x):+.3f}" for x in a) + "]"
+
+
+def _rpy_deg(R: np.ndarray) -> np.ndarray:
+    from scipy.spatial.transform import Rotation
+
+    return Rotation.from_matrix(np.asarray(R, dtype=float).reshape(3, 3)).as_euler(
+        "xyz", degrees=True
+    )
+
+
+def print_pendant_tcp_dbg(
+    p_tcp: Sequence[float],
+    p_flange: Sequence[float],
+    tip_offset_yaml: Sequence[float] | None = None,
+) -> None:
+    """Confirm CGA / Eq. 56 use RTDE pendant TCP (tool offset included)."""
+    p = np.asarray(p_tcp, dtype=float).reshape(3)
+    fl = np.asarray(p_flange, dtype=float).reshape(3)
+    off = p - fl
+    yaml_off = (
+        np.zeros(3)
+        if tip_offset_yaml is None
+        else np.asarray(tip_offset_yaml, dtype=float).reshape(3)
+    )
+    _print_dtc_dbg(
+        "pendant TCP  "
+        f"rtde={_fmt3(p)}  "
+        f"flange={_fmt3(fl)}  "
+        f"flange→tcp={_fmt3(off)}  "
+        f"|offset|={float(np.linalg.norm(off)) * 1000.0:.1f}mm  "
+        f"yaml_tip={_fmt3(yaml_off)}  "
+        "CGA line + J at getActualTCPPose (pendant tool), not flange"
+    )
+
+_ACTUATION_ALIASES = {
+    "speedj": "speedj",
+    "speed_j": "speedj",
+    "dtc": "dtc",
+    "dtc_hybrid": "dtc",
+    "hybrid": "dtc",
+    "dtc_pure": "dtc_pure",
+    "pure": "dtc_pure",
+    "pure_dtc": "dtc_pure",
+    "dtc_full": "dtc_pure",
+}
+
+
+def normalize_contact_actuation(actuation: str | None) -> str:
+    """Map YAML/CLI aliases onto ``speedj`` | ``dtc`` | ``dtc_pure``."""
+    raw = str(actuation or "speedj").strip().lower().replace("-", "_")
+    return _ACTUATION_ALIASES.get(raw, "speedj")
+
+
+def is_dtc_actuation(actuation: str | None) -> bool:
+    return normalize_contact_actuation(actuation) in ("dtc", "dtc_pure")
+
+
+def is_dtc_pure_actuation(actuation: str | None) -> bool:
+    return normalize_contact_actuation(actuation) == "dtc_pure"
+
+
 def print_actuation_banner(actuation: str, *, desired_force_n: float | None = None) -> None:
     """Yellow terminal warning so speedJ vs DTC cannot be ambiguous."""
-    mode = str(actuation).strip().lower()
-    if mode == "dtc":
+    mode = normalize_contact_actuation(actuation)
+    if mode == "dtc_pure":
         msg = (
-            "WARNING: in-contact ACTUATION=DTC (Eq.56 / pygafro line motors → "
-            "direct_torque). Not DualLoop speedJ."
+            "WARNING: in-contact ACTUATION=DTC_PURE (Eq.56 → direct_torque). "
+            "ALIGN=W_L only; SEEK=W_L+W_C. No DualLoop speedJ "
+            "(control.* vel/accel unused — see dtc_max_dtau_nm_s)."
+        )
+    elif mode == "dtc":
+        msg = (
+            "WARNING: in-contact ACTUATION=DTC hybrid (DualLoop speedJ for "
+            "ALIGN + unloaded SEEK; Eq.56 after compression). Not DTC_PURE."
         )
     else:
         msg = (
@@ -77,7 +157,7 @@ def field_tangent_world(
     scale: float = 1.0,
     n_approach: np.ndarray | None = None,
     use_cga_motor: bool = True,
-) -> np.ndarray:
+) -> tuple[np.ndarray, bool]:
     """Map field/local-frame linear ``[lx, ly, lz]`` to world tangent.
 
     ``R_local`` is the teleop / VF motion frame (same as free-space WASD:
@@ -85,24 +165,25 @@ def field_tangent_world(
     column 2) is removed so Force owns the normal.
 
     When ``use_cga_motor`` (default), local axes are sandwich-mapped with a
-    pygafro ``Rotor`` (true CGA motor generator for orientations). Falls back to
-    ``R @ v`` only if pygafro is unavailable.
+    pygafro ``Rotor`` (true CGA). Returns ``(v_world, used_cga)``.
     """
     lin = np.asarray(lin_field, dtype=float).reshape(3)
     R = np.asarray(R_local, dtype=float).reshape(3, 3)
     n = _unit(R[:, 2] if n_approach is None else np.asarray(n_approach, dtype=float))
-    # Local xy only (lz ignored for contact tangent); build local vector then sandwich.
     v_local = np.array([float(lin[0]), float(lin[1]), 0.0], dtype=float)
+    used_cga = False
     if use_cga_motor:
         try:
             from geodude_teleoperation.cga.motors import sandwich_direction
 
             v = float(scale) * sandwich_direction(R, v_local)
+            used_cga = True
         except Exception:
             v = float(scale) * (v_local[0] * R[:, 0] + v_local[1] * R[:, 1])
     else:
         v = float(scale) * (v_local[0] * R[:, 0] + v_local[1] * R[:, 1])
-    return v - n * float(np.dot(v, n))
+    v = v - n * float(np.dot(v, n))
+    return v, used_cga
 
 
 def twist_to_qdot(
@@ -138,7 +219,7 @@ def twist_to_qdot(
 @dataclass
 class ContactTeleopConfig:
     desired_force_n: float = 5.0
-    # ``speedj`` = DualLoop→q̇; ``dtc`` = Eq.56→τ (pygafro).
+    # ``speedj`` | ``dtc`` (hybrid) | ``dtc_pure`` (Eq.56 from ALIGN through SEEK).
     actuation: str = "speedj"
     # Keyboard step (default 0.01) × scale → tip tangent speed (m/s).
     tangent_scale: float = 8.0
@@ -169,11 +250,28 @@ class ContactTeleopConfig:
     # Soft approach caps (m/s) — keep far below free-space teleop speeds.
     approach_v_max_m_s: float = 0.006
     max_v_along_m_s: float = 0.010
+    # Air SEEK: spring f = max(Fd, k·signed_d) along n* (N/m). 0 → Fd only.
+    approach_stiffness_n_per_m: float = 400.0
     # DTC hybrid: DualLoop speedJ until *real* compression along n*, then Eq.56.
     # signed_d alone is unreliable (Polyscope / tip mismatch → air-gap DTC freeze).
     dtc_contact_dist_m: float = 0.008  # optional proximity confirm (looser than load)
     dtc_require_force: bool = True  # require Fs ≥ force_contact_threshold_N
-    # Freeze VF n* on Enter (press f to unfreeze). Stops live-n* lateral wander.
+    # Hybrid: also require Fs ≥ this fraction of |Fd| before DTC (else DualLoop
+    # builds load + teleop). Avoids DTC at Fs≪Fd with weak P-only W_C.
+    dtc_min_fs_frac_of_fd: float = 0.25
+    # Exit DTC only below this fraction of the *enter* threshold (hysteresis).
+    # 1.0 = no hysteresis (bounce). ~0.35 keeps DTC through soft-ramp dips.
+    dtc_exit_fs_frac_of_enter: float = 0.35
+    # Once latched, ignore low-|Fs| exit for this long (mode-switch bounce).
+    dtc_min_hold_s: float = 1.5
+    # |Fs| must stay below exit need this long before DualLoop hand-back.
+    dtc_exit_hold_s: float = 0.35
+    # dtc_pure: ease W_L / W_C and ‖τ‖ from 0 after first τ tick (no field snap).
+    dtc_startup_ramp_s: float = 3.0
+    dtc_startup_tau_nm: float = 2.0
+    # DTC analog of control.rtde_accel: max ‖Δτ‖/dt [Nm/s]. 0 = disabled.
+    dtc_max_dtau_nm_s: float = 8.0
+    # Lock n* when SEEK starts (press f anytime). ALIGN always follows live field.
     freeze_n_on_arm: bool = True
     # Skip F/T bias if already loaded (avoids zeroing real contact force).
     bias_skip_load_N: float = 2.0
@@ -214,9 +312,7 @@ def config_from_args(args: Any) -> ContactTeleopConfig:
     except (TypeError, ValueError):
         fd_f = 5.0
 
-    act = str(getattr(args, "contact_actuation", "speedj") or "speedj").strip().lower()
-    if act not in ("speedj", "dtc"):
-        act = "speedj"
+    act = normalize_contact_actuation(getattr(args, "contact_actuation", "speedj"))
 
     def _seq6(name: str) -> Sequence[float] | None:
         v = getattr(args, name, None)
@@ -253,8 +349,18 @@ def config_from_args(args: Any) -> ContactTeleopConfig:
         max_wrench_n=_float("max_wrench_n", 12.0),
         approach_v_max_m_s=_float("approach_v_max", 0.006),
         max_v_along_m_s=_float("force_max_v", 0.010),
+        approach_stiffness_n_per_m=_float("approach_stiffness_n_per_m", 400.0),
         dtc_contact_dist_m=_float("dtc_contact_dist_m", 0.008),
         dtc_require_force=_bool("dtc_require_force", True),
+        dtc_min_fs_frac_of_fd=_float("dtc_min_fs_frac_of_fd", 0.25),
+        dtc_exit_fs_frac_of_enter=_float("dtc_exit_fs_frac_of_enter", 0.35),
+        dtc_min_hold_s=_float("dtc_min_hold_s", 1.5),
+        dtc_exit_hold_s=_float("dtc_exit_hold_s", 0.35),
+        dtc_startup_ramp_s=_float(
+            "dtc_startup_ramp_s", _float("startup_ramp_s", 3.0)
+        ),
+        dtc_startup_tau_nm=_float("dtc_startup_tau_nm", 2.0),
+        dtc_max_dtau_nm_s=_float("dtc_max_dtau_nm_s", 8.0),
         freeze_n_on_arm=_bool("freeze_n_on_arm", True),
         bias_skip_load_N=_float("bias_skip_load_N", 2.0),
         align_first=_bool("align_first", True),
@@ -272,10 +378,11 @@ def config_from_args(args: Any) -> ContactTeleopConfig:
 
 
 class ContactTeleopBridge:
-    """Tip-tracked DualLoop (``speedj``) or Eq. 56 DTC (``dtc``) + tangent FF.
+    """Tip-tracked DualLoop (``speedj``) or Eq. 56 DTC (``dtc`` / ``dtc_pure``).
 
     ``actuation=speedj``: tip twist → ``q̇`` for RTDE ``speedJ``.
-    ``actuation=dtc``: pygafro line motors + Eq. 56 → joint τ for ``directTorque``.
+    ``actuation=dtc``: DualLoop speedJ until compression, then Eq. 56 τ.
+    ``actuation=dtc_pure``: pygafro line motors + Eq. 56 τ from ALIGN through SEEK.
 
     With ``align_first`` (default): after Enter, Align runs until tool-Z is within
     ``align_enter_tol_deg`` of ``n*``; Force seek/hold stays off until then.
@@ -286,9 +393,8 @@ class ContactTeleopBridge:
 
     def __init__(self, cfg: ContactTeleopConfig | None = None):
         self.cfg = cfg or ContactTeleopConfig()
-        self.actuation = str(self.cfg.actuation).strip().lower()
-        if self.actuation not in ("speedj", "dtc"):
-            self.actuation = "speedj"
+        self.actuation = normalize_contact_actuation(self.cfg.actuation)
+        self.cfg.actuation = self.actuation
 
         dual_cfg = DualLoopConfig()
         dual_cfg.force.Fd_N = float(self.cfg.desired_force_n)
@@ -317,7 +423,7 @@ class ContactTeleopBridge:
         self._k_ori_full = float(self.dual.config.align.k_ori)
 
         self._eq56 = None
-        if self.actuation == "dtc":
+        if is_dtc_actuation(self.actuation):
             from geodude_teleoperation.cga.pygafro_backend import require_pygafro
             from geodude_teleoperation.cga.tactile_law import (
                 Eq56Controller,
@@ -356,6 +462,10 @@ class ContactTeleopBridge:
                 contact_threshold_n=float(self.cfg.force_contact_threshold_N),
                 approach_force_n=approach_f,
                 max_wrench_n=float(self.cfg.max_wrench_n),
+                force_lpf_hz=float(self.cfg.force_lpf_hz),
+                approach_stiffness_n_per_m=float(
+                    getattr(self.cfg, "approach_stiffness_n_per_m", 400.0)
+                ),
             )
 
         self.n_frozen = False
@@ -369,9 +479,33 @@ class ContactTeleopBridge:
         self.last_diag: dict = {}
         self.last_tau = np.zeros(6, dtype=float)
         self.armed_mono_t: float | None = None
+        # dtc_pure ‖τ‖ ramp: starts on first step_tau (not Enter — WoS can stall).
+        self._dtc_ramp_mono_t: float | None = None
+        self._tau_cmd_prev: np.ndarray | None = None
         self._k_perp_full = float(self.dual.config.align.k_perp)
         # DTC: subtract Enter-time F/T (DualLoop bias is 3-vector only).
         self._wrench_bias6 = np.zeros(6, dtype=float)
+        self._logged_first_wrench = False
+        self._logged_first_seek = False
+        self._n_star_enter: np.ndarray | None = None
+        self._last_live_dbg_t: float | None = None
+        self._n_star_logged: np.ndarray | None = None
+        self._last_cga_tan = False
+        self._logged_force_sign_hint = False
+        self._dtc_latched = False
+        self._dtc_latch_mono_t: float | None = None
+        self._dtc_exit_mono_t: float | None = None
+        # DualLoop must not trip/retract below Fd while hybrid waits for DTC.
+        fd_abs = abs(float(self.cfg.desired_force_n))
+        self.dual.config.force.fault_abs_fs_N = max(
+            float(self.dual.config.force.fault_abs_fs_N),
+            fd_abs * 1.25,
+        )
+        # fault_fd_mult=6 made |Fs| trips impossible at Fd=70 (thresh=420 N).
+        self.dual.config.force.fault_fd_mult = min(
+            float(self.dual.config.force.fault_fd_mult),
+            1.35,
+        )
 
     def toggle_freeze(self) -> bool:
         self.n_frozen = not self.n_frozen
@@ -392,10 +526,12 @@ class ContactTeleopBridge:
         return float(np.degrees(np.arccos(d)))
 
     def _update_phase(self, ang_z_deg: float) -> None:
+        prev = self.phase
         if not self.cfg.align_first:
             self.phase = self.PHASE_SEEK
             self.dual.config.force.enable = True
             self.dual.config.align.k_ori = self._k_ori_full
+            self._apply_phase_field_lock(prev, ang_z_deg)
             return
         # Full Align gain while correcting tilt; Force gated by phase.
         self.dual.config.align.k_ori = self._k_ori_full
@@ -408,6 +544,70 @@ class ContactTeleopBridge:
             if ang_z_deg >= exit_:
                 self.phase = self.PHASE_ALIGN
         self.dual.config.force.enable = self.phase == self.PHASE_SEEK
+        self._apply_phase_field_lock(prev, ang_z_deg)
+
+    def _apply_phase_field_lock(self, prev_phase: str, ang_z_deg: float) -> None:
+        """ALIGN follows live WoS/field; SEEK may lock that live n* for force."""
+        if not self.cfg.freeze_n_on_arm:
+            return
+        if self.phase == self.PHASE_ALIGN and prev_phase != self.PHASE_ALIGN:
+            self.n_frozen = False
+            _print_dtc_dbg(
+                f"ALIGN live field  ang_z={ang_z_deg:.1f}deg  "
+                "(n* tracks tip query; press f to lock)"
+            )
+        elif self.phase == self.PHASE_SEEK and prev_phase != self.PHASE_SEEK:
+            self.n_frozen = True
+            n = (
+                _unit(self._R_star[:, 2])
+                if self._R_star is not None
+                else np.zeros(3)
+            )
+            t1 = (
+                _unit(self._R_star[:, 0])
+                if self._R_star is not None
+                else np.zeros(3)
+            )
+            _print_dtc_dbg(
+                "SEEK freeze n*  "
+                f"n*={_fmt3(n)}  line_t1={_fmt3(t1)}  "
+                f"ang_z={ang_z_deg:.1f}deg"
+            )
+        # Do not re-freeze every tick — that fights the user's `f` toggle.
+
+    def _maybe_log_live_n(self, R_star: np.ndarray, ang_z_deg: float) -> None:
+        """Yellow live-n* line at most every 2 s, and only if the field moved."""
+        if self.n_frozen:
+            return
+        now = time.monotonic()
+        if self._last_live_dbg_t is not None and (now - self._last_live_dbg_t) < 2.0:
+            return
+        n = _unit(np.asarray(R_star, dtype=float).reshape(3, 3)[:, 2])
+        t1 = _unit(np.asarray(R_star, dtype=float).reshape(3, 3)[:, 0])
+        n_ref = self._n_star_logged if self._n_star_logged is not None else self._n_star_enter
+        drift = 0.0
+        if n_ref is not None:
+            drift = float(
+                np.degrees(np.arccos(float(np.clip(np.dot(n, _unit(n_ref)), -1.0, 1.0))))
+            )
+        if self._last_live_dbg_t is not None and drift < 8.0:
+            return
+        self._last_live_dbg_t = now
+        self._n_star_logged = n.copy()
+        enter_drift = 0.0
+        if self._n_star_enter is not None:
+            enter_drift = float(
+                np.degrees(
+                    np.arccos(
+                        float(np.clip(np.dot(n, _unit(self._n_star_enter)), -1.0, 1.0))
+                    )
+                )
+            )
+        _print_dtc_dbg(
+            "live n*   "
+            f"n*={_fmt3(n)}  line_t1={_fmt3(t1)}  "
+            f"d_enter={enter_drift:.1f}deg  ang_z={ang_z_deg:.1f}deg"
+        )
 
     def arm(
         self,
@@ -444,13 +644,37 @@ class ContactTeleopBridge:
             elif force_bias_samples is None:
                 self.dual.force._f_bias[:] = 0.0
                 self._wrench_bias6[:] = 0.0
-        if self.cfg.freeze_n_on_arm:
-            self.n_frozen = True
         ang0 = self._tool_z_error_deg(R_tcp, R_star)
+        n_star = _unit(R_star[:, 2])
+        t1 = _unit(R_star[:, 0])
+        R_ee = np.asarray(R_tcp, dtype=float).reshape(3, 3)
+        n_ee = _unit(R_ee[:, 2])
+        self.n_frozen = False
+        self._n_star_enter = n_star.copy()
+        self._n_star_logged = n_star.copy()
+        self._last_live_dbg_t = None
+        self._logged_first_wrench = False
+        self._logged_first_seek = False
         self.phase = (
             self.PHASE_SEEK
             if (not self.cfg.align_first or ang0 <= float(self.cfg.align_enter_tol_deg))
             else self.PHASE_ALIGN
+        )
+        if self.cfg.freeze_n_on_arm and self.phase == self.PHASE_SEEK:
+            self.n_frozen = True
+        _print_dtc_dbg(
+            "start TCP  "
+            f"p_m={_fmt3(p)}  "
+            f"rpy_deg={_fmt3(_rpy_deg(R_ee))}  "
+            f"tool_z={_fmt3(n_ee)}"
+        )
+        _print_dtc_dbg(
+            "field n*   "
+            f"n*={_fmt3(n_star)}  "
+            f"line_t1={_fmt3(t1)}  "
+            f"R*_rpy_deg={_fmt3(_rpy_deg(R_star))}  "
+            f"ang_z={ang0:.1f}deg  "
+            f"{'SEEK freeze' if self.n_frozen else 'ALIGN live query'}"
         )
         self.dual.config.force.enable = self.phase == self.PHASE_SEEK
         self.dual.config.align.k_ori = self._k_ori_full
@@ -459,11 +683,16 @@ class ContactTeleopBridge:
             self._eq56.reset()
         self.armed = True
         self.armed_mono_t = time.monotonic()
+        self._dtc_ramp_mono_t = None  # start on first step_tau
+        self._tau_cmd_prev = None
         self._pending_v_tan[:] = 0.0
         self._tan_hold_s_left = 0.0
         self._tan_continuous = False
         self._logged_seek_speedj = False
         self._logged_seek_dtc = False
+        self._dtc_latched = False
+        self._dtc_latch_mono_t = None
+        self._dtc_exit_mono_t = None
         print_actuation_banner(self.actuation, desired_force_n=self.cfg.desired_force_n)
 
     def clear_tangent(self) -> None:
@@ -495,12 +724,13 @@ class ContactTeleopBridge:
         self.last_tangent_field = lin.copy()
         if n_approach is None and self._R_star is not None:
             n_approach = self._R_star[:, 2]
-        self._pending_v_tan = field_tangent_world(
+        self._pending_v_tan, used_cga = field_tangent_world(
             lin,
             R_local,
             scale=float(self.cfg.tangent_scale),
             n_approach=n_approach,
         )
+        self._last_cga_tan = bool(used_cga)
         self._tan_continuous = bool(continuous)
         if continuous:
             self._tan_hold_s_left = 0.0
@@ -534,31 +764,71 @@ class ContactTeleopBridge:
         n = _unit(np.asarray(R_star, dtype=float).reshape(3, 3)[:, 2])
         return float(np.dot(f, n)) * float(self.cfg.force_sign)
 
+    def _dtc_fs_need_enter(self) -> float:
+        thr = float(self.cfg.force_contact_threshold_N)
+        fd = abs(float(self.cfg.desired_force_n))
+        frac = float(self.cfg.dtc_min_fs_frac_of_fd)
+        return max(thr, frac * fd) if frac > 0.0 else thr
+
+    def _dtc_fs_need_exit(self) -> float:
+        """Lower threshold once latched — soft ramp dips must not bounce to DualLoop."""
+        enter = self._dtc_fs_need_enter()
+        thr = float(self.cfg.force_contact_threshold_N)
+        frac = float(getattr(self.cfg, "dtc_exit_fs_frac_of_enter", 0.35))
+        frac = float(np.clip(frac, 0.05, 1.0))
+        return max(thr, frac * enter)
+
     def _dtc_contact_ready(
         self,
         *,
         signed_d: float | None,
         fs_n: float,
+        latched: bool = False,
     ) -> bool:
-        """True when seek may hand off to Eq.56 DTC.
+        """True when seek may hand off to / stay on Eq.56 DTC.
 
-        Geometric ``signed_d`` alone is not enough (VF/Polyscope tip mismatch leaves
-        an air gap while ``d`` is already small). Require compression along n* when
-        ``dtc_require_force`` (default).
+        Enter requires |Fs| ≥ enter need. Once latched, stay until |Fs| < exit
+        need (hysteresis), subject to min-hold / exit-debounce in ``step``.
         """
         d_gate = float(self.cfg.dtc_contact_dist_m)
         near_geom = True
         if signed_d is not None and np.isfinite(float(signed_d)):
-            # Allow a bit of mismatch slack beyond the nominal gate.
             near_geom = float(signed_d) <= max(d_gate, 0.015)
         if bool(self.cfg.dtc_require_force):
-            loaded = float(fs_n) >= float(self.cfg.force_contact_threshold_N)
-            return bool(loaded and near_geom)
+            need = self._dtc_fs_need_exit() if latched else self._dtc_fs_need_enter()
+            return bool(abs(float(fs_n)) >= need)
         return bool(
             signed_d is not None
             and np.isfinite(float(signed_d))
             and float(signed_d) <= d_gate
+            and bool(near_geom)
         )
+
+    def _dtc_should_stay_latched(self, fs_n: float, *, force_ready: bool) -> bool:
+        """Apply min-hold and exit debounce so mode-switch Fs dips don't bounce."""
+        now = time.monotonic()
+        if not getattr(self, "_dtc_latched", False):
+            self._dtc_exit_mono_t = None
+            return bool(force_ready)
+        # Min hold after handoff (speedJ→DTC often dips Fs for ~100–300 ms).
+        t0 = self._dtc_latch_mono_t
+        min_hold = float(getattr(self.cfg, "dtc_min_hold_s", 1.5))
+        if t0 is not None and (now - float(t0)) < min_hold:
+            self._dtc_exit_mono_t = None
+            return True
+        if force_ready:
+            self._dtc_exit_mono_t = None
+            return True
+        # Debounce exit: |Fs| must stay low continuously.
+        exit_hold = float(getattr(self.cfg, "dtc_exit_hold_s", 0.35))
+        if exit_hold <= 1e-9:
+            return False
+        if self._dtc_exit_mono_t is None:
+            self._dtc_exit_mono_t = now
+            return True
+        if (now - float(self._dtc_exit_mono_t)) < exit_hold:
+            return True
+        return False
 
     def step(
         self,
@@ -572,18 +842,97 @@ class ContactTeleopBridge:
         wrench6: Sequence[float] | None = None,
         qdot_meas: Sequence[float] | None = None,
         signed_d: float | None = None,
+        tip_nn: float | None = None,
     ) -> np.ndarray:
-        """Run contact law; return ``q̇`` (speedj) or zeros when ``actuation=dtc`` loaded.
+        """Run contact law; return ``q̇`` (speedj) or zeros when DTC owns the tick.
 
-        For loaded-surface DTC, call :meth:`step_tau` (or this method then read ``last_tau``).
+        For loaded-surface hybrid DTC or any ``dtc_pure`` tick, call
+        :meth:`step_tau` (or this method then read ``last_tau``).
         """
-        if self.actuation == "dtc":
+        if is_dtc_actuation(self.actuation):
+            if not self.armed:
+                return np.zeros(jacobian.shape[1], dtype=float)
+            if is_dtc_pure_actuation(self.actuation):
+                # ALIGN: Eq.56 W_L only. SEEK air gap: speedJ along n* (open-loop
+                # DTC cannot close a free gap). SEEK near/on contact: Eq.56.
+                R_star = self._refresh_R_star(R_field)
+                self.step_tau(
+                    p_tcp=p_tcp,
+                    R_tcp=R_tcp,
+                    R_field=R_field,
+                    wrench6=wrench6
+                    if wrench6 is not None
+                    else np.concatenate(
+                        [
+                            np.asarray(force_base, dtype=float).reshape(3),
+                            np.zeros(3),
+                        ]
+                    ),
+                    jacobian=jacobian,
+                    dt=dt,
+                    qdot_meas=qdot_meas,
+                    signed_d=signed_d,
+                )
+                aligning = self.phase == self.PHASE_ALIGN
+                in_air = (
+                    self.last_diag is not None
+                    and float(self.last_diag.get("in_air", 0.0)) > 0.5
+                )
+                if self.last_diag is not None:
+                    fs_n = self._estimate_fs_along_n(force_base, R_tcp, R_star)
+                    self.last_diag["Fs_N"] = float(fs_n)
+                if (
+                    not aligning
+                    and self.phase == self.PHASE_SEEK
+                    and in_air
+                ):
+                    n = _unit(R_star[:, 2])
+                    v_app = float(self.cfg.approach_v_max_m_s) * float(
+                        self.cfg.force_sign
+                    )
+                    qdot_air = twist_to_qdot(
+                        v_app * n,
+                        np.zeros(3),
+                        jacobian,
+                        damping=float(self.cfg.damping),
+                        max_joint_velocity=float(self.cfg.max_joint_velocity),
+                    )
+                    self.last_tau = np.zeros(jacobian.shape[1], dtype=float)
+                    if self.last_diag is not None:
+                        self.last_diag["dtc_use_speedj"] = 1.0
+                        self.last_diag["actuation"] = "dtc_pure_air"
+                        self.last_diag["v_approach_m_s"] = float(v_app)
+                    if not getattr(self, "_logged_dtc_pure_air", False):
+                        self._logged_dtc_pure_air = True
+                        d_s = (
+                            f"{float(signed_d):.4f}"
+                            if signed_d is not None and np.isfinite(float(signed_d))
+                            else "nan"
+                        )
+                        print(
+                            "\033[93mWARNING: dtc_pure — SEEK air gap via speedJ "
+                            f"along n* (d={d_s}, v={v_app * 1e3:.1f} mm/s); "
+                            "Eq.56 after d ≤ air_gap.\033[0m",
+                            flush=True,
+                        )
+                    return qdot_air
+                if getattr(self, "_logged_dtc_pure_air", False) and not in_air:
+                    self._logged_dtc_pure_air = False
+                    print(
+                        "\033[93mWARNING: dtc_pure — air closed → Eq.56 "
+                        "directTorque.\033[0m",
+                        flush=True,
+                    )
+                if self.last_diag is not None:
+                    self.last_diag["dtc_use_speedj"] = 0.0
+                    self.last_diag["actuation"] = (
+                        "dtc_pure_align" if aligning else "dtc_pure"
+                    )
+                return np.zeros(jacobian.shape[1], dtype=float)
             # Hybrid (hardware bring-up evidence):
             #   ALIGN            → DualLoop speedJ (ω-only)
             #   SEEK unloaded    → DualLoop speedJ (approach + teleop)
             #   SEEK compressed  → Eq.56 directTorque (Fs ≥ contact threshold)
-            if not self.armed:
-                return np.zeros(jacobian.shape[1], dtype=float)
             R_star = self._refresh_R_star(R_field)
             ang_z_deg = self._tool_z_error_deg(R_tcp, R_star)
             prev_phase = self.phase
@@ -600,7 +949,11 @@ class ContactTeleopBridge:
                 # Fall through to DualLoop velocity align (force off).
             else:
                 fs_n = self._estimate_fs_along_n(force_base, R_tcp, R_star)
-                ready = self._dtc_contact_ready(signed_d=signed_d, fs_n=fs_n)
+                latched = bool(getattr(self, "_dtc_latched", False))
+                force_ready = self._dtc_contact_ready(
+                    signed_d=signed_d, fs_n=fs_n, latched=latched
+                )
+                ready = self._dtc_should_stay_latched(fs_n, force_ready=force_ready)
                 if not ready:
                     if prev_phase == self.PHASE_ALIGN or not getattr(
                         self, "_logged_seek_speedj", False
@@ -613,23 +966,32 @@ class ContactTeleopBridge:
                         )
                         print(
                             "\033[93mWARNING: DTC path — SEEK approach via DualLoop "
-                            f"speedJ (d={d_s}, Fs={fs_n:.2f} N < "
-                            f"{self.cfg.force_contact_threshold_N:g} N); "
-                            "teleop live; Eq.56 after compression.\033[0m",
+                            f"speedJ (d={d_s}, Fs={fs_n:.2f} N); need Fs≥"
+                            f"{self._dtc_fs_need_enter():.1f} N "
+                            f"({self.cfg.dtc_min_fs_frac_of_fd:.0%}·Fd); "
+                            "teleop live.\033[0m",
                             flush=True,
                         )
-                    # Left DTC mid-seek (air gap / lost contact) — allow re-announce.
-                    if getattr(self, "_logged_seek_dtc", False):
+                    # Left DTC mid-seek (truly unloaded past exit hysteresis).
+                    if getattr(self, "_dtc_latched", False):
+                        self._dtc_latched = False
+                        self._dtc_latch_mono_t = None
+                        self._dtc_exit_mono_t = None
                         self._logged_seek_dtc = False
                         print(
                             "\033[93mWARNING: DTC path — back to DualLoop speedJ "
-                            f"(lost compression Fs={fs_n:.2f} N).\033[0m",
+                            f"(lost compression Fs={fs_n:.2f} N; "
+                            f"exit<|{self._dtc_fs_need_exit():.1f}| N).\033[0m",
                             flush=True,
                         )
                     self.last_tau = np.zeros(jacobian.shape[1], dtype=float)
                     # Fall through to DualLoop seek (force on + WASD/SM).
                 else:
-                    if not getattr(self, "_logged_seek_dtc", False):
+                    was_latched = bool(getattr(self, "_dtc_latched", False))
+                    self._dtc_latched = True
+                    if not was_latched:
+                        self._dtc_latch_mono_t = time.monotonic()
+                        self._dtc_exit_mono_t = None
                         self._logged_seek_dtc = True
                         d_s = (
                             f"{float(signed_d):.4f}"
@@ -639,7 +1001,8 @@ class ContactTeleopBridge:
                         print(
                             "\033[93mWARNING: DTC path — SEEK compressed → "
                             f"Eq.56 directTorque (Fs={fs_n:.2f} N, d={d_s} m, "
-                            f"ang_z={ang_z_deg:.1f}deg).\033[0m",
+                            f"ang_z={ang_z_deg:.1f}deg); "
+                            "teleop tangent via CGA Rotor sandwich.\033[0m",
                             flush=True,
                         )
                     self.step_tau(
@@ -657,11 +1020,13 @@ class ContactTeleopBridge:
                         jacobian=jacobian,
                         dt=dt,
                         qdot_meas=qdot_meas,
+                        signed_d=signed_d,
                     )
                     if self.last_diag is not None:
                         self.last_diag["dtc_use_speedj"] = 0.0
                         self.last_diag["actuation"] = "dtc"
                         self.last_diag["Fs_N"] = float(fs_n)
+                        self.last_diag["dtc_latched"] = 1.0
                     return np.zeros(jacobian.shape[1], dtype=float)
 
         if not self.armed:
@@ -675,6 +1040,7 @@ class ContactTeleopBridge:
         ang_z_deg = self._tool_z_error_deg(R_tcp, R_star)
         prev_phase = self.phase
         self._update_phase(ang_z_deg)
+        self._maybe_log_live_n(R_star, ang_z_deg)
 
         # Once loaded, cut Align ω — residual orientation rates at impact were
         # ~0.25 rad/s joint and kept driving into the surface after seek enable.
@@ -694,10 +1060,27 @@ class ContactTeleopBridge:
             self.dual.config.align.k_perp = self._k_perp_full
         cmd, diag = self.dual.step(measured, force_base=force_base, dt=dt)
 
-        # Overload / wrong-sign: never push into the surface, but keep WASD
-        # tangent (old path zeroed the full twist → dead keys while |Fs| high).
+        # Overload / wrong-sign: never push into the surface. Under high |Fs|,
+        # also kill field tangent — lateral speedJ into a jammed contact killed
+        # the RTDE script (Fs≈−115 with WARN=force_sign?).
         fault = float(diag.get("force_fault_fs", 0.0)) > 0.5
         wrong = float(diag.get("force_wrong_sign", 0.0)) > 0.5
+        fs_now = float(diag.get("Fs_N", 0.0))
+        need_load = max(
+            float(self.cfg.force_contact_threshold_N),
+            float(self.cfg.dtc_min_fs_frac_of_fd) * abs(float(self.cfg.desired_force_n)),
+        )
+        jammed = abs(fs_now) >= need_load and (fault or wrong)
+
+        if wrong and abs(fs_now) >= need_load and not self._logged_force_sign_hint:
+            self._logged_force_sign_hint = True
+            hint = -float(self.cfg.force_sign)
+            print(
+                "\033[93mWARNING: Fs has wrong sign vs force_sign="
+                f"{self.cfg.force_sign:g} (Fs≈{fs_now:.1f} N). "
+                f"Set in_contact.force_sign: {hint:g} and re-Enter.\033[0m",
+                flush=True,
+            )
 
         v_tan = self._consume_tangent(dt, aligning=aligning)
         if aligning:
@@ -709,14 +1092,19 @@ class ContactTeleopBridge:
             if wn > align_w_max and wn > 1e-12:
                 w_rad = w_rad * (align_w_max / wn)
         else:
+            if jammed:
+                v_tan = np.zeros(3, dtype=float)
             v = cmd.as_linear() + v_tan
             w_rad = np.deg2rad(cmd.as_angular_deg())
             if fault or wrong:
                 n = _unit(R_star[:, 2])
                 v_n = float(np.dot(v, n))
                 v_perp = v - n * v_n
-                # Retract-only along n* (Fd≥0 → v∥ ≤ 0); preserve field tangent.
-                v = v_perp + n * min(0.0, v_n)
+                # Retract-only along n* (Fd≥0 → v∥ ≤ 0).
+                if jammed:
+                    v = n * min(0.0, v_n)
+                else:
+                    v = v_perp + n * min(0.0, v_n)
                 w_rad[:] = 0.0
             vn = float(np.linalg.norm(v))
             if vn > self.cfg.max_linear_m_s and vn > 1e-12:
@@ -724,6 +1112,31 @@ class ContactTeleopBridge:
             wn = float(np.linalg.norm(np.rad2deg(w_rad)))
             if wn > self.cfg.max_angular_deg_s and wn > 1e-12:
                 w_rad = w_rad * (self.cfg.max_angular_deg_s / wn)
+
+        # Near surface: crawl. Prefer tip_nn (signed_d often stale: d=18 mm while
+        # tip_nn=7 mm). Also crawl once any real load shows.
+        near_surf = False
+        if (
+            signed_d is not None
+            and np.isfinite(float(signed_d))
+            and float(signed_d) < 0.025
+        ):
+            near_surf = True
+        if tip_nn is not None and np.isfinite(float(tip_nn)) and float(tip_nn) < 0.015:
+            near_surf = True
+        if abs(float(diag.get("Fs_N", 0.0))) >= float(
+            self.cfg.force_contact_threshold_N
+        ):
+            near_surf = True
+        if not aligning and near_surf:
+            n = _unit(R_star[:, 2])
+            v_n = float(np.dot(v, n))
+            crawl = 0.002  # 2 mm/s
+            if v_n > crawl:
+                v = v - n * v_n + n * crawl
+            fs_hold = float(diag.get("Fs_N", 0.0))
+            if abs(fs_hold) >= 0.5 * abs(float(self.cfg.desired_force_n)) and v_n > 0.0:
+                v = v - n * v_n  # hold — already near Fd
 
         # Align: keep ‖q̇‖ modest (free-space Enter-lock used ~0.03 rad/s).
         qdot_cap = float(self.cfg.max_joint_velocity)
@@ -764,6 +1177,7 @@ class ContactTeleopBridge:
             "phase_changed": 1.0 if prev_phase != self.phase else 0.0,
             "tau_norm": float(np.linalg.norm(self.last_tau)),
             "qdot_norm": float(np.linalg.norm(qdot)),
+            "cga_tan": 1.0 if self._last_cga_tan else 0.0,
         }
         return qdot
 
@@ -777,8 +1191,9 @@ class ContactTeleopBridge:
         jacobian: np.ndarray,
         dt: float,
         qdot_meas: Sequence[float] | None = None,
+        signed_d: float | None = None,
     ) -> np.ndarray:
-        """Eq. 56 joint torque command (DTC). Requires ``actuation=dtc``."""
+        """Eq. 56 joint torque command (DTC). Requires ``dtc`` or ``dtc_pure``."""
         n_j = int(jacobian.shape[1])
         if not self.armed or self._eq56 is None:
             self.last_tau = np.zeros(n_j, dtype=float)
@@ -791,10 +1206,17 @@ class ContactTeleopBridge:
         ang_z_deg = self._tool_z_error_deg(R_tcp, R_star)
         prev_phase = self.phase
         self._update_phase(ang_z_deg)
+        self._maybe_log_live_n(R_star, ang_z_deg)
         aligning = self.phase == self.PHASE_ALIGN
-        enable_force = (not aligning) and (self.phase == self.PHASE_SEEK)
+        # ALIGN: orientation W_L only (tool-Z → n*). SEEK: full Eq.56 with W_C.
+        # Enabling Fd approach during ALIGN snapped the live UR off-axis.
+        if is_dtc_pure_actuation(self.actuation):
+            enable_force = not aligning
+            v_tan_use = self._consume_tangent(dt, aligning=aligning)
+        else:
+            enable_force = (not aligning) and (self.phase == self.PHASE_SEEK)
+            v_tan_use = self._consume_tangent(dt, aligning=aligning)
 
-        v_tan = self._consume_tangent(dt, aligning=aligning)
         qd = (
             np.zeros(n_j, dtype=float)
             if qdot_meas is None
@@ -803,6 +1225,39 @@ class ContactTeleopBridge:
         # Bias-subtract like DualLoop force path (raw TCP force includes gravity).
         W_raw = np.asarray(wrench6, dtype=float).reshape(6)
         W_meas = W_raw - self._wrench_bias6
+        command_scale = 1.0
+        max_tau_limit = float(self.cfg.max_tau_nm)
+        ramp_t_s = 0.0
+        # Soft τ ramp for hybrid and pure — first hybrid handoff previously dumped
+        # scale=1 / |τ|=max into near-air and killed the RTDE script.
+        if is_dtc_actuation(self.actuation):
+            ramp = float(self.cfg.dtc_startup_ramp_s)
+            if self._dtc_ramp_mono_t is None:
+                self._dtc_ramp_mono_t = time.monotonic()
+            if ramp > 1e-9:
+                ramp_t_s = time.monotonic() - float(self._dtc_ramp_mono_t)
+                command_scale = float(np.clip(ramp_t_s / ramp, 0.0, 1.0))
+            else:
+                ramp_t_s = 0.0
+                command_scale = 1.0
+            tau_lo = float(self.cfg.dtc_startup_tau_nm)
+            tau_hi = float(self.cfg.max_tau_nm)
+            max_tau_limit = tau_lo + command_scale * (tau_hi - tau_lo)
+            # Under existing load, never open DTC at scale=0 / W_C=0 (logs:
+            # Fs≈22 N, scale=0, |τ|≈0.4 Nm → UR path-deviation stop).
+            if self.cfg.wrench_in_tool_frame:
+                fs_est = float(self.cfg.force_sign) * float(W_meas[2])
+            else:
+                fs_est = float(self.cfg.force_sign) * float(
+                    np.dot(W_meas[:3], _unit(R_star[:, 2]))
+                )
+            fd = abs(float(self.cfg.desired_force_n))
+            enter = self._dtc_fs_need_enter()
+            if abs(fs_est) >= 0.5 * enter and fd > 1e-6:
+                floor = float(np.clip(abs(fs_est) / fd, 0.3, 0.95))
+                if command_scale < floor:
+                    command_scale = floor
+                    max_tau_limit = tau_lo + command_scale * (tau_hi - tau_lo)
         tau = self._eq56.step(
             p_tcp=p,
             R_tcp=np.asarray(R_tcp, dtype=float).reshape(3, 3),
@@ -811,16 +1266,44 @@ class ContactTeleopBridge:
             wrench_meas6=W_meas,
             jacobian_ee=jacobian,
             qdot=qd,
-            v_tan_world=None if aligning else v_tan,
+            v_tan_world=v_tan_use,
             dt=dt,
             enable_force=enable_force,
+            command_scale=command_scale,
+            max_tau_limit=max_tau_limit,
+            signed_d=signed_d,
         )
-        self.last_tau = np.asarray(tau, dtype=float).reshape(n_j)
+        tau = np.asarray(tau, dtype=float).reshape(n_j)
+        tau_slew = 0.0
+        dtau_lim = float(self.cfg.dtc_max_dtau_nm_s)
+        if dtau_lim > 1e-9 and is_dtc_actuation(self.actuation):
+            # First DTC tick: accept τ as-is. Slew-from-zero capped |τ| at
+            # dtau_lim/hz (~0.4 Nm @ 20 Nm/s × 50 Hz) under Fs≈22 N → path
+            # deviation protective stop on speedJ→DTC handoff.
+            if self._tau_cmd_prev is None:
+                self._tau_cmd_prev = tau.copy()
+            else:
+                prev = np.asarray(self._tau_cmd_prev, dtype=float).reshape(n_j)
+                dtau = tau - prev
+                step_max = dtau_lim * float(max(dt, 1e-6))
+                dn = float(np.linalg.norm(dtau))
+                if dn > step_max and dn > 1e-12:
+                    tau = prev + dtau * (step_max / dn)
+                    tau_slew = 1.0
+                self._tau_cmd_prev = tau.copy()
+        else:
+            self._tau_cmd_prev = tau.copy()
+        self.last_tau = tau
+        if is_dtc_pure_actuation(self.actuation):
+            act_tag = "dtc_pure_align" if aligning else "dtc_pure"
+        else:
+            act_tag = "dtc"
         self.last_diag = {
             **dict(self._eq56.last_diag),
-            "actuation": "dtc",
+            "actuation": act_tag,
+            "dtc_use_speedj": 0.0,
             "n_freeze": 1.0 if self.n_frozen else 0.0,
-            "v_tan_norm": float(np.linalg.norm(v_tan)),
+            "v_tan_norm": float(np.linalg.norm(v_tan_use)),
             "Fd_N": float(self.cfg.desired_force_n),
             "force_sign": float(self.cfg.force_sign),
             "phase_align": 1.0 if aligning else 0.0,
@@ -828,7 +1311,76 @@ class ContactTeleopBridge:
             "force_enable": 1.0 if enable_force else 0.0,
             "phase_changed": 1.0 if prev_phase != self.phase else 0.0,
             "tau_norm": float(np.linalg.norm(self.last_tau)),
+            "force_fault": float(self._eq56.last_diag.get("fault_fs", 0.0)),
+            "force_wrong_sign": float(self._eq56.last_diag.get("wrong_sign", 0.0)),
+            "command_scale": float(command_scale),
+            "max_tau_limit": float(max_tau_limit),
+            "ramp_t_s": float(ramp_t_s),
+            "tau_slew": float(tau_slew),
+            "dtau_lim_nm_s": float(dtau_lim),
+            "signed_d": (
+                float(signed_d)
+                if signed_d is not None and np.isfinite(float(signed_d))
+                else float("nan")
+            ),
+            "cga_tan": 1.0 if self._last_cga_tan else 0.0,
         }
+        if not self._logged_first_wrench:
+            self._logged_first_wrench = True
+            d = self.last_diag
+            w_l = np.array(
+                [
+                    d.get("W_L_fx", 0.0),
+                    d.get("W_L_fy", 0.0),
+                    d.get("W_L_fz", 0.0),
+                    d.get("W_L_mx", 0.0),
+                    d.get("W_L_my", 0.0),
+                    d.get("W_L_mz", 0.0),
+                ],
+                dtype=float,
+            )
+            w_c = np.array(
+                [
+                    d.get("f_cmd_base_x", 0.0),
+                    d.get("f_cmd_base_y", 0.0),
+                    d.get("f_cmd_base_z", 0.0),
+                    d.get("m_cmd_base_x", 0.0),
+                    d.get("m_cmd_base_y", 0.0),
+                    d.get("m_cmd_base_z", 0.0),
+                ],
+                dtype=float,
+            )
+            sc = float(max(command_scale, 1e-9))
+            _print_dtc_dbg(
+                "first wrench  "
+                f"phase={'align' if aligning else 'seek'}  "
+                f"ang_z={ang_z_deg:.1f}deg  "
+                f"scale={command_scale:.3f}  "
+                f"W_L[f|m]={_fmt3(w_l[:3])}|{_fmt3(w_l[3:])}  "
+                f"W_L_unscaled[m]={_fmt3(w_l[3:] / sc)}  "
+                f"W_C[f|m]={_fmt3(w_c[:3])}|{_fmt3(w_c[3:])}  "
+                f"tau={_fmt3(self.last_tau)}  "
+                f"|τ|={float(np.linalg.norm(self.last_tau)):.2f}Nm"
+            )
+        if (
+            enable_force
+            and not aligning
+            and not self._logged_first_seek
+        ):
+            self._logged_first_seek = True
+            d = self.last_diag
+            tau = self.last_tau
+            _print_dtc_dbg(
+                "SEEK approach  "
+                f"ang_z={ang_z_deg:.1f}deg  "
+                f"signed_d={d.get('signed_d', float('nan')):.4f}m  "
+                f"Fs={float(d.get('Fs_raw_N', d.get('Fs_comp', 0.0))):.2f}N  "
+                f"W_C_N={float(d.get('W_C_norm', 0.0)):.2f}  "
+                f"f_base={_fmt3([d.get('f_cmd_base_x', 0.0), d.get('f_cmd_base_y', 0.0), d.get('f_cmd_base_z', 0.0)])}  "
+                f"wrong_sign={int(d.get('force_wrong_sign', 0.0))}  "
+                f"τ_lin={_fmt3(tau[:3])}  τ_ang={_fmt3(tau[3:])}  "
+                f"slew={int(tau_slew)}"
+            )
         return self.last_tau
 
 

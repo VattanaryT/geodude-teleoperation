@@ -1,6 +1,7 @@
 """Frame-aware contact / Walk-on-Spheres orientation virtual fixture."""
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -232,6 +233,7 @@ class ContactWosOrientationField:
         self._cache_warm = False
         self._status: VFStatus | None = None
         self._frozen = False
+        self._async_th: threading.Thread | None = None
 
     def set_frozen(self, frozen: bool) -> None:
         """When True, ``update_from_state`` keeps ``R_motion`` (no WoS relock)."""
@@ -282,7 +284,29 @@ class ContactWosOrientationField:
             return True, "dist", dist, dt
         return True, "time", dist, dt
 
-    def update_from_state(self, ee_motor, T_tag0_base: np.ndarray | None = None) -> None:
+    def query_async(self, ee_motor, T_tag0_base: np.ndarray | None = None) -> bool:
+        """Run WoS off the control thread. Returns False if a query is already in flight."""
+        th = self._async_th
+        if th is not None and th.is_alive():
+            return False
+
+        def _run() -> None:
+            try:
+                self.update_from_state(ee_motor, T_tag0_base, allow_wos=True)
+            except Exception:
+                pass
+
+        self._async_th = threading.Thread(target=_run, name="vf-wos", daemon=True)
+        self._async_th.start()
+        return True
+
+    def update_from_state(
+        self,
+        ee_motor,
+        T_tag0_base: np.ndarray | None = None,
+        *,
+        allow_wos: bool = True,
+    ) -> None:
         if T_tag0_base is not None:
             self.set_T_tag0_base(T_tag0_base)
 
@@ -292,7 +316,8 @@ class ContactWosOrientationField:
         p_tip_tag0 = tip_tag0_from_tcp(p_tcp, R_tcp, self._tip_offset, self._T_tag0_base)
         self._last_tip_tag0 = p_tip_tag0.copy()
 
-        if self._frozen and self._cache_warm and self._status is not None:
+        skip_wos = (self._frozen or not allow_wos) and self._cache_warm and self._status is not None
+        if skip_wos:
             dist = 0.0
             if self._tip_at_relock is not None:
                 dist = float(np.linalg.norm(p_tip_tag0 - self._tip_at_relock))
@@ -303,14 +328,15 @@ class ContactWosOrientationField:
                 signed_d=prev.signed_d,
                 in_contact=prev.in_contact,
                 tip_nn=prev.tip_nn,
-                used_wos=prev.used_wos,
+                # No WoS on this call (user freeze, or control-thread cache).
+                used_wos=False,
                 query_ms=0.0,
                 R_field_base=np.asarray(prev.R_field_base, dtype=float).copy(),
                 R_motion_base=np.asarray(prev.R_motion_base, dtype=float).copy(),
                 relocked=False,
                 tip_delta_m=dist,
                 dt_since_relock_s=dt,
-                relock_reason="frozen",
+                relock_reason="frozen" if self._frozen else "hold_ctrl",
             )
             return
 
@@ -461,8 +487,14 @@ class FixedOrientationField:
             return np.eye(3)
         return self._R.copy()
 
-    def update_from_state(self, ee_motor, T_tag0_base: np.ndarray | None = None) -> None:
-        del T_tag0_base
+    def update_from_state(
+        self,
+        ee_motor,
+        T_tag0_base: np.ndarray | None = None,
+        *,
+        allow_wos: bool = True,
+    ) -> None:
+        del T_tag0_base, allow_wos
         t0 = time.perf_counter()
         _, R_tcp = _tcp_pose_from_motor(ee_motor)
         if self._R is None:

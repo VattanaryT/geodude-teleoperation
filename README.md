@@ -92,7 +92,7 @@ geodude-ur-stringer-teleop --config config/SSoT_dof_spacemouse_dryrun.yaml \
 | `query` / `vf` | contact band, fit; R_field smoothing & relock | both (VF); free-space pose-ref uses relock heavily |
 | `control` | rates, `keyboard_step`, `spacemouse` (+ `linear_scale` / `angular_scale` / `deadzone` / `hz` / `axis_sign` / `path`), general UR limits (`max_joint_velocity`, `rtde_accel`, `max_linear_speed`, `max_angular_speed`), Enter lock (`orient_lock_on_enable`, `startup_*`, `orient_lock_tol_deg`), `pose_gain`, `max_twist_scale`, `tip_offset` | both |
 | `line_tracking` / `tactile` | soft standoff / normal FF | **free-space only** (forced off in-contact) |
-| `in_contact` | DualLoop Force PID + Align + tangent → **speedJ**, **or** Eq.56/`pygafro` → **directTorque** (`actuation: speedj\|dtc`; yellow banner) | **in-contact only** |
+| `in_contact` | DualLoop Force PID + Align + tangent → **speedJ**, **or** Eq.56/`pygafro` → **directTorque** (`actuation: speedj\|dtc\|dtc_pure`; yellow banner) | **in-contact only** |
 | `tactile.desired_normal_force` | free-space tactile `Fd`; contact prefers `in_contact.desired_force` | both |
 
 Knob-by-knob notes: [`config/SSoT_dof.md`](config/SSoT_dof.md).

@@ -22,7 +22,7 @@ def require_pygafro():
         return ga
     except Exception as exc:  # pragma: no cover - env dependent
         raise ImportError(
-            "in_contact actuation=dtc requires pygafro "
+            "in_contact actuation=dtc / dtc_pure requires pygafro "
             "(pip install pygafro). PyPI gafropy SIGILLs on some CPUs; "
             "use pygafro instead."
         ) from exc

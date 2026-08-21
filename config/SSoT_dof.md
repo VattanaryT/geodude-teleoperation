@@ -146,12 +146,24 @@ Ignored / forced off when in-contact is on. Do not combine `--tactile` with `--i
 
 ## in_contact (DualLoop, RTDE only)
 
-Actuation is **tip twist → q̇ → `speedJ`**. Align admittance and Force PID both
-output **velocity**, not UR `direct_torque`. DTC is only `diag.verify_500hz`.
+Actuation (`in_contact.actuation`):
+
+| Value | What runs |
+| --- | --- |
+| `speedj` | DualLoop Align + Force PID → tip twist → `speedJ`. |
+| `dtc` | **Hybrid:** DualLoop `speedJ` for ALIGN and unloaded SEEK; Eq. 56 `directTorque` after compression. |
+| `dtc_pure` | Eq. 56 → `directTorque`. **ALIGN** = \(W_L\) only (tool-Z→n*); **SEEK** = \(W_L\)+\(W_C\). Ramp (`dtc_startup_*`) + τ slew (`dtc_max_dtau_nm_s`). `control.max_joint_velocity` / `rtde_accel` are **speedJ-only**. |
 
 | Key | Notes |
 | --- | --- |
 | `enabled` | Same as CLI `--in-contact`. Align + Force PID; tangent keys / SpaceMouse xy. |
+| `actuation` | `speedj` \| `dtc` (hybrid) \| `dtc_pure` (ALIGN orientation then SEEK force). |
+| `dtc_contact_dist_m` / `dtc_require_force` | Hybrid `dtc` handoff only. Unused in `dtc_pure`. |
+| `dtc_min_fs_frac_of_fd` | Stay on DualLoop until `|Fs| ≥ max(threshold, frac·Fd)`. Required even when unused. |
+| `dtc_exit_fs_frac_of_enter` | Once on DTC, stay until `|Fs|` drops below `exit_frac × enter`. |
+| `dtc_min_hold_s` / `dtc_exit_hold_s` | Ignore brief `|Fs|` dips after handoff; require hold before exit. |
+| `dtc_startup_ramp_s` / `dtc_startup_tau_nm` | `dtc_pure` ease-in from first τ tick: scale wrenches and lerp \(\|\tau\|\) cap. |
+| `dtc_max_dtau_nm_s` | Max \(\|\Delta\tau\|/\mathrm{d}t\) [Nm/s] (DTC analog of `rtde_accel`). `0` disables. |
 | `desired_force` | DualLoop `Fd` [N]. Prefer this over `tactile.desired_normal_force` for contact. |
 | `force_sign` | `Fs = sign · (F − bias) · n*`. Use `-1` if Enter seeks away from surface. |
 | `force_kp` / `force_ki` / `force_kd` | Force PID: `(m/s)/N`, `(m/s)/(N·s)`, `(m/s)/(N/s)`. |
@@ -170,7 +182,7 @@ output **velocity**, not UR `direct_torque`. DTC is only `diag.verify_500hz`.
 | `tangent_hold_s` | Keyboard one-shot hold (s). SpaceMouse is continuous. |
 | `max_linear_m_s` / `max_angular_deg_s` | DualLoop tip ‖v‖ / ‖ω‖ clips. |
 | `damping` | Damped LS for twist → `q̇`. |
-| `freeze_n_on_arm` | Freeze VF `n*` on Enter (`f` toggles). |
+| `freeze_n_on_arm` | Freeze DualLoop/VF `n*` on Enter (`f` toggles). Also `vf.set_frozen` so Walk-on-Spheres stops (`wos=0`, `query_ms=0`). |
 | `bias_skip_load_N` | Skip F/T bias if already loaded above this [N]. |
 
 ---

@@ -142,9 +142,14 @@ tactile:
 
 in_contact:
   enabled: false
-  # speedj | dtc — default speedj; yellow banner when enabled
+  # speedj | dtc (hybrid DualLoop→speedJ until compression) | dtc_pure (Eq.56 from ALIGN through SEEK)
   actuation: speedj
-  # Force PID along n* → tip velocity (speedJ), or Eq.56 τ when actuation=dtc.
+  # Hybrid DTC hysteresis (unused unless actuation is dtc / dtc_pure).
+  dtc_min_fs_frac_of_fd: 0.25
+  dtc_exit_fs_frac_of_enter: 0.35
+  dtc_min_hold_s: 1.5
+  dtc_exit_hold_s: 0.35
+  # Force PID along n* → tip velocity (speedJ). Unused in dtc_pure; hybrid dtc uses it until load.
   desired_force: 5.0
   force_sign: 1.0
   force_kp: 0.001

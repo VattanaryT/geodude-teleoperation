@@ -148,6 +148,10 @@ in_contact:
   wrench_in_tool_frame: true
   approach_v_max: 0.006
   force_max_v: 0.010
+  dtc_min_fs_frac_of_fd: 0.25
+  dtc_exit_fs_frac_of_enter: 0.35
+  dtc_min_hold_s: 1.5
+  dtc_exit_hold_s: 0.35
   align_first: true
   align_enter_tol_deg: 5.0
   align_exit_tol_deg: 12.0
