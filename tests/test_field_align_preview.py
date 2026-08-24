@@ -5,6 +5,7 @@ import numpy as np
 from geodude_teleoperation.virtual_fixture import (
     FieldAlignPreview,
     _orient_approach_into_surface,
+    field_z_display_dirs,
     field_z_segments,
 )
 
@@ -12,10 +13,20 @@ from geodude_teleoperation.virtual_fixture import (
 class _FakeField:
     def __init__(self):
         self.calls = []
+        self.basis_calls = []
+        self.approach_calls = []
 
     def project(self, live_ee):
         self.calls.append(live_ee)
         return f"projected:{live_ee}"
+
+    def display_basis_at(self, xyz):
+        self.basis_calls.append(tuple(np.asarray(xyz, dtype=float).reshape(3)))
+        return np.eye(3)
+
+    def approach_basis_at(self, xyz):
+        self.approach_calls.append(tuple(np.asarray(xyz, dtype=float).reshape(3)))
+        return np.diag([1.0, -1.0, -1.0])
 
 
 class FieldAlignPreviewTest(unittest.TestCase):
@@ -42,6 +53,25 @@ class FieldAlignPreviewTest(unittest.TestCase):
         self.assertEqual(motor, "projected:ee1")
         self.assertEqual(vf.calls, ["ee0", "ee1"])
 
+    def test_update_display_basis_is_throttled(self):
+        vf = _FakeField()
+        preview = FieldAlignPreview(vf, min_dt=1.0 / 15.0)
+        b0 = preview.update_display_basis(np.array([1.0, 2.0, 3.0]), now=0.0)
+        b1 = preview.update_display_basis(np.array([9.0, 9.0, 9.0]), now=0.05)
+        np.testing.assert_allclose(b0, np.eye(3))
+        np.testing.assert_allclose(b1, np.eye(3))
+        self.assertEqual(len(vf.basis_calls), 1)
+
+    def test_update_approach_basis_is_throttled_and_flipped(self):
+        vf = _FakeField()
+        preview = FieldAlignPreview(vf, min_dt=1.0 / 15.0)
+        b0 = preview.update_approach_basis(np.array([1.0, 2.0, 3.0]), now=0.0)
+        b1 = preview.update_approach_basis(np.array([9.0, 9.0, 9.0]), now=0.05)
+        np.testing.assert_allclose(b0, np.diag([1.0, -1.0, -1.0]))
+        np.testing.assert_allclose(b1, np.diag([1.0, -1.0, -1.0]))
+        self.assertEqual(len(vf.approach_calls), 1)
+        self.assertEqual(len(vf.basis_calls), 0)
+
 
 class FieldZArrowTest(unittest.TestCase):
     def test_approach_basis_z_is_negated_field_z(self):
@@ -57,6 +87,12 @@ class FieldZArrowTest(unittest.TestCase):
         np.testing.assert_allclose(segs[0, 0], [0.0, 0.0, 0.0])
         np.testing.assert_allclose(segs[0, 1], [0.0, 0.0, 0.1])
         np.testing.assert_allclose(segs[1, 1], [1.0, 0.1, 0.0])
+
+    def test_display_basis_z_matches_outward_arrows(self):
+        local = np.eye(3)
+        into = _orient_approach_into_surface(local)
+        outward_z = field_z_display_dirs(into[:, 2], outward=True)
+        np.testing.assert_allclose(outward_z, local[:, 2])
 
     def test_display_dirs_outward_negates_into_surface_approach(self):
         from geodude_teleoperation.virtual_fixture import field_z_display_dirs

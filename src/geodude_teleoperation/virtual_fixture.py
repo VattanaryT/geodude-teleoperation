@@ -236,6 +236,13 @@ class OrientationField:
             local_basis = np.eye(3)
         return _orient_approach_into_surface(local_basis)
 
+    def display_basis_at(self, position):
+        """Object +Z frame whose +Z matches /field_z arrows (out of the working face)."""
+        B = np.array(self.approach_basis_at(position), copy=True)
+        B[:, 1] *= -1
+        B[:, 2] *= -1
+        return B
+
     def field_z_arrows(self, points, *, max_count=256, length=0.03, outward=True):
         """Start/end segments for viser. Default ``outward=True`` draws +normal
         (out of the working face). EE snap still uses into-surface approach Z."""
@@ -260,13 +267,14 @@ def field_z_segments(origins, z_dirs, length):
 
 
 class FieldAlignPreview:
-    """Paint-only: ``vf.project(live)`` at a capped rate. Does not enable the pose spring."""
+    """Paint-only field readout at a capped rate. Does not enable the pose spring."""
 
     def __init__(self, vf, *, min_dt=1.0 / 15.0):
         self._vf = vf
         self._min_dt = float(min_dt)
         self._last_t = float("-inf")
         self.motor = None
+        self.basis = None
 
     def update(self, live_ee, now):
         if self.motor is not None and (now - self._last_t) < self._min_dt:
@@ -274,4 +282,20 @@ class FieldAlignPreview:
         self.motor = self._vf.project(live_ee)
         self._last_t = now
         return self.motor
+
+    def update_display_basis(self, xyz, now):
+        """Outward object basis (+Z = /field_z arrows) at ``xyz``."""
+        if self.basis is not None and (now - self._last_t) < self._min_dt:
+            return self.basis
+        self.basis = self._vf.display_basis_at(xyz)
+        self._last_t = now
+        return self.basis
+
+    def update_approach_basis(self, xyz, now):
+        """EE/flange basis (+Z into the surface, anti-parallel to /field_z)."""
+        if self.basis is not None and (now - self._last_t) < self._min_dt:
+            return self.basis
+        self.basis = self._vf.approach_basis_at(xyz)
+        self._last_t = now
+        return self.basis
 

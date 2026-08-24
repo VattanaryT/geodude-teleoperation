@@ -105,14 +105,26 @@ def pingpong_alpha(now: float, period: float = 4.0) -> float:
     return 1.0 - abs(2.0 * x - 1.0)
 
 
-def ghost_flange_world(T_live_tcp: np.ndarray, T_field_tcp: np.ndarray, alpha: float) -> np.ndarray:
-    """Flange pose for a ghost chamfer that slerps about the live TCP."""
-    T_live = np.asarray(T_live_tcp, dtype=float).reshape(4, 4)
-    T_field = np.asarray(T_field_tcp, dtype=float).reshape(4, 4)
+def live_tcp_xyz_from_flange(T_flange: np.ndarray) -> np.ndarray:
+    """Tip along the chamfer +Z (mesh axis), not the pendant TCP rotvec."""
+    T = np.asarray(T_flange, dtype=float).reshape(4, 4)
+    return T[:3, 3] + T[:3, :3] @ CHAMFER_TCP_FROM_FLANGE_XYZ
+
+
+def ghost_flange_world(T_live_flange: np.ndarray, R_field: np.ndarray, p_tcp: np.ndarray,
+                       alpha: float) -> np.ndarray:
+    """Slerp flange rotation to the field, keeping the live TCP xyz.
+
+    ``R_field`` column 2 is EE +Z (into the surface), opposite the blue
+    /field_z arrows (object +normal). Do not compose the pendant TCP rotvec
+    — that swings the 3mf through the table.
+    """
+    T_live = np.asarray(T_live_flange, dtype=float).reshape(4, 4)
+    R = slerp_rotation(T_live[:3, :3], R_field, alpha)
     T = np.eye(4)
-    T[:3, 3] = T_live[:3, 3]
-    T[:3, :3] = slerp_rotation(T_live[:3, :3], T_field[:3, :3], alpha)
-    return flange_world_from_tcp(T)
+    T[:3, :3] = R
+    T[:3, 3] = np.asarray(p_tcp, dtype=float).reshape(3) - R @ CHAMFER_TCP_FROM_FLANGE_XYZ
+    return T
 
 
 def seat_mesh_on_xy_origin(vertices: np.ndarray) -> np.ndarray:

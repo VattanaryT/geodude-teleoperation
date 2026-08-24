@@ -37,11 +37,10 @@ from geodude_teleoperation import (
 from geodude_teleoperation.ee_viz import (
     add_ghost_chamfer_visual,
     add_right_chamfer_visual,
-    chamfer_tcp_motor,
-    chamfer_tcp_world_from_wrist3,
+    chamfer_world_from_wrist3,
     ghost_flange_world,
     hide_gripper_visuals,
-    matrix_from_motor,
+    live_tcp_xyz_from_flange,
     pingpong_alpha,
 )
 from geodude_teleoperation.force_mode_contact import (
@@ -505,8 +504,8 @@ def main():
             update_ghost = add_ghost_chamfer_visual(viz)
             print(
                 f"ee viz: hid {n_hidden} gripper meshes; "
-                "gray chamfer = live hardware, orange ghost slerps to the field "
-                "(viser only; pose spring held)",
+                "gray chamfer = live hardware; orange ghost keeps live TCP and "
+                "slerps EE +Z into the surface (opposite the blue /field_z arrows)",
                 flush=True,
             )
 
@@ -529,8 +528,8 @@ def main():
                 visible=True,
             )
             print(
-                f"field Z: {len(field_z)} blue arrows OUT of the top (+normal). "
-                f"EE snap is the opposite (into the surface). "
+                f"field Z: {len(field_z)} blue arrows OUT of the top (object +normal). "
+                f"Orange EE +Z points into the surface (anti-parallel to arrows). "
                 f"Toggle /field_z in the viser scene tree.",
                 flush=True,
             )
@@ -548,12 +547,11 @@ def main():
                 fk = interface.get_system().compute_forward_kinematics(q)
                 T_wrist = np.asarray(
                     fk.get_link_pose("right_ur5e/wrist_3_link").to_transformation_matrix())
-                T_live_tcp = chamfer_tcp_world_from_wrist3(T_wrist)
-                field_motor = field_preview.update(
-                    chamfer_tcp_motor(interface.get_system(), q),
-                    now=time.monotonic())
+                T_live_flange = chamfer_world_from_wrist3(T_wrist)
+                p_tcp = live_tcp_xyz_from_flange(T_live_flange)
+                R_field = field_preview.update_approach_basis(p_tcp, now=time.monotonic())
                 T_ghost = ghost_flange_world(
-                    T_live_tcp, matrix_from_motor(field_motor),
+                    T_live_flange, R_field, p_tcp,
                     pingpong_alpha(time.monotonic(), period=4.0))
                 update_ghost(T_ghost)
 

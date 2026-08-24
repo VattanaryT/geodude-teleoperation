@@ -82,22 +82,41 @@ class EeVizTest(unittest.TestCase):
         np.testing.assert_allclose(
             [tr.x(), tr.y(), tr.z()], T[:3, 3], atol=1e-9)
 
-    def test_ghost_flange_keeps_tcp_and_slerps_rotation(self):
+    def test_ghost_flange_at_field_keeps_tcp_and_matches_field_z(self):
         from geodude_teleoperation.ee_viz import (
-            chamfer_tcp_from_flange,
+            CHAMFER_TCP_FROM_FLANGE_XYZ,
             ghost_flange_world,
         )
 
         T_live = np.eye(4)
         T_live[:3, 3] = [0.4, -0.2, 0.9]
-        T_field = np.eye(4)
-        T_field[:3, :3] = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
-        T_field[:3, 3] = T_live[:3, 3]
-        T0 = ghost_flange_world(T_live, T_field, 0.0)
-        T1 = ghost_flange_world(T_live, T_field, 1.0)
-        tcp_from_flange = chamfer_tcp_from_flange()
-        np.testing.assert_allclose(T0 @ tcp_from_flange, T_live, atol=1e-9)
-        np.testing.assert_allclose(T1 @ tcp_from_flange, T_field, atol=1e-9)
+        p_tcp = T_live[:3, 3] + T_live[:3, :3] @ CHAMFER_TCP_FROM_FLANGE_XYZ
+        R_field = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+        T0 = ghost_flange_world(T_live, R_field, p_tcp, 0.0)
+        T1 = ghost_flange_world(T_live, R_field, p_tcp, 1.0)
+        np.testing.assert_allclose(T0, T_live, atol=1e-9)
+        np.testing.assert_allclose(T1[:3, :3], R_field, atol=1e-9)
+        np.testing.assert_allclose(
+            T1[:3, 3] + T1[:3, :3] @ CHAMFER_TCP_FROM_FLANGE_XYZ, p_tcp, atol=1e-9)
+        np.testing.assert_allclose(T1[:3, :3] @ [0.0, 0.0, 1.0], [0.0, 0.0, 1.0], atol=1e-9)
+
+    def test_ghost_into_surface_puts_flange_above_tcp(self):
+        from geodude_teleoperation.ee_viz import (
+            CHAMFER_TCP_FROM_FLANGE_XYZ,
+            ghost_flange_world,
+            live_tcp_xyz_from_flange,
+        )
+
+        T_live = np.eye(4)
+        T_live[:3, 3] = [0.0, 0.0, 1.0]
+        p_tcp = live_tcp_xyz_from_flange(T_live)
+        R_into = np.diag([1.0, -1.0, -1.0])
+        T1 = ghost_flange_world(T_live, R_into, p_tcp, 1.0)
+        np.testing.assert_allclose(
+            T1[:3, :3] @ [0.0, 0.0, 1.0], [0.0, 0.0, -1.0], atol=1e-9)
+        self.assertGreater(float(T1[2, 3]), float(p_tcp[2]))
+        np.testing.assert_allclose(
+            T1[:3, 3] + T1[:3, :3] @ CHAMFER_TCP_FROM_FLANGE_XYZ, p_tcp, atol=1e-9)
 
     def test_pingpong_alpha_hits_live_and_field(self):
         from geodude_teleoperation.ee_viz import pingpong_alpha
