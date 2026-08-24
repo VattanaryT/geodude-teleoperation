@@ -34,6 +34,7 @@ from geodude_teleoperation import (
     load_points,
     table_placement_translation,
 )
+from geodude_teleoperation.ee_viz import add_right_chamfer_visual, hide_gripper_visuals
 from geodude_teleoperation.force_mode_contact import (
     ForceModeContactSession,
     reopen_gafropy,
@@ -478,6 +479,14 @@ def main():
             robot_viz = viz.add_robot(interface.get_system(),
                                       name="geodude", joint_sliders=False)
             robot_viz.update(q_with_vention())
+            n_hidden = hide_gripper_visuals(robot_viz)
+            update_chamfer = add_right_chamfer_visual(
+                viz, interface.get_system(), q=q_with_vention())
+            print(
+                f"ee viz: hid {n_hidden} gripper meshes; "
+                "left flange blank, right chamfer on wrist_3 (visual only)",
+                flush=True,
+            )
 
             viz.scene.add_point_cloud(
                 "/object", points=object_surface.vertices, colors=(200, 200, 200), point_size=0.002
@@ -494,6 +503,7 @@ def main():
                     return
                 q = q_with_vention()
                 robot_viz.update(q)
+                update_chamfer(q)
                 eeviz.update(task_space.compute_ee_motor(q[joint_idx]))
 
             viz.add_ticker(lambda: update())
