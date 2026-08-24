@@ -25,6 +25,11 @@ def _adaptive_linear_scale(distance, min_factor, max_factor, offset=0.01, scale_
     return min(max_factor, max(min_factor, factor))
 
 
+def contact_pid_force_limit(target_force, *, headroom=5.0):
+    """PID output clip. Must be >= |Fd| or the host loop cannot reach the target."""
+    return abs(float(target_force)) + abs(float(headroom))
+
+
 class TeleoperationController(gafropy.control.VelocityController):
     """Direct proportional-velocity teleoperation toward a composed, fixture-corrected
     reference pose -- shares AdmittanceTeleoperationController's target-composition pattern
@@ -144,6 +149,10 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         # When False (hands-off SpaceMouse), stream zero joint velocity — otherwise
         # residual pose error / wrong-arm bias keeps speedJ moving with no stick input.
         self._input_active = False
+        self._tool_z_velocity = 0.0
+        self._stiffness = np.array(self._stiffness, dtype=float, copy=True)
+        self._kz_pose = float(self._stiffness[5, 5])
+        self._z_compliant = False
 
     def set_input_active(self, active: bool) -> None:
         self._input_active = bool(active)
@@ -158,38 +167,56 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         ee = task_space.compute_ee_motor(position)
         self.get_objective().set_target(ee)
 
+    def set_tool_z_velocity(self, vz):
+        """Overlay tool-Z speed (m/s) on top of the pose spring. DualLoop press axis."""
+        self._tool_z_velocity = float(vz)
+
+    def set_z_compliant(self, compliant):
+        """Zero pose-spring Kz so a Z overlay is not fought. Stick Z is ignored."""
+        self._z_compliant = bool(compliant)
+        self._stiffness[5, 5] = 0.0 if self._z_compliant else self._kz_pose
+
     def compute_control_command(self, robot_state, objective_state, task_space_state):
         jacobian = np.asarray(task_space_state.get_jacobian())
         n_joints = int(jacobian.shape[1])
+        vz = float(self._tool_z_velocity)
+
         if not self._input_active:
-            return np.zeros(n_joints)
-
-        error = np.asarray(objective_state.get_error())
-        error_derivative = np.asarray(objective_state.get_error_derivative())
-        jacobian_derivative = np.asarray(
-            task_space_state.get_jacobian_derivative())
-        velocity = np.asarray(robot_state.get_velocity(), dtype=float).reshape(-1)
-        # robot_state here is the *control-group* slice (len 7 for one arm+vention),
-        # not the full bimanual q. get_joint_indices() are system-global and must not
-        # be used to index this vector (that crashed with index 15 on size 7).
-        if velocity.size == n_joints:
-            qdot_task = velocity
-        elif velocity.size > n_joints:
-            qdot_task = velocity[-n_joints:]
+            qdot = np.zeros(n_joints)
         else:
-            raise RuntimeError(
-                f"robot_state velocity length {velocity.size} < task joints {n_joints}")
+            error = np.asarray(objective_state.get_error())
+            error_derivative = np.asarray(objective_state.get_error_derivative())
+            jacobian_derivative = np.asarray(
+                task_space_state.get_jacobian_derivative())
+            velocity = np.asarray(robot_state.get_velocity(), dtype=float).reshape(-1)
+            # robot_state here is the *control-group* slice (len 7 for one arm+vention),
+            # not the full bimanual q. get_joint_indices() are system-global and must not
+            # be used to index this vector (that crashed with index 15 on size 7).
+            if velocity.size == n_joints:
+                qdot_task = velocity
+            elif velocity.size > n_joints:
+                qdot_task = velocity[-n_joints:]
+            else:
+                raise RuntimeError(
+                    f"robot_state velocity length {velocity.size} < task joints {n_joints}")
 
-        wrench_net = -self._stiffness @ error - self._damping @ error_derivative
-        task_acceleration = np.linalg.solve(self._inertia, wrench_net)
+            wrench_net = -self._stiffness @ error - self._damping @ error_derivative
+            task_acceleration = np.linalg.solve(self._inertia, wrench_net)
 
-        bias = jacobian_derivative @ qdot_task
+            bias = jacobian_derivative @ qdot_task
 
-        j_inverse = np.linalg.inv(
-            jacobian.T @ jacobian + 1e-6 * np.eye(jacobian.shape[1]))
+            j_inverse = np.linalg.inv(
+                jacobian.T @ jacobian + 1e-6 * np.eye(jacobian.shape[1]))
 
-        qdot = self._dt * \
-            j_inverse @ jacobian.T @ (task_acceleration - bias)
+            qdot = self._dt * \
+                j_inverse @ jacobian.T @ (task_acceleration - bias)
+
+        if abs(vz) > 1e-12:
+            twist = np.zeros(6)
+            twist[5] = vz
+            j_inverse = np.linalg.inv(
+                jacobian.T @ jacobian + 1e-6 * np.eye(jacobian.shape[1]))
+            qdot = qdot + j_inverse @ jacobian.T @ twist
 
         speed = np.linalg.norm(qdot)
         if speed > self._max_joint_velocity:
@@ -211,6 +238,8 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
 
         angular = twist.get_angular()
         linear = self._twist_linear_scale * np.asarray(twist.get_linear(), dtype=float)
+        if self._z_compliant:
+            linear[2] = 0.0
         increment = gafropy.Motor.exp(
             angular[0], angular[1], angular[2], linear[0], linear[1], linear[2])
         reference = ee.multiply(increment)
@@ -350,72 +379,54 @@ class LineAdmittanceTeleoperationController(gafropy.control.VelocityAdmittanceCo
 
 
 class ContactTeleoperationController(gafropy.control.VelocityAdmittanceController):
-    """LineAdmittanceTeleoperationController, generalized from a fixed table-normal line to a
-    curved, object-centric one: same SingleArmLineControlObjective / index-5-zero-stiffness /
-    force-PID-along-the-line design (see that class's docstring for why a Line target's
-    "linear Z" is the axis to zero, and why depth along it therefore never needs to be
-    teleoperated), except the target line's *direction* isn't fixed for the controller's whole
-    lifetime -- it's re-read every tick from `vf` (an OrientationField), evaluated at wherever
-    the operator is currently pointing.
+    """Hybrid contact: line spring on XY/rotation, DualLoop-style force PID on tool Z.
 
-    `update_command` composes the teleoperated twist onto the live EE pose (so idle input
-    holds still, same as AdmittanceTeleoperationController), zeroes the composed increment's
-    own approach-axis component first (index 2 of its linear part, using the EE's *current*
-    frame as the approach-axis proxy -- teleop input along it is ignored outright, exactly
-    LineAdmittanceTeleoperationController's "linear Z ignored", rather than relying on it being
-    projected away later), and reprojects the result through `vf.project(...)`, which snaps
-    the resulting pose's orientation to the field's locally diffused approach basis (see
-    OrientationField.project / _orient_approach_into_surface).
-
-    Only that projected pose's line -- `reference.transform_line(gafropy.Line.Z())`, its
-    position and the world-frame direction of its own local Z axis, packaged as a Line the
-    same way `Motor.transform_line` is already used elsewhere (e.g.
-    line_admittance_teleop.py's `ee_motor.transform_line(ga.Line.Z())` for the EE's own line
-    in its viz) -- reaches the objective, never the full pose. A Line target's Plücker
-    representation is invariant to which point along the infinite line is used to construct
-    it (LineAdmittanceTeleoperationController's own "any point on the line" comment), so which
-    exact position vf.project(...) returned along that direction is irrelevant -- depth along
-    the field's local approach axis genuinely never reaches this controller's target at all.
-
-    `_run`'s background thread PIDs `set_desired_wrench` off the measured contact force
-    against `target_force`, identical to LineAdmittanceTeleoperationController's own force
-    loop. Measurement uses `Wrench.to_array()[3]` (fz); the command is written at Twist
-    index 5 (linear Z) because `set_desired_wrench` / AdmittanceConfig use Twist blade
-    order, not Wrench blade order. SingleArmLineControlObjective computes its error against
-    the target line in the EE's own frame (`ee.reverse().transform(target)`), so once
-    orientation tracking has converged, body-frame Z *is* the line direction.
-    `config` needs stiffness zeroed at Twist index 5 for this to hold: AdmittanceConfig has
-    no Python-side setters, so which axis is force-controlled can't be changed after
-    construction -- swapping between an AdmittanceTeleoperationController (free 6-DOF
-    admittance) and this class via `interface.control(...)` is how a caller offers two
-    modes from one teleop session (see examples/hardware_object_contact_teleop.py).
+    SpaceMouse slides the target line (Z stick ignored). The C++ VelocityAdmittance
+    plant tracks that line with Kz=0. A host thread owns press: APPROACH is a constant
+    tool-Z feed along CLI ``force_sign``; CONTACT is DualLoop ``Fe = Fd − Fs`` with
+    ``Fs = force_sign · fz`` on the same-tick wrench and ``Fext`` left at 0
+    (mapped through Z damping: ``set_desired_wrench[5] = v_z * z_damping``).
+    CONTACT engages when ``|Fs| ≥ max(0.4 N, 0.25·|Fd|)``; unload needs ``|Fs| < 0.4 N``
+    for ``lost_s``. ``force_sign`` is never latched from Fz polarity.
+    UR speedJ does not yield, so CONTACT sits (press velocity 0, retract allowed)
+    for ``sit_s`` after the gate — DualLoop's path wait analog — then the PID may trim.
     """
 
-    def __init__(self, vf, config, target_force=5.0, kp_force=5.0, ki_force=1.0, kd_force=0.0,
-                 force_feedforward=0.0, force_limit=30.0, integral_limit=15.0,
-                 update_period=0.005, linear_scale=1.0, force_sign=1.0, force_ramp_s=1.5,
+    def __init__(self, vf, config, target_force=5.0, kp_force=0.001, ki_force=0.0, kd_force=0.0,
+                 force_feedforward=0.0, force_limit=30.0, integral_limit=20.0,
+                 update_period=0.005, linear_scale=1.0, force_sign=1.0, force_ramp_s=0.0,
                  log_period_s=0.5, measured_fz_fn=None, dead_wrench_abort_s=0.4,
-                 dead_wrench_eps_n=0.05):
+                 dead_wrench_eps_n=0.05, contact_engage_n=None, contact_release_n=0.4,
+                 fz_tau_s=0.03, v_approach=0.005, max_v_hold=0.005, lost_s=1.0,
+                 z_damping=200.0, v_slew_mps2=0.05, contact_sign_n=None, sit_s=2.0):
         super().__init__(config)
         self.vf = vf
-        self._target_force = target_force
-        self._kp_force = kp_force
-        self._ki_force = ki_force
-        self._kd_force = kd_force
+        self._target_force = abs(float(target_force))
+        self._kp_force = float(kp_force)
+        self._ki_force = float(ki_force)
+        self._kd_force = float(kd_force)
         self._force_feedforward = force_feedforward
         self._force_limit = force_limit
         self._integral_limit = integral_limit
         self._update_period = update_period
         self._linear_scale = linear_scale
-        # Measured contact = force_sign * fz. Flip to -1 if fz goes the wrong way
-        # when pressing into the surface (see geodude-teleoperation in_contact force_sign).
         self._force_sign = float(force_sign)
-        # UR has no contact gate: with fz≈0 the PID would otherwise dump ~kp*target on the
-        # first tick and slam the remaining air gap. Ramp target over force_ramp_s instead.
+        # DualLoop: |Fs| ≥ max(0.4 N, 0.25·|Fd|) on the same-tick tared wrench.
+        self._contact_engage_n = max(0.4, 0.25 * self._target_force)
+        if contact_engage_n is not None:
+            self._contact_engage_n = max(0.0, float(contact_engage_n))
+        if contact_sign_n is not None:
+            self._contact_engage_n = max(self._contact_engage_n, float(contact_sign_n))
+        self._contact_release_n = max(0.0, float(contact_release_n))
+        self._sit_s = max(0.0, float(sit_s))
+        self._fz_tau_s = max(0.0, float(fz_tau_s))
+        self._v_approach = abs(float(v_approach))
+        self._max_v_hold = abs(float(max_v_hold))
+        self._lost_s = max(0.0, float(lost_s))
+        self._z_damping = float(z_damping)
+        self._v_slew_mps2 = max(0.0, float(v_slew_mps2))
         self._force_ramp_s = max(0.0, float(force_ramp_s))
         self._log_period_s = max(0.0, float(log_period_s))
-        # Optional override for measured tool-frame fz (e.g. RTDE ActualTCPForce[2]).
-        # gafropy hardware get_wrench() is currently always zero — see tcp_force.py.
         self._measured_fz_fn = measured_fz_fn
         self._dead_wrench_abort_s = max(0.0, float(dead_wrench_abort_s))
         self._dead_wrench_eps_n = max(0.0, float(dead_wrench_eps_n))
@@ -428,7 +439,16 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._t_start = None
         self._t_last_log = None
         self._force_aborted = False
+        self._force_feedback_seen = False
+        self._press_sign = 1.0 if self._force_sign >= 0.0 else -1.0
+        self._fz_filt = None
+        self._z_mode = "approach"
+        self._unload_since = None
+        self._contact_since = None
+        self._prev_v_z = None
+        self._external_wrench = np.zeros(6)
         self._on_force_abort = None
+        self._on_vz = None
 
     def set_interface(self, interface):
         self._interface = interface
@@ -441,6 +461,13 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         """Optional callback() invoked once if force feedback looks dead (open-loop)."""
         self._on_force_abort = callback
 
+    def set_on_vz(self, callback):
+        """Optional callback(v_z) each force tick. Overlay press on the pose-spring plant."""
+        self._on_vz = callback
+
+    def _fs(self, fz_raw):
+        return self._press_sign * float(fz_raw)
+
     def _read_fz_raw(self):
         if self._measured_fz_fn is not None:
             return float(self._measured_fz_fn())
@@ -448,38 +475,92 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
             self._interface.get_state().get_wrench().to_array(), dtype=float).reshape(6)
         return float(wrench[3])
 
-    def _compute_force_command(self):
-        # Measurement: tool-frame fz (Newtons). Command: Twist linear-Z slot (index 5).
-        # Wrench.to_array() blade order is [fx, fy, tz, fz, ty, tx] — only used when
-        # measured_fz_fn is None (broken on current gafropy URRobot sampleState).
-        fz_raw = self._read_fz_raw()
-        force_along_z = self._force_sign * fz_raw
+    def _press_velocity(self, fs, now):
+        """Positive = press into the part (tool Z = press_sign * this)."""
+        if self._z_mode == "approach":
+            if abs(fs) >= self._contact_engage_n:
+                self._z_mode = "contact"
+                self._unload_since = None
+                self._contact_since = now
+                self._integral = 0.0
+                self._prev_error = None
+                # Kill the approach feed immediately. Slew from +5 mm/s would keep ramming.
+                self._prev_v_z = 0.0
+            else:
+                return self._v_approach
 
-        if self._t_start is None:
-            ramp = 1.0
-            elapsed = 0.0
-        elif self._force_ramp_s <= 0.0:
-            ramp = 1.0
-            elapsed = time.monotonic() - self._t_start
+        if abs(fs) < self._contact_release_n:
+            if self._unload_since is None:
+                self._unload_since = now
+            elif self._lost_s > 0.0 and (now - self._unload_since) >= self._lost_s:
+                self._z_mode = "approach"
+                self._integral = 0.0
+                self._prev_error = None
+                self._unload_since = None
+                self._contact_since = None
+                return self._v_approach
         else:
-            elapsed = time.monotonic() - self._t_start
-            ramp = min(1.0, elapsed / self._force_ramp_s)
+            self._unload_since = None
 
-        # Open-loop guard: if fz never leaves ~0 while we are commanding press, abort.
-        # Matches observed hardware where get_wrench() is always zero → C153 path deviation.
+        if self._z_mode == "approach":
+            return self._v_approach
+
+        fe = self._target_force - fs
+        self._integral = np.clip(
+            self._integral + fe * self._update_period,
+            -self._integral_limit, self._integral_limit)
+        deriv = 0.0 if self._prev_error is None else \
+            (fe - self._prev_error) / self._update_period
+        self._prev_error = fe
+        v_pid = (self._kp_force * fe + self._ki_force * self._integral +
+                 self._kd_force * deriv + self._force_feedforward)
+        v_pid = float(np.clip(v_pid, -self._max_v_hold, self._max_v_hold))
+        sitting = (
+            self._sit_s > 0.0
+            and self._contact_since is not None
+            and (now - self._contact_since) < self._sit_s
+        )
+        if sitting:
+            # DualLoop path waits ~2 s at load. speedJ cannot yield, so do not press.
+            return min(0.0, v_pid)
+        return v_pid
+
+    def _slew_vz(self, v_z):
+        if self._v_slew_mps2 <= 0.0 or self._prev_v_z is None:
+            self._prev_v_z = v_z
+            return v_z
+        max_dv = self._v_slew_mps2 * self._update_period
+        v_z = float(np.clip(v_z, self._prev_v_z - max_dv, self._prev_v_z + max_dv))
+        self._prev_v_z = v_z
+        return v_z
+
+    def _compute_force_command(self):
+        fz_raw = self._read_fz_raw()
+        fs = self._fs(fz_raw)
+        now = time.monotonic()
+        elapsed = 0.0 if self._t_start is None else now - self._t_start
+
+        if abs(fz_raw) > self._dead_wrench_eps_n:
+            self._force_feedback_seen = True
         if (
             not self._force_aborted
+            and not self._force_feedback_seen
             and self._dead_wrench_abort_s > 0.0
             and elapsed >= self._dead_wrench_abort_s
-            and abs(force_along_z) <= self._dead_wrench_eps_n
-            and abs(self._target_force) > self._dead_wrench_eps_n
+            and self._target_force > self._dead_wrench_eps_n
         ):
             self._force_aborted = True
+            src = "rtde" if self._measured_fz_fn is not None else "get_wrench"
+            reason = (
+                "RTDE ActualTCPForce stayed near zero; refusing open-loop press "
+                "(this is what caused C153A1)."
+                if self._measured_fz_fn is not None else
+                "gafropy URRobot does not populate get_wrench() from actual_TCP_force; "
+                "refusing open-loop press (this is what caused C153A1)."
+            )
             print(
                 "\033[91mERROR: contact force feedback is dead "
-                f"(fz≈{fz_raw:+.3f}N for {elapsed:.2f}s). "
-                "gafropy URRobot does not populate get_wrench() from actual_TCP_force; "
-                "refusing open-loop press (this is what caused C153A1).\033[0m",
+                f"({src} fz≈{fz_raw:+.3f}N for {elapsed:.2f}s). {reason}\033[0m",
                 flush=True,
             )
             if self._on_force_abort is not None:
@@ -488,57 +569,66 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                 except Exception as exc:
                     print(f"on_force_abort failed: {exc}", flush=True)
 
+        self._external_wrench = np.zeros(6)
         if self._force_aborted:
+            self._prev_v_z = 0.0
+            if self._on_vz is not None:
+                try:
+                    self._on_vz(0.0)
+                except Exception as exc:
+                    print(f"on_vz failed: {exc}", flush=True)
             return np.zeros(6)
 
-        target = self._target_force * ramp
-        error = target - force_along_z
-
-        self._integral = np.clip(
-            self._integral + error * self._update_period,
-            -self._integral_limit, self._integral_limit)
-        derivative = 0.0 if self._prev_error is None else \
-            (error - self._prev_error) / self._update_period
-        self._prev_error = error
-
-        magnitude = np.clip(
-            self._kp_force * error + self._ki_force * self._integral +
-            self._kd_force * derivative + self._force_feedforward,
-            -self._force_limit, self._force_limit)
+        v_press = self._press_velocity(fs, now)
+        v_z = self._slew_vz(self._press_sign * v_press)
 
         if self._log_period_s > 0.0:
-            now = time.monotonic()
             if self._t_last_log is None or (now - self._t_last_log) >= self._log_period_s:
                 self._t_last_log = now
                 src = "rtde" if self._measured_fz_fn is not None else "get_wrench"
+                sit = (
+                    self._z_mode == "contact"
+                    and self._sit_s > 0.0
+                    and self._contact_since is not None
+                    and (now - self._contact_since) < self._sit_s
+                )
                 print(
-                    f"contact force[{src}]: fz_raw={fz_raw:+.2f}N  "
-                    f"Fs={force_along_z:+.2f}N  target={target:.2f}N  "
-                    f"cmd_fz={self._force_sign * magnitude:+.2f}N  ramp={ramp:.2f}",
+                    f"contact force[{src}]: mode={self._z_mode}  fz_raw={fz_raw:+.2f}N  "
+                    f"Fs={fs:+.2f}N  Fd={self._target_force:.1f}N  "
+                    f"v_z={v_z:+.4f}m/s  Fext=0  sign={self._press_sign:+.0f}"
+                    f"{'  sit' if sit else ''}",
                     flush=True,
                 )
 
         wrench_cmd = np.zeros(6)
-        # Command in Twist linear-Z; flip with force_sign so a positive magnitude always
-        # seeks increasing Fs = force_sign * fz_raw.
-        wrench_cmd[5] = self._force_sign * magnitude
+        wrench_cmd[5] = v_z * self._z_damping
+        if self._on_vz is not None:
+            try:
+                self._on_vz(v_z)
+            except Exception as exc:
+                print(f"on_vz failed: {exc}", flush=True)
         return wrench_cmd
 
     def _run(self):
         while not self._stop.is_set():
-            self.set_desired_wrench(self._compute_force_command())
+            desired = self._compute_force_command()
+            if self._on_vz is None:
+                self.set_external_wrench(np.zeros(6))
+                self.set_desired_wrench(desired)
             time.sleep(self._update_period)
 
     def start(self):
-        # Unlike LineAdmittanceTeleoperationController's start/stop (only ever called once per
-        # process), this controller's PID thread is meant to be started and stopped repeatedly
-        # as the operator toggles modes -- clear `_stop` and the PID's integrator/derivative
-        # state each time, or a second start() after a stop() would see `_stop` already set and
-        # the thread would exit immediately, and stale windup would carry over from the
-        # previous contact session.
         self._integral = 0.0
         self._prev_error = None
         self._force_aborted = False
+        self._force_feedback_seen = False
+        self._press_sign = 1.0 if self._force_sign >= 0.0 else -1.0
+        self._fz_filt = None
+        self._z_mode = "approach"
+        self._unload_since = None
+        self._contact_since = None
+        self._prev_v_z = None
+        self._external_wrench = np.zeros(6)
         self._t_start = time.monotonic()
         self._t_last_log = None
         self._stop.clear()

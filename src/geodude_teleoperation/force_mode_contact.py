@@ -1,11 +1,10 @@
-"""UR ``force_mode`` contact session via ``ur_rtde`` (host does not need Fz).
+"""UR ``force_mode`` contact via native URScript (host does not need Fz).
 
-Free-space teleop stays on gafropy speedJ. For contact, the arm is handed to
-``RTDEControlInterface``: UR holds tool-Z force while the host streams ``speedL``
-with tool-Z velocity forced to zero (SpaceMouse slides on the surface).
-
-Handoff is intentionally conservative — settle, soft limits, force ramp, no
-orientation snap — matching the bring-up style of ``UR-5E/force_mode/...``.
+Matches ``ur_controllers/ForceModeController`` semantics, not tool_contact:
+``force_mode()`` every cycle (same as ur_rtde ``force_thread``), type 2, Z
+compliant. Compliant-axis limits are max TCP *speed*; non-compliant are max
+*deviation*. Force on Z overwrites any motion command on Z — do not speedL
+there. Combined execution speed is ``speed_scaling * target_speed_fraction``.
 """
 from __future__ import annotations
 
@@ -16,15 +15,35 @@ from typing import Sequence
 import numpy as np
 
 
-# Compliant Z seek / slide caps (m/s, rad/s). Z is force-compliant seek speed.
-DEFAULT_LIMITS = [0.05, 0.05, 0.015, 0.2, 0.2, 0.2]
-DEFAULT_DAMPING = 0.80
-DEFAULT_GAIN_SCALING = 0.70
-DEFAULT_GAIN_RAMP_MIN = 0.05
+# ForceModeController packs limits as: compliant → speed (m/s), else deviation (m).
+# Official example uses Z speed 1.0 m/s (free-air demo). Contact press stays slow.
+DEFAULT_SELECTION = [0, 0, 1, 0, 0, 0]
+DEFAULT_SPEED_LIMITS = [0.0, 0.0, 0.005, 0.0, 0.0, 0.0]
+DEFAULT_DEVIATION_LIMITS = [0.005, 0.005, 0.005, 0.005, 0.005, 0.005]
+# URScript: damping 0 = none, 1 = full. ForceModeController default 0.025;
+# official example and this stack use 0.1. 0.80 kissed at ~1 N.
+DEFAULT_DAMPING = 0.10
+# Official example 0.8. Docs: >1 can make force_mode unstable on a hard surface.
+DEFAULT_GAIN_SCALING = 0.8
 DEFAULT_SPEEDL_ACC = 0.3
 DEFAULT_SPEEDL_CMD_T = 0.1
+# speedL into contact faults: "speedl unable to find inverse kinematics
+# solution. verify force mode is being used." The press path is one async
+# moveL along task Z; force_mode is allowed to miss that pose on Z.
+DEFAULT_PRESS_DISTANCE_M = 0.012
+DEFAULT_PRESS_VEL = 0.005
+DEFAULT_PRESS_ACC = 0.02
+DEFAULT_SEEK_TRAVEL_LIMIT_M = 0.015
+DEFAULT_MAX_FORCE_N = 50.0
+# Kept for tests / documentation of the infeasible speedL P-seek.
+DEFAULT_SEEK_KP = 0.0006
+DEFAULT_SEEK_VMAX = 0.008
+DEFAULT_SEEK_DEADBAND_N = 1.0
 DEFAULT_RTDE_RELEASE_SETTLE_S = 3.0
 UR_SCRIPT_PORT = 30002
+UR_DASHBOARD_PORT = 29999
+RUNTIME_STOPPED = 1
+RUNTIME_PLAYING = 2
 
 
 def _pose_rotation(tcp_pose: Sequence[float]) -> np.ndarray:
@@ -46,8 +65,11 @@ def _force_along_task_z(
 ) -> float:
     """Signed linear force along fixed task +Z (UR force_mode type 2).
 
-    ``getActualTCPForce()`` is in the current tool frame; the task frame is the
-    TCP pose captured at ``forceMode`` entry and does not move with the arm.
+    ``getActualTCPForce()`` is the wrench **on the TCP** (environment → tool).
+    ``force_mode`` wrench is the wrench **on the environment** (tool → part).
+    Those differ by a minus sign: cmd_Fz=+15 and meas≈−15 is a loaded press,
+    not a sign bug. Do not flip ``--force-sign`` if the arm already moves into
+    the part.
     """
     f_tool = np.asarray(tcp_force, dtype=float).reshape(6)[:3]
     R_cur = _pose_rotation(current_pose)
@@ -88,21 +110,195 @@ def twist_to_speedl_base(
     return v
 
 
-def release_ur_rtde_control(robot_ip: str, *, settle_s: float = DEFAULT_RTDE_RELEASE_SETTLE_S) -> None:
-    """Best-effort URScript nudge so ur_rtde releases RTDE input fields before urcl reconnect."""
+def seek_speedl_task_z(
+    cmd_fz: float,
+    meas_fz: float,
+    task_frame: Sequence[float],
+    *,
+    kp: float = DEFAULT_SEEK_KP,
+    vmax: float = DEFAULT_SEEK_VMAX,
+    deadband_n: float = DEFAULT_SEEK_DEADBAND_N,
+) -> np.ndarray:
+    """P-only speedL along fixed task +Z so meas_fz tracks cmd_fz.
+
+    force_mode stays up (Z compliant, wrench = Fd). This does not re-enter
+    forceMode. Positive ``cmd_fz - meas_fz`` commands motion along task +Z.
+    """
+    error = float(cmd_fz) - float(meas_fz)
+    v = np.zeros(6, dtype=float)
+    if abs(error) <= float(deadband_n):
+        return v
+    v_n = float(np.clip(kp * error, -float(vmax), float(vmax)))
+    v[:3] = v_n * _pose_rotation(task_frame)[:, 2]
+    return v
+
+
+def pose_offset_along_task_z(pose: Sequence[float], distance_m: float) -> list[float]:
+    """Same orientation; XYZ shifted along this pose's +Z (task frame at entry)."""
+    out = [float(x) for x in pose]
+    z = _pose_rotation(pose)[:, 2]
+    dist = float(distance_m)
+    for i in range(3):
+        out[i] += dist * float(z[i])
+    return out
+
+
+def _ur_list(values: Sequence[float]) -> str:
+    return "[" + ", ".join(f"{float(x):.6f}" for x in values) + "]"
+
+
+def pack_force_mode_limits(
+    selection: Sequence[int],
+    speed_limits: Sequence[float],
+    deviation_limits: Sequence[float],
+) -> list[float]:
+    """Same packing as ``ur_controllers/ForceModeController::setForceMode``."""
+    out: list[float] = []
+    for i in range(6):
+        if int(selection[i]):
+            out.append(float(speed_limits[i]))
+        else:
+            out.append(float(deviation_limits[i]))
+    return out
+
+
+DEFAULT_LIMITS = pack_force_mode_limits(
+    DEFAULT_SELECTION, DEFAULT_SPEED_LIMITS, DEFAULT_DEVIATION_LIMITS)
+
+
+def _urscript_bytes(script: str) -> bytes:
+    payload = script if script.endswith("\n") else script + "\n"
+    return payload.encode("utf-8")
+
+
+def send_urscript(robot_ip: str, script: str, *, timeout: float = 5.0) -> bool:
+    """Send URScript on the secondary interface (port 30002). Same as V2."""
     import socket
 
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(3.0)
+            sock.settimeout(timeout)
             sock.connect((str(robot_ip), UR_SCRIPT_PORT))
-            sock.sendall(b"end_force_mode()\nstopl(2.0)\n")
+            sock.sendall(_urscript_bytes(script))
             try:
                 sock.recv(1024)
             except socket.timeout:
                 pass
+        return True
     except OSError as exc:
-        print(f"release_ur_rtde_control: script send failed ({exc})", flush=True)
+        print(f"send_urscript: failed ({exc})", flush=True)
+        return False
+
+
+def dashboard_command(robot_ip: str, command: str, *, timeout: float = 5.0) -> str:
+    """One Dashboard-server command (port 29999)."""
+    import socket
+
+    sock = socket.create_connection((str(robot_ip), UR_DASHBOARD_PORT), timeout=timeout)
+    try:
+        sock.recv(4096)
+        sock.sendall((command + "\n").encode("utf-8"))
+        time.sleep(0.2)
+        return sock.recv(4096).decode(errors="replace")
+    finally:
+        sock.close()
+
+
+def dashboard_stop_program(robot_ip: str) -> str:
+    """Stop leftover External Control so a 30002 script can become primary."""
+    try:
+        reply = dashboard_command(robot_ip, "stop")
+        print(f"dashboard stop: {reply.strip()}", flush=True)
+        return reply
+    except OSError as exc:
+        print(f"dashboard stop: failed ({exc})", flush=True)
+        return ""
+
+
+def set_speed_slider_fraction(robot_ip: str, fraction: float = 1.0) -> bool:
+    """Force the speed overlay to 100%. gafropy/urcl can leave it at 0."""
+    try:
+        from rtde_io import RTDEIOInterface
+
+        io = RTDEIOInterface(str(robot_ip))
+        ok = bool(io.setSpeedSlider(float(fraction)))
+        try:
+            io.disconnect()
+        except Exception:
+            pass
+        return ok
+    except Exception as exc:
+        print(f"set_speed_slider_fraction: failed ({exc})", flush=True)
+        return False
+
+
+def wait_runtime_state(rtde_r, want: int, timeout_s: float) -> int:
+    """Poll RTDE runtime_state until it matches ``want`` (or timeout)."""
+    deadline = time.monotonic() + float(timeout_s)
+    last = -1
+    while time.monotonic() < deadline:
+        try:
+            last = int(rtde_r.getRuntimeState())
+        except Exception:
+            last = -1
+        if last == want:
+            return last
+        time.sleep(0.05)
+    return last
+
+
+def build_force_hold_script(
+    *,
+    wrench: Sequence[float],
+    limits: Sequence[float],
+    damping: float,
+    gain_scaling: float,
+    zero_ft_sensor: bool,
+    max_force_n: float = DEFAULT_MAX_FORCE_N,
+    max_travel_m: float = DEFAULT_SEEK_TRAVEL_LIMIT_M,
+) -> str:
+    """Native URScript: re-call force_mode every cycle (ur_rtde force_thread).
+
+    Calling force_mode once then sync() is not what the ROS driver / ur_rtde
+    control script do; that pattern kisses and floats with frozen dZ.
+    """
+    zero = "    zero_ftsensor()\n    sleep(0.3)\n" if zero_ft_sensor else ""
+    return f"""def force_hold_press():
+    textmsg("FORCE_HOLD_PRESS_START")
+{zero}    p0 = get_actual_tcp_pose()
+    force_mode_set_damping({float(damping):.6f})
+    force_mode_set_gain_scaling({float(gain_scaling):.6f})
+    sleep(0.02)
+    textmsg("FORCE_HOLD_PRESS_ACTIVE")
+    while True:
+        force_mode(p0, [0, 0, 1, 0, 0, 0], {_ur_list(wrench)}, 2, {_ur_list(limits)})
+        p = get_actual_tcp_pose()
+        w = get_tcp_force()
+        f_norm = norm([w[0], w[1], w[2]])
+        d = norm([p[0] - p0[0], p[1] - p0[1], p[2] - p0[2]])
+        if (f_norm > {float(max_force_n):.6f}):
+            textmsg("FORCE_HOLD_ABORT_F")
+            stopl(1.0)
+            end_force_mode()
+            halt
+        end
+        if (d > {float(max_travel_m):.6f}):
+            textmsg("FORCE_HOLD_ABORT_TRAVEL")
+            stopl(1.0)
+            end_force_mode()
+            halt
+        end
+        sync()
+    end
+end
+force_hold_press()
+"""
+
+
+def release_ur_rtde_control(robot_ip: str, *, settle_s: float = DEFAULT_RTDE_RELEASE_SETTLE_S) -> None:
+    """Best-effort stop of force_mode / leftover program before urcl reconnect."""
+    send_urscript(str(robot_ip), "end_force_mode()\nstopl(2.0)\n")
+    dashboard_stop_program(str(robot_ip))
     if settle_s > 0.0:
         time.sleep(float(settle_s))
 
@@ -114,7 +310,7 @@ class ForceModeContactSession:
         self,
         robot_ip: str,
         *,
-        target_force: float = 5.0,
+        target_force: float = 15.0,
         force_sign: float = -1.0,
         force_ramp_s: float = 2.0,
         zero_ft_sensor: bool = True,
@@ -152,6 +348,8 @@ class ForceModeContactSession:
         self._task_frame: list[float] | None = None
         self._warned_low_load = False
         self._warned_not_on_surface = False
+        self._warned_seek_travel = False
+        self._warned_runtime = False
         self._speedl_streaming = False
         self._active = False
 
@@ -160,45 +358,59 @@ class ForceModeContactSession:
         return self._active
 
     def enter(self, *, settle_s: float = 0.35) -> None:
-        """Connect RTDE and enable force_mode. Caller must already stop gafropy streaming."""
+        """Enable native URScript force_mode. Caller must already stop gafropy."""
         if self._active:
             raise RuntimeError("ForceModeContactSession already active")
 
-        from rtde_control import RTDEControlInterface
         from rtde_receive import RTDEReceiveInterface
 
         if settle_s > 0.0:
             time.sleep(settle_s)
 
-        self._rtde_c = RTDEControlInterface(self.robot_ip)
+        # Do not connect RTDEControlInterface: it uploads a control script that
+        # replaces the native force_mode+sync() program and never seeks.
+        # Stop leftover External Control first. A 30002 script sent while that
+        # program is PLAYING runs as secondary; force_mode is then a no-op.
+        dashboard_stop_program(self.robot_ip)
+        time.sleep(0.3)
+        set_speed_slider_fraction(self.robot_ip, 1.0)
+
+        self._rtde_c = None
         self._rtde_r = RTDEReceiveInterface(self.robot_ip)
+        stopped = wait_runtime_state(self._rtde_r, RUNTIME_STOPPED, 2.0)
+        if stopped != RUNTIME_STOPPED:
+            dashboard_stop_program(self.robot_ip)
+            stopped = wait_runtime_state(self._rtde_r, RUNTIME_STOPPED, 2.0)
+        if stopped != RUNTIME_STOPPED:
+            raise RuntimeError(
+                f"could not stop leftover External Control "
+                f"(runtime_state={stopped}, want STOPPED={RUNTIME_STOPPED}). "
+                "On the pendant: Remote, then Stop, then retry the toggle."
+            )
 
-        # One more settle after script takeover so residual speedJ dies out.
-        time.sleep(0.25)
-
-        if self._zero_ft_sensor:
-            self._rtde_c.zeroFtSensor()
-            time.sleep(0.35)
-
-        # Type-2 task frame is fixed at entry (see UR-5E/force_mode reference scripts).
         self._task_frame = list(self._rtde_r.getActualTCPPose())
         self._warned_low_load = False
         self._warned_not_on_surface = False
-        wrench = self._target_wrench()
-        # One forceMode call only — re-entering each ramp step resets seek (~3 mm cap).
-        # Ramp contact force via gain_scaling instead (matches V2 single force_mode() call).
-        self._rtde_c.forceMode(
-            self._task_frame,
-            [0, 0, 1, 0, 0, 0],
-            wrench,
-            2,
-            self._limits,
-        )
-        self._rtde_c.forceModeSetDamping(self._damping)
-        self._rtde_c.forceModeSetGainScaling(DEFAULT_GAIN_RAMP_MIN)
-        # Do NOT stream speedL(0) here — that pins TCP velocity and blocks Z seek.
-        # speedL is only used while the SpaceMouse commands a non-zero XY slide.
+        self._warned_seek_travel = False
+        self._warned_runtime = False
         self._speedl_streaming = False
+        wrench = self._target_wrench()
+        script = build_force_hold_script(
+            wrench=wrench,
+            limits=self._limits,
+            damping=self._damping,
+            gain_scaling=self._gain_scaling,
+            zero_ft_sensor=self._zero_ft_sensor,
+        )
+        if not send_urscript(self.robot_ip, script):
+            raise RuntimeError("failed to send force_hold URScript on port 30002")
+        playing = wait_runtime_state(self._rtde_r, RUNTIME_PLAYING, 3.0)
+        if playing != RUNTIME_PLAYING:
+            raise RuntimeError(
+                f"force_hold URScript did not start (runtime_state={playing}, "
+                f"want PLAYING={RUNTIME_PLAYING}). Check Remote Control and "
+                "pendant log for FORCE_HOLD_PRESS_ACTIVE."
+            )
 
         with self._lock:
             self._cmd_linear[:] = 0.0
@@ -209,9 +421,11 @@ class ForceModeContactSession:
         self._thread.start()
         self._active = True
         print(
-            f"force_mode contact: force_sign={self._force_sign:g}  "
-            f"Fd→{wrench[2]:+.1f}N task Z (gain ramp {self._force_ramp_s:.1f}s); "
-            "SpaceMouse slides XY only (no idle speedL)",
+            f"force_mode contact: native URScript force_mode+sync()  "
+            f"force_sign={self._force_sign:g}  Fd={wrench[2]:+.1f}N task Z  "
+            f"damping={self._damping:.2f}  gain={self._gain_scaling:.2f}  "
+            f"Z-limit={self._limits[2]}m/s seek cap  runtime=PLAYING  "
+            "speed_slider=1.0  (no ur_rtde speedL/moveL)",
             flush=True,
         )
 
@@ -234,25 +448,8 @@ class ForceModeContactSession:
         fz = self._force_sign * self._target_force
         return [0.0, 0.0, float(fz), 0.0, 0.0, 0.0]
 
-    def _ramped_gain(self) -> float:
-        if self._t_start is None or self._force_ramp_s <= 0.0:
-            return self._gain_scaling
-        ramp = min(1.0, (time.monotonic() - self._t_start) / self._force_ramp_s)
-        return DEFAULT_GAIN_RAMP_MIN + ramp * (self._gain_scaling - DEFAULT_GAIN_RAMP_MIN)
-
-    def _apply_gain_ramp(self) -> float:
-        assert self._rtde_c is not None
-        gain = self._ramped_gain()
-        self._rtde_c.forceModeSetGainScaling(gain)
-        return gain
-
     def _stream_speedl(self, speed: np.ndarray | None) -> None:
-        """Stream tangential speedL, or release it so force_mode can own Z.
-
-        Idle ``speedL(0)`` every tick fights compliant seek (reference free-air
-        scripts never call speedL). On idle we ``speedStop`` once, then leave
-        the velocity channel alone.
-        """
+        """Stream speedL, or speedStop once when the command is exactly idle."""
         assert self._rtde_c is not None
         if speed is None:
             if self._speedl_streaming:
@@ -265,8 +462,13 @@ class ForceModeContactSession:
         self._rtde_c.speedL(speed.tolist(), self._speedl_acc, self._speedl_cmd_t)
         self._speedl_streaming = True
 
+    def _halt_press(self, reason: str) -> None:
+        print(f"\033[91mforce_mode: {reason}\033[0m", flush=True)
+        send_urscript(self.robot_ip, "end_force_mode()\nstopl(1.0)\n")
+        dashboard_stop_program(self.robot_ip)
+
     def _run(self) -> None:
-        assert self._rtde_c is not None and self._rtde_r is not None
+        assert self._rtde_r is not None
         assert self._task_frame is not None
         wrench = self._target_wrench()
         last_log = 0.0
@@ -276,86 +478,69 @@ class ForceModeContactSession:
         ))
         while not self._stop.is_set():
             pose = list(self._rtde_r.getActualTCPPose())
-            gain = self._apply_gain_ramp()
+            ft = self._rtde_r.getActualTCPForce()
+            meas_task = _force_along_task_z(ft, self._task_frame, pose)
+            z_now = float(np.dot(
+                np.asarray(pose[:3], dtype=float),
+                _pose_rotation(self._task_frame)[:, 2],
+            ))
+            dz = z_now - z0
+            f_norm = float(np.linalg.norm(np.asarray(ft, dtype=float)[:3]))
+            try:
+                runtime = int(self._rtde_r.getRuntimeState())
+            except Exception:
+                runtime = -1
+            try:
+                speed_scaling = float(self._rtde_r.getSpeedScaling())
+            except Exception:
+                speed_scaling = -1.0
+            try:
+                speed_combined = float(self._rtde_r.getSpeedScalingCombined())
+            except Exception:
+                speed_combined = speed_scaling
 
-            with self._lock:
-                lin = self._cmd_linear.copy()
-                ang = self._cmd_angular.copy()
-            idle = (
-                float(np.linalg.norm(lin)) < 1e-9
-                and float(np.linalg.norm(ang)) < 1e-9
-            )
-            if idle:
-                speed = None
-                self._stream_speedl(None)
-            else:
-                speed = twist_to_speedl_base(
-                    lin, ang, pose,
-                    max_linear=self._max_linear,
-                    max_angular=self._max_angular,
-                    task_frame=self._task_frame,
+            if runtime != RUNTIME_PLAYING and not self._warned_runtime:
+                self._warned_runtime = True
+                print(
+                    f"\033[91mforce_mode: runtime_state={runtime} "
+                    f"(want PLAYING={RUNTIME_PLAYING}); force_mode is not the "
+                    "robot program\033[0m",
+                    flush=True,
                 )
-                self._stream_speedl(speed)
+
+            # Never speedL during a press. speedL into contact kills the RTDE
+            # script (IK). SpaceMouse XY is ignored until that is solved.
+            if f_norm > DEFAULT_MAX_FORCE_N:
+                self._halt_press(
+                    f"force watchdog |F|={f_norm:.1f}N > {DEFAULT_MAX_FORCE_N}N")
+                break
+            if (
+                abs(dz) > DEFAULT_SEEK_TRAVEL_LIMIT_M
+                and abs(meas_task) < 0.35 * abs(wrench[2] or 15.0)
+            ):
+                self._halt_press(
+                    f"travel watchdog |dZ|={abs(dz):.3f}m with meas="
+                    f"{meas_task:+.1f}N (force_mode not loading)")
+                break
 
             now = time.monotonic()
             if now - last_log >= 0.5:
                 last_log = now
-                ft = self._rtde_r.getActualTCPForce()
-                meas_task = _force_along_task_z(ft, self._task_frame, pose)
-                z_now = float(np.dot(
-                    np.asarray(pose[:3], dtype=float),
-                    _pose_rotation(self._task_frame)[:, 2],
-                ))
-                dz = z_now - z0
-                v_slide = 0.0 if speed is None else float(np.linalg.norm(speed[:3]))
-                ramp = (
-                    1.0
-                    if self._force_ramp_s <= 0.0 or self._t_start is None
-                    else min(1.0, (now - self._t_start) / self._force_ramp_s)
-                )
                 print(
-                    f"force_mode: cmd_Fz={wrench[2]:+.2f}N  gain={gain:.2f}  "
+                    f"force_mode: cmd_Fz={wrench[2]:+.2f}N  "
+                    f"gain={self._gain_scaling:.2f}  damping={self._damping:.2f}  "
                     f"meas_task_Fz={meas_task:+.2f}N  "
                     f"tool_Fz={float(ft[2]):+.2f}N  "
-                    f"dZ_task={dz:+.4f}m  "
-                    f"|v_slide|={v_slide:.4f}m/s",
+                    f"dZ_task={dz:+.4f}m  runtime={runtime}  "
+                    f"speed_scaling={speed_scaling:.2f}  "
+                    f"speed_combined={speed_combined:.2f}",
                     flush=True,
                 )
-                target = abs(self._force_sign * self._target_force)
-                if (
-                    ramp >= 1.0
-                    and target > 0.5
-                    and abs(meas_task) < 0.35 * target
-                    and not self._warned_low_load
-                ):
-                    self._warned_low_load = True
-                    alt = -self._force_sign
-                    print(
-                        f"\033[93mforce_mode: low contact load "
-                        f"(|meas|={abs(meas_task):.2f}N vs Fd={target:.1f}N). "
-                        f"Approach until touching before toggling contact, or flip "
-                        f"--force-sign (try {alt:g}; you ran {self._force_sign:g}). "
-                        f"dZ_task>0 with cmd_Fz>0 = motion along task +Z.\033[0m",
-                        flush=True,
-                    )
-                if (
-                    ramp >= 1.0
-                    and abs(dz) < 0.008
-                    and abs(meas_task) < 0.5
-                    and not self._warned_not_on_surface
-                ):
-                    self._warned_not_on_surface = True
-                    print(
-                        "\033[93mforce_mode: dZ_task stalled with no load — likely "
-                        "not on the surface yet. Slide in approach until light touch, "
-                        "then toggle contact.\033[0m",
-                        flush=True,
-                    )
             time.sleep(self._period)
 
     def exit(self, *, settle_s: float = DEFAULT_RTDE_RELEASE_SETTLE_S) -> None:
-        """speedStop → forceModeStop → disconnect. Safe to call if already inactive."""
-        if not self._active and self._rtde_c is None:
+        """end_force_mode → stopl. Safe to call if already inactive."""
+        if not self._active and self._rtde_r is None:
             return
 
         self._stop.set()

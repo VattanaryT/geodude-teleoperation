@@ -2,13 +2,11 @@
 
 Free space: gafropy speedJ + SpaceMouse (approach mode).
 
-Contact (default): UR ``force_mode`` via ``ur_rtde`` — controller holds tool-Z
-force; SpaceMouse slides on the surface (tool-Z velocity ignored). Smooth
-handoff settles, ramps force, and re-opens gafropy on exit.
+Contact (default ``speedj``): same pose-spring speedJ plant as free space.
+A host DualLoop force loop overlays tool-Z velocity (APPROACH 5 mm/s, sit 2 s,
+then ``v = clip(kp*(Fd − Fs))``). Button 0 must not switch to line admittance.
 
-The legacy host speedJ + force-PID contact path is kept behind
-``--contact-backend speedj`` (hidden / not recommended until gafropy exposes
-ActualTCPForce on ``get_wrench()``).
+``--contact-backend force_mode`` is UR hybrid force/position (not admittance).
 """
 from __future__ import annotations
 
@@ -92,7 +90,31 @@ def _make_approach_controller(interface, task_space, home_ee_motor):
     return approach
 
 
-def main():
+def enter_speedj_contact(*, mode, contact_controller, approach_controller, interface=None):
+    """Keep the pose-spring speedJ plant. Overlay DualLoop Z. Do not swap to line admittance."""
+    del interface  # caller may pass it; we must not interface.control(contact)
+    mode["active"] = "contact"
+    approach_controller.hold_live_pose()
+    approach_controller.set_input_active(False)
+    approach_controller.set_tool_z_velocity(0.0)
+    approach_controller.set_z_compliant(True)
+    contact_controller.set_on_vz(approach_controller.set_tool_z_velocity)
+    contact_controller.start()
+
+
+def exit_speedj_contact(*, mode, contact_controller, approach_controller, interface=None):
+    """Drop Z overlay and freeze on the same pose-spring plant."""
+    del interface
+    contact_controller.stop()
+    contact_controller.set_on_vz(None)
+    approach_controller.set_tool_z_velocity(0.0)
+    approach_controller.set_z_compliant(False)
+    approach_controller.hold_live_pose()
+    approach_controller.set_input_active(False)
+    mode["active"] = "approach"
+
+
+def build_arg_parser():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
@@ -112,22 +134,24 @@ def main():
         "--normal-orientation", type=int, choices=[1, -1], default=1,
         help="sign correction for point-cloud objects' PCA-estimated normals (see teleoperation.py)")
     parser.add_argument(
-        "--target-force", type=float, default=5.0,
+        "--target-force", type=float, default=15.0,
         help="desired contact force (N) along tool Z in contact mode")
     parser.add_argument(
         "--force-sign", type=float, default=-1.0,
-        help="multiply target force along task +Z (default -1 for live UR; "
-             "flip to +1 if the arm lifts instead of pressing)")
+        help="approach press sign along tool Z (default -1). Fixed knob; not latched from Fz.",
+        )
     parser.add_argument(
         "--no-zero-ft", dest="zero_ft_sensor", action="store_false",
-        help="skip RTDE zeroFtSensor before force_mode handoff")
+        help="do not call zero_ftsensor() on each force_mode contact entry "
+             "(ignored for speedj). Use when already touching so preload is not zeroed.",
+        )
     parser.add_argument(
         "--mode-button", type=int, default=0,
         help="spacemouse button index that toggles between approach and contact mode")
     parser.add_argument(
-        "--contact-backend", choices=["force_mode", "speedj"], default="force_mode",
-        help="contact implementation (default: force_mode). "
-             "'speedj' is the legacy host PID path — hidden/unsafe until get_wrench works.")
+        "--contact-backend", choices=["speedj", "force_mode"], default="speedj",
+        help="contact implementation (default: speedj = pose spring + Z force overlay). "
+             "'force_mode' is UR hybrid force/position, not admittance.")
     parser.add_argument("--no-viz", action="store_true",
                         help="disable the viser visualization")
     parser.add_argument(
@@ -141,7 +165,11 @@ def main():
     parser.add_argument(
         "--right-vention-height", type=float, default=None,
         help="override --vention-height for the right rail only")
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    args = build_arg_parser().parse_args()
     print(
         f"contact: backend={args.contact_backend}  "
         f"force_sign={args.force_sign:g}  "
@@ -204,16 +232,17 @@ def main():
     approach_controller = _make_approach_controller(
         interface, task_space, home_ee_motor)
 
-    # --- legacy speedJ contact (hidden; only if --contact-backend speedj) ---
+    # --- speedj contact: stay on gafropy (default). force_mode is opt-in. ---
     contact_controller = None
     measured_fz_fn = None
     close_tcp_force = None
     if args.contact_backend == "speedj":
         contact_stiffness = np.diag([400.0] * 5 + [0.0])
-        contact_damping = np.diag([40.0] * 5 + [40.0])
+        z_damping = 200.0
+        contact_damping = np.diag([40.0] * 5 + [z_damping])
         contact_config = ga.control.VelocityAdmittanceControllerConfig()
         contact_config.dt = 0.01
-        contact_config.max_linear_speed = 0.01
+        contact_config.max_linear_speed = 0.005
         contact_config.max_angular_speed = 0.15
         contact_config.admittance = ga.control.AdmittanceConfig(
             inertia=1.0 * np.eye(6), damping=contact_damping, stiffness=contact_stiffness)
@@ -229,7 +258,10 @@ def main():
             )
         contact_controller = ContactTeleoperationController(
             vf, contact_config, target_force=args.target_force,
-            kp_force=2.0, ki_force=0.5, force_limit=10.0, force_ramp_s=2.0,
+            kp_force=0.001, ki_force=0.0,
+            v_approach=0.005, max_v_hold=0.001, z_damping=z_damping,
+            v_slew_mps2=0.05, lost_s=1.0, sit_s=2.0,
+            force_sign=args.force_sign,
             measured_fz_fn=measured_fz_fn)
         contact_controller.set_task_space(task_space)
         contact_controller.set_interface(interface)
@@ -237,13 +269,15 @@ def main():
             ga.control.SingleArmLineControlObjective(
                 home_ee_motor.transform_line(ga.Line.Z())))
 
-    force_session = ForceModeContactSession(
-        robot_ip,
-        target_force=args.target_force,
-        force_sign=args.force_sign,
-        force_ramp_s=2.0,
-        zero_ft_sensor=args.zero_ft_sensor,
-    )
+    force_session = None
+    if args.contact_backend == "force_mode":
+        force_session = ForceModeContactSession(
+            robot_ip,
+            target_force=args.target_force,
+            force_sign=args.force_sign,
+            force_ramp_s=2.0,
+            zero_ft_sensor=args.zero_ft_sensor,
+        )
 
     mode = {"active": "approach"}
     handoff_busy = {"busy": False}
@@ -328,19 +362,22 @@ def main():
             if mode["active"] == "approach":
                 approach_controller.set_input_active(False)
                 approach_controller.hold_live_pose()
-            if args.contact_backend == "force_mode" and force_session.active:
+            elif mode["active"] == "contact":
+                approach_controller.set_input_active(False)
+                approach_controller.hold_live_pose()
+            if args.contact_backend == "force_mode" and force_session is not None and force_session.active:
                 force_session.clear_twist()
             return
         if mode["active"] == "approach":
             approach_controller.update_command(twist)
             return
         if args.contact_backend == "force_mode":
-            if force_session.active:
+            if force_session is not None and force_session.active:
                 # Spacemouse twist is body/tool frame; force session zeros tool Z.
                 force_session.set_twist(twist.get_linear(), twist.get_angular())
             return
-        if contact_controller is not None:
-            contact_controller.update_command(twist)
+        # speedj contact: same pose-spring plant; stick Z ignored inside set_z_compliant.
+        approach_controller.update_command(twist)
 
     def on_button(index):
         # Handoff is rising-edge button only (SpaceMouseTeleop); twists never toggle mode.
@@ -363,16 +400,24 @@ def main():
                 )
                 return
             mode["active"] = "contact"
-            contact_controller.get_objective().set_target(
-                live_ee_motor().transform_line(ga.Line.Z()))
-            interface.control(contact_controller, blocking=False)
-            contact_controller.start()
-            print(f"-> contact mode (speedj): {args.target_force:.1f}N tool Z", flush=True)
+            enter_speedj_contact(
+                mode=mode,
+                contact_controller=contact_controller,
+                approach_controller=approach_controller,
+                interface=interface,
+            )
+            print(
+                f"-> contact mode (speedj): pose spring + Z overlay (no line swap); "
+                f"APPROACH 5mm/s, sit 2s, then PID to {args.target_force:.1f}N",
+                flush=True,
+            )
         else:
-            contact_controller.stop()
-            mode["active"] = "approach"
-            approach_controller.get_objective().set_target(live_ee_motor())
-            interface.control(approach_controller, blocking=False)
+            exit_speedj_contact(
+                mode=mode,
+                contact_controller=contact_controller,
+                approach_controller=approach_controller,
+                interface=interface,
+            )
             print("-> approach mode: holding live pose", flush=True)
 
     def start_control_and_device():
@@ -396,8 +441,10 @@ def main():
 
     try:
         backend_note = (
-            "force_mode contact" if args.contact_backend == "force_mode"
-            else "speedj contact (legacy)")
+            "speedj contact (pose spring + Z overlay)"
+            if args.contact_backend == "speedj"
+            else "force_mode contact (not admittance)"
+        )
         if args.no_viz:
             print(f"Teleoperating '{args.task_space}' on real geodude (headless) "
                   f"-- {backend_note}; button {args.mode_button} toggles. Ctrl+C to quit.")
@@ -420,8 +467,11 @@ def main():
             eeviz = viz.add_motor(viz_ee_motor)
 
             def update():
-                if handoff_busy["busy"] or mode["active"] == "contact":
-                    # During force_mode, gafropy state is stale / shut down.
+                if handoff_busy["busy"] or (
+                    mode["active"] == "contact"
+                    and args.contact_backend == "force_mode"
+                ):
+                    # force_mode shuts down gafropy; speedj contact still has live state.
                     return
                 q = q_with_vention()
                 robot_viz.update(q)
@@ -439,7 +489,7 @@ def main():
     finally:
         if device is not None:
             device.stop()
-        if force_session.active:
+        if force_session is not None and force_session.active:
             force_session.exit(settle_s=0.2)
         if contact_controller is not None:
             contact_controller.stop()
