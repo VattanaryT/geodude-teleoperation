@@ -41,7 +41,7 @@ from geodude_teleoperation.ee_viz import (
     ghost_flange_world,
     hide_gripper_visuals,
     live_tcp_xyz_from_flange,
-    pingpong_alpha,
+    SimTcpProbe,
 )
 from geodude_teleoperation.force_mode_contact import (
     ForceModeContactSession,
@@ -107,6 +107,19 @@ def _make_approach_controller(interface, task_space, home_ee_motor):
     approach.set_interface(interface)
     approach.set_objective(ga.control.SingleArmMotorControlObjective(home_ee_motor))
     return approach
+
+
+def route_spacemouse_twist(twist, *, sim_probe, on_hardware):
+    """Viser probe consumes the stick; hardware only sees it when there is no probe."""
+    if sim_probe is not None:
+        if is_idle_twist(twist):
+            sim_probe.clear_pending()
+        else:
+            sim_probe.add_body_linear(
+                np.asarray(twist.get_linear(), dtype=float).reshape(3))
+        return True
+    on_hardware(twist)
+    return False
 
 
 def enter_speedj_contact(*, mode, contact_controller, approach_controller, interface=None):
@@ -324,6 +337,7 @@ def main():
     viz = None
     robot_viz = None
     eeviz = None
+    sim_probe = {"p": None}
 
     def live_ee_motor():
         position = interface.get_state().get_position()[joint_idx]
@@ -393,9 +407,7 @@ def main():
         finally:
             handoff_busy["busy"] = False
 
-    def on_twist(twist):
-        if handoff_busy["busy"]:
-            return
+    def _hardware_twist(twist):
         # Hands-off / rest bias: freeze — zero speedJ (approach) and clear speedL (contact).
         if is_idle_twist(twist):
             if mode["active"] == "approach":
@@ -417,6 +429,12 @@ def main():
             return
         # speedj contact: same pose-spring plant; stick Z ignored inside set_z_compliant.
         approach_controller.update_command(twist)
+
+    def on_twist(twist):
+        if handoff_busy["busy"]:
+            return
+        route_spacemouse_twist(
+            twist, sim_probe=sim_probe["p"], on_hardware=_hardware_twist)
 
     def on_button(index):
         # Handoff is rising-edge button only (SpaceMouseTeleop); twists never toggle mode.
@@ -471,12 +489,20 @@ def main():
                 # deflection ~= 0.5 m/s command rate (was ~1 m/s with 2x*0.01@50Hz).
                 linear_scale=0.005, angular_scale=0.05)
         device.start(on_twist, on_button)
-        print(
-            "free-space scale: SpaceMouse lin=0.005 ang=0.05, "
-            "admittance K=2000 D=20 dt=0.001 max|qdot|=0.8, twist_linear_scale=1 "
-            "(no VF project in approach; field preview is viser-only)",
-            flush=True,
-        )
+        if sim_probe["p"] is not None:
+            print(
+                "viser preview: SpaceMouse moves orange /right_chamfer_ee_field_ghost; "
+                "UR stays held. Toggle the ghost in the scene tree. "
+                "--no-viz sends the stick to hardware.",
+                flush=True,
+            )
+        else:
+            print(
+                "free-space scale: SpaceMouse lin=0.005 ang=0.05, "
+                "admittance K=2000 D=20 dt=0.001 max|qdot|=0.8, twist_linear_scale=1 "
+                "(no VF project in approach)",
+                flush=True,
+            )
 
     try:
         backend_note = (
@@ -501,11 +527,18 @@ def main():
             n_hidden = hide_gripper_visuals(robot_viz)
             update_chamfer = add_right_chamfer_visual(
                 viz, interface.get_system(), q=q_with_vention())
-            update_ghost = add_ghost_chamfer_visual(viz)
+            update_ghost = add_ghost_chamfer_visual(viz, visible=True)
+            q0 = q_with_vention()
+            fk0 = interface.get_system().compute_forward_kinematics(q0)
+            T_wrist0 = np.asarray(
+                fk0.get_link_pose("right_ur5e/wrist_3_link").to_transformation_matrix())
+            T_live0 = chamfer_world_from_wrist3(T_wrist0)
+            sim_probe["p"] = SimTcpProbe(live_tcp_xyz_from_flange(T_live0))
             print(
                 f"ee viz: hid {n_hidden} gripper meshes; "
-                "gray chamfer = live hardware; orange ghost keeps live TCP and "
-                "slerps EE +Z into the surface (opposite the blue /field_z arrows)",
+                "gray chamfer = held hardware; orange ghost is a viser-only TCP "
+                "(SpaceMouse xyz, field orientation). No live↔field slerp. "
+                "Hide /right_chamfer_ee_field_ghost in the scene tree if you do not want it.",
                 flush=True,
             )
 
@@ -530,7 +563,7 @@ def main():
             print(
                 f"field Z: {len(field_z)} blue arrows OUT of the top (object +normal). "
                 f"Orange EE +Z points into the surface (anti-parallel to arrows). "
-                f"Toggle /field_z in the viser scene tree.",
+                f"Toggle /field_z and /right_chamfer_ee_field_ghost in the viser scene tree.",
                 flush=True,
             )
 
@@ -548,20 +581,19 @@ def main():
                 T_wrist = np.asarray(
                     fk.get_link_pose("right_ur5e/wrist_3_link").to_transformation_matrix())
                 T_live_flange = chamfer_world_from_wrist3(T_wrist)
-                p_tcp = live_tcp_xyz_from_flange(T_live_flange)
-                R_field = field_preview.update_approach_basis(p_tcp, now=time.monotonic())
-                T_ghost = ghost_flange_world(
-                    T_live_flange, R_field, p_tcp,
-                    pingpong_alpha(time.monotonic(), period=4.0))
+                probe = sim_probe["p"]
+                R_field = field_preview.update_approach_basis(
+                    probe.xyz(), now=time.monotonic())
+                p_tcp = probe.step(R_field)
+                T_ghost = ghost_flange_world(T_live_flange, R_field, p_tcp, 1.0)
                 update_ghost(T_ghost)
 
             viz.add_ticker(lambda: update())
 
             start_control_and_device()
 
-            viz.show(message=f"Teleoperating '{args.task_space}' on real geodude "
-                     f"-- {backend_note}; button {args.mode_button} toggles. "
-                     f"viser at http://localhost:{viz.port} -- ctrl-c to quit.")
+            viz.show(message=f"Field preview on '{args.task_space}' — orange ghost is sim, UR held "
+                     f"-- {backend_note}. viser at http://localhost:{viz.port} -- ctrl-c to quit.")
     except KeyboardInterrupt:
         pass
     finally:

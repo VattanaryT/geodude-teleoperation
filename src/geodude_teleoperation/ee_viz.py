@@ -1,6 +1,7 @@
 """Viser-only EE cosmetics. Does not change gafropy FK or the UR TCP."""
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -105,6 +106,34 @@ def pingpong_alpha(now: float, period: float = 4.0) -> float:
     return 1.0 - abs(2.0 * x - 1.0)
 
 
+class SimTcpProbe:
+    """Viser-only TCP. Stick linear is applied in the current EE frame by the ticker."""
+
+    def __init__(self, xyz):
+        self._lock = threading.Lock()
+        self._xyz = np.asarray(xyz, dtype=float).reshape(3).copy()
+        self._pending = np.zeros(3, dtype=float)
+
+    def add_body_linear(self, linear):
+        with self._lock:
+            self._pending = self._pending + np.asarray(linear, dtype=float).reshape(3)
+
+    def clear_pending(self):
+        with self._lock:
+            self._pending[:] = 0.0
+
+    def xyz(self):
+        with self._lock:
+            return self._xyz.copy()
+
+    def step(self, R_ee):
+        with self._lock:
+            delta = self._pending
+            self._pending = np.zeros(3, dtype=float)
+            self._xyz = self._xyz + np.asarray(R_ee, dtype=float).reshape(3, 3) @ delta
+            return self._xyz.copy()
+
+
 def live_tcp_xyz_from_flange(T_flange: np.ndarray) -> np.ndarray:
     """Tip along the chamfer +Z (mesh axis), not the pendant TCP rotvec."""
     T = np.asarray(T_flange, dtype=float).reshape(4, 4)
@@ -185,10 +214,11 @@ def add_right_chamfer_visual(viz, system, *, q):
     return update
 
 
-def add_ghost_chamfer_visual(viz):
+def add_ghost_chamfer_visual(viz, *, visible=True):
     """Orange ghost mesh. Pass a flange-frame world pose to the updater."""
     handle = viz.scene.add_mesh_trimesh(
         "/right_chamfer_ee_field_ghost", _load_seated_chamfer((255, 140, 0, 140)))
+    handle.visible = bool(visible)
 
     def update(T_flange_world):
         _set_mesh_pose(handle, T_flange_world)

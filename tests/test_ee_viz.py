@@ -125,6 +125,23 @@ class EeVizTest(unittest.TestCase):
         self.assertAlmostEqual(pingpong_alpha(2.0, period=4.0), 1.0)
         self.assertAlmostEqual(pingpong_alpha(4.0, period=4.0), 0.0)
 
+    def test_sim_tcp_steps_along_ee_z(self):
+        from geodude_teleoperation.ee_viz import SimTcpProbe
+
+        probe = SimTcpProbe([0.0, 0.0, 1.0])
+        probe.add_body_linear([0.0, 0.0, 0.1])
+        xyz = probe.step(np.diag([1.0, -1.0, -1.0]))
+        np.testing.assert_allclose(xyz, [0.0, 0.0, 0.9])
+
+    def test_sim_tcp_idle_clears_queued_step(self):
+        from geodude_teleoperation.ee_viz import SimTcpProbe
+
+        probe = SimTcpProbe([0.0, 0.0, 1.0])
+        probe.add_body_linear([0.0, 0.0, 0.5])
+        probe.clear_pending()
+        xyz = probe.step(np.eye(3))
+        np.testing.assert_allclose(xyz, [0.0, 0.0, 1.0])
+
     def test_chamfer_rz_yaws_about_flange_z(self):
         import geodude_teleoperation.ee_viz as ee_viz
 

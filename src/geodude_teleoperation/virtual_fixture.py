@@ -198,6 +198,8 @@ class OrientationField:
         self._smoothing = smoothing
         self._last_basis = np.eye(3)
         self._has_last = False
+        self._last_approach_basis = None
+        self._has_last_approach = False
 
     def get_distance(self, position):
         distance, _ = self._kdtree.query(np.asarray(position))
@@ -226,15 +228,24 @@ class OrientationField:
         return gafropy.Motor(translator, rotor)
 
     def approach_basis_at(self, position):
-        """Approach frame at ``position``. Does not update project() smoothing state."""
+        """Approach frame at ``position``. Does not update project() smoothing state.
+
+        Spatial-weight underflow keeps the last successful approach frame
+        (flipped identity if none yet) instead of snapping to world -Z.
+        """
         position = np.asarray(position, dtype=float).reshape(3)
         try:
             rotor = self._field.diffuse(
                 position, self._t_spatial, max_iterations=self._max_iterations)
             local_basis = _fiber_rotor_to_rotation_matrix(rotor)
         except RuntimeError:
-            local_basis = np.eye(3)
-        return _orient_approach_into_surface(local_basis)
+            if self._has_last_approach:
+                return np.array(self._last_approach_basis, copy=True)
+            return _orient_approach_into_surface(np.eye(3))
+        basis = _orient_approach_into_surface(local_basis)
+        self._last_approach_basis = basis
+        self._has_last_approach = True
+        return np.array(basis, copy=True)
 
     def display_basis_at(self, position):
         """Object +Z frame whose +Z matches /field_z arrows (out of the working face)."""

@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -102,4 +103,60 @@ class FieldZArrowTest(unittest.TestCase):
             field_z_display_dirs(into_surface, outward=True), [[0.0, 0.0, 1.0]])
         np.testing.assert_allclose(
             field_z_display_dirs(into_surface, outward=False), into_surface)
+
+
+def _stub_orientation_field():
+    from geodude_teleoperation.virtual_fixture import OrientationField
+
+    vf = OrientationField.__new__(OrientationField)
+    vf._t_spatial = 1.0
+    vf._max_iterations = 50
+    vf._has_last = False
+    vf._last_basis = np.eye(3)
+    vf._has_last_approach = False
+    vf._last_approach_basis = None
+    return vf
+
+
+class _DiffuseThenUnderflow:
+    def __init__(self):
+        self.n = 0
+
+    def diffuse(self, position, t, max_iterations=50):
+        del position, t, max_iterations
+        if self.n:
+            raise RuntimeError("underflow")
+        self.n += 1
+        return "rotor"
+
+
+class _AlwaysUnderflow:
+    def diffuse(self, position, t, max_iterations=50):
+        del position, t, max_iterations
+        raise RuntimeError("underflow")
+
+
+class ApproachBasisHoldTest(unittest.TestCase):
+    def test_underflow_keeps_last_successful_approach(self):
+        import geodude_teleoperation.virtual_fixture as vf_mod
+
+        local = np.array(
+            [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        vf = _stub_orientation_field()
+        vf._field = _DiffuseThenUnderflow()
+        with patch.object(vf_mod, "_fiber_rotor_to_rotation_matrix", return_value=local):
+            first = vf.approach_basis_at([0.0, 0.0, 0.0])
+            held = vf.approach_basis_at([100.0, 0.0, 0.0])
+        np.testing.assert_allclose(first, vf_mod._orient_approach_into_surface(local))
+        np.testing.assert_allclose(held, first)
+        self.assertFalse(vf._has_last)
+
+    def test_underflow_before_any_success_is_identity_approach(self):
+        from geodude_teleoperation.virtual_fixture import _orient_approach_into_surface
+
+        vf = _stub_orientation_field()
+        vf._field = _AlwaysUnderflow()
+        held = vf.approach_basis_at([100.0, 0.0, 0.0])
+        np.testing.assert_allclose(held, _orient_approach_into_surface(np.eye(3)))
+        self.assertFalse(getattr(vf, "_has_last_approach", False))
 

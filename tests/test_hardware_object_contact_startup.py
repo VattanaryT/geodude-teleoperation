@@ -169,6 +169,28 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         self.assertEqual(approach.vz, 0.0)
         self.assertFalse(approach.z_compliant)
 
+    def test_viser_preview_twist_does_not_call_hardware(self):
+        from geodude_teleoperation.ee_viz import SimTcpProbe
+
+        mod = _load_example()
+        probe = SimTcpProbe([0.0, 0.0, 1.0])
+        hardware = []
+        twist = ga.Twist.from_array(np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.05]))
+        consumed = mod.route_spacemouse_twist(
+            twist, sim_probe=probe, on_hardware=hardware.append)
+        self.assertTrue(consumed)
+        self.assertEqual(hardware, [])
+        np.testing.assert_allclose(probe.step(np.eye(3)), [0.0, 0.0, 1.05])
+
+    def test_headless_twist_goes_to_hardware(self):
+        mod = _load_example()
+        hardware = []
+        twist = ga.Twist.from_array(np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.05]))
+        consumed = mod.route_spacemouse_twist(
+            twist, sim_probe=None, on_hardware=hardware.append)
+        self.assertFalse(consumed)
+        self.assertEqual(hardware, [twist])
+
 
 if __name__ == "__main__":
     unittest.main()
