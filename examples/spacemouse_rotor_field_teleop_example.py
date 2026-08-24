@@ -42,7 +42,13 @@ import numpy as np
 import gafropy as g
 from gafropy.viz import Visualizer
 
-from geodude_teleoperation import OrientationField, load_object_mesh
+from geodude_teleoperation import (
+    OrientationField,
+    compute_resting_orientation,
+    load_object_mesh,
+    load_points,
+    table_placement_translation,
+)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_OBJECT = str(ROOT / "assets" / "objects" / "banana_half.ply")
@@ -116,6 +122,32 @@ def probe_max_step(bbox_diag, fraction=MAX_STEP_DIAG_FRACTION) -> float:
     return max(1e-4, float(fraction) * float(bbox_diag))
 
 
+def probe_arrow_scale(mean_edge, bbox_diag) -> float:
+    """Frame size follows the object, not Poisson mean-edge (mm on laser clouds)."""
+    return max(3.0 * float(mean_edge), 0.08 * float(bbox_diag))
+
+
+def flip_yz_axes(rotation: np.ndarray) -> np.ndarray:
+    """Negate local Y and Z (green/blue). Keeps a right-handed frame for tool-frame teleop."""
+    out = np.asarray(rotation, dtype=np.float64).copy()
+    out[:, 1] *= -1.0
+    out[:, 2] *= -1.0
+    return out
+
+
+def enqueue_or_stop(accumulator: "LinearAccumulator", gated: np.ndarray,
+                    stop_eps: float = 1e-6) -> None:
+    """Queue stick motion, or drop leftover when the stick is released.
+
+    take_capped keeps remainder so a slow project() cannot jump. That remainder
+    would keep the probe moving after hands-off unless we clear on idle.
+    """
+    if float(np.linalg.norm(gated)) <= float(stop_eps):
+        accumulator.clear()
+        return
+    accumulator.add(gated)
+
+
 class LinearAccumulator:
     """Thread-safe accumulator for remapped linear readings between redraw ticks. Written (added
     to) by the SpaceMouse's ~50Hz background poll thread; drained (read-and-reset to zero) once
@@ -153,6 +185,10 @@ class LinearAccumulator:
             self._accumulated = pending - applied
             return applied
 
+    def clear(self) -> None:
+        with self._lock:
+            self._accumulated = np.zeros(3)
+
 
 class ProbeState:
     """Thread-safe holder for the probe's current R^3 position only -- no orientation state."""
@@ -187,7 +223,15 @@ def build_field(args) -> tuple:
     key_direction = np.asarray(args.key_direction, dtype=np.float64)
     key_direction = key_direction / np.linalg.norm(key_direction)
 
-    object_mesh = load_object_mesh(args.mesh)
+    if args.rest_orientation:
+        points = load_points(args.mesh)
+        rotation = compute_resting_orientation(points)
+        translation = table_placement_translation(
+            points, rotation, np.zeros(3), xy_offset=(0.0, 0.0))
+        object_mesh = load_object_mesh(
+            args.mesh, rotation=rotation, translation=translation)
+    else:
+        object_mesh = load_object_mesh(args.mesh)
     object_vertices = np.array(object_mesh.vertices)
     mean_edge = float(object_mesh.edges_unique_length.mean())
     source_index = args.source if args.source is not None else int(np.argmax(object_vertices[:, 2]))
@@ -204,14 +248,22 @@ def build_field(args) -> tuple:
     return object_mesh, mean_edge, source_index, field, key_direction
 
 
-def field_rotation_matrix(field: "OrientationField", position: np.ndarray) -> np.ndarray:
+def field_rotation_matrix(field: "OrientationField", position: np.ndarray,
+                          flip_yz: bool = True) -> np.ndarray:
     """The field's own orientation at `position`, via OrientationField's public .project()
     (position pass-through, orientation replaced by the field readout, NLERP-smoothed against
     the field's own last query -- see virtual_fixture.py). A throwaway identity-rotor motor is
-    used as the input since project() ignores the proposed orientation entirely."""
+    used as the input since project() ignores the proposed orientation entirely.
+
+    `flip_yz` (default True) negates local Y and Z after project() so stick motion matches
+    tool-frame teleop rather than the raw/base-frame field axes.
+    """
     proposed = g.Motor(g.Translator.exp(*position), g.Rotor())
     result = field.project(proposed)
-    return np.asarray(result.get_rotor().to_rotation_matrix())
+    rotation = np.asarray(result.get_rotor().to_rotation_matrix())
+    if flip_yz:
+        rotation = flip_yz_axes(rotation)
+    return rotation
 
 
 def run_self_check(field_rotation_matrix, start_position: np.ndarray, args) -> None:
@@ -306,6 +358,10 @@ def main() -> None:
     parser.add_argument("--up-scale", type=float, default=0.3,
                         help="multiplicative sensitivity reduction applied to up motion once past --up-threshold-fraction")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--no-rest-orientation", dest="rest_orientation", action="store_false",
+                        help="leave the mesh in file coordinates (laser cloud stays in left_ur_base, often vertical)")
+    parser.add_argument("--no-flip-yz", dest="flip_yz", action="store_false",
+                        help="keep field Y/Z as project() returns them (base-frame / unflipped)")
     parser.add_argument("--self-check", action="store_true", help="run a synthetic reading sequence instead of connecting to a real SpaceMouse (no hardware needed)")
     args = parser.parse_args()
 
@@ -318,7 +374,7 @@ def main() -> None:
     start_offset = args.start_offset if args.start_offset is not None else 10.0 * mean_edge
 
     def query_rotation(position: np.ndarray) -> np.ndarray:
-        return field_rotation_matrix(field, position)
+        return field_rotation_matrix(field, position, flip_yz=args.flip_yz)
 
     object_vertices = np.array(object_mesh.vertices)
     start_position = object_vertices[source_index] + start_offset * key_direction
@@ -340,7 +396,7 @@ def main() -> None:
     viz.scene.add_mesh_trimesh("/object", object_mesh)
     scene.add_frame("/axes", axes_length=0.15 * bbox_diag, axes_radius=0.004 * bbox_diag, origin_radius=0.0)
 
-    arrow_scale = 3.0 * mean_edge
+    arrow_scale = probe_arrow_scale(mean_edge, bbox_diag)
 
     viz.gui.add_markdown(
         "SpaceMouse rotor-field exploration: move the point with your SpaceMouse -- only "
@@ -386,7 +442,7 @@ def main() -> None:
         raw_linear = np.asarray(twist.get_linear())  # rotational (roll/pitch/yaw) part intentionally unused
         remapped = remap_raw_linear(raw_linear, args.forward_axis, args.left_axis, args.up_axis)
         gated = apply_up_gate(remapped, args.linear_scale, args.up_threshold_fraction, args.up_scale)
-        accumulator.add(gated)
+        enqueue_or_stop(accumulator, gated)
 
     def on_button(index: int) -> None:
         pass
@@ -400,7 +456,7 @@ def main() -> None:
         f"probe motion: linear_scale={args.linear_scale:.5f} m/sample "
         f"(full defl ~{args.linear_scale * args.frequency:.3f} m/s), "
         f"max_step={max_step:.4f} m/tick, bbox_diag={bbox_diag:.3f} m, "
-        f"mean_edge={mean_edge:.4f} m"
+        f"mean_edge={mean_edge:.4f} m, flip_yz={args.flip_yz}"
     )
     print("Move the SpaceMouse to move the point through the field. Ctrl+C to exit.")
     redraw_period = 1.0 / args.redraw_rate
