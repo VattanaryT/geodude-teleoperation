@@ -224,3 +224,54 @@ class OrientationField:
         approach_basis = _orient_approach_into_surface(local_basis)
         rotor = gafropy.Rotor.from_matrix(approach_basis)
         return gafropy.Motor(translator, rotor)
+
+    def approach_basis_at(self, position):
+        """Approach frame at ``position``. Does not update project() smoothing state."""
+        position = np.asarray(position, dtype=float).reshape(3)
+        try:
+            rotor = self._field.diffuse(
+                position, self._t_spatial, max_iterations=self._max_iterations)
+            local_basis = _fiber_rotor_to_rotation_matrix(rotor)
+        except RuntimeError:
+            local_basis = np.eye(3)
+        return _orient_approach_into_surface(local_basis)
+
+    def field_z_arrows(self, points, *, max_count=256, length=0.03, outward=True):
+        """Start/end segments for viser. Default ``outward=True`` draws +normal
+        (out of the working face). EE snap still uses into-surface approach Z."""
+        points = np.asarray(points, dtype=float).reshape(-1, 3)
+        idx = boundary_sample_indices(len(points), max_count)
+        pts = points[idx]
+        z_dirs = np.array([self.approach_basis_at(p)[:, 2] for p in pts], dtype=float)
+        return field_z_segments(pts, field_z_display_dirs(z_dirs, outward=outward), length)
+
+
+def field_z_display_dirs(approach_z, *, outward=True):
+    z = np.asarray(approach_z, dtype=float)
+    return -z if outward else z
+
+
+def field_z_segments(origins, z_dirs, length):
+    origins = np.asarray(origins, dtype=float).reshape(-1, 3)
+    z = np.asarray(z_dirs, dtype=float).reshape(-1, 3)
+    n = np.linalg.norm(z, axis=1, keepdims=True)
+    z = z / np.maximum(n, 1e-30)
+    return np.stack([origins, origins + float(length) * z], axis=1)
+
+
+class FieldAlignPreview:
+    """Paint-only: ``vf.project(live)`` at a capped rate. Does not enable the pose spring."""
+
+    def __init__(self, vf, *, min_dt=1.0 / 15.0):
+        self._vf = vf
+        self._min_dt = float(min_dt)
+        self._last_t = float("-inf")
+        self.motor = None
+
+    def update(self, live_ee, now):
+        if self.motor is not None and (now - self._last_t) < self._min_dt:
+            return self.motor
+        self.motor = self._vf.project(live_ee)
+        self._last_t = now
+        return self.motor
+

@@ -62,3 +62,35 @@ class RestingOrientationTest(unittest.TestCase):
         world = points @ rotation.T + translation
         self.assertGreaterEqual(world[:, 2].min() + 1e-9, table[2])
         np.testing.assert_allclose(world.mean(axis=0)[:2], table[:2] + np.array([0.15, 0.0]))
+
+
+class ScanSurfaceClipTest(unittest.TestCase):
+    def test_clip_drops_underside_far_from_scan(self):
+        import trimesh
+        from geodude_teleoperation.mesh_fixture import clip_mesh_to_scan_points
+
+        cube = trimesh.creation.box(extents=[1.0, 1.0, 1.0])
+        cube.apply_translation([0.5, 0.5, 0.5])
+        xx, yy = np.meshgrid(np.linspace(0.1, 0.9, 8), np.linspace(0.1, 0.9, 8))
+        scan = np.column_stack([xx.ravel(), yy.ravel(), np.ones(xx.size)])
+        clipped = clip_mesh_to_scan_points(cube, scan)
+        self.assertGreater(float(clipped.vertices[:, 2].min()), 0.5)
+        self.assertGreater(float(clipped.vertices[:, 2].mean()), 0.75)
+
+    def test_orient_surface_flips_downward_normals(self):
+        import trimesh
+        from geodude_teleoperation.mesh_fixture import orient_surface_toward
+
+        square = trimesh.Trimesh(
+            vertices=np.array([
+                [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0],
+            ]),
+            faces=np.array([[0, 1, 2], [0, 2, 3]]),
+            process=True,
+        )
+        if float(square.vertex_normals.mean(axis=0)[2]) > 0:
+            square.invert()
+        self.assertLess(float(square.vertex_normals.mean(axis=0)[2]), 0.0)
+        orient_surface_toward(square, np.array([0.0, 0.0, 1.0]))
+        self.assertGreater(float(square.vertex_normals.mean(axis=0)[2]), 0.0)
+

@@ -56,6 +56,56 @@ class EeVizTest(unittest.TestCase):
         self.assertLess(z_ext, 0.13)
         self.assertTrue(np.all(xy_ext < 0.09))
 
+    def test_chamfer_tcp_is_pendant_offset_not_robotiq_length(self):
+        from geodude_teleoperation.ee_viz import (
+            chamfer_tcp_world_from_wrist3,
+            flange_from_wrist3,
+        )
+
+        T_wrist = np.eye(4)
+        flange = flange_from_wrist3()[:3, 3]
+        tcp = chamfer_tcp_world_from_wrist3(T_wrist)[:3, 3]
+        delta = tcp - flange
+        self.assertAlmostEqual(float(np.linalg.norm(delta)), 0.1443, places=3)
+        self.assertGreater(float(np.linalg.norm(delta)), 0.12)
+        self.assertLess(float(np.linalg.norm(delta)), 0.16)
+
+    def test_motor_from_matrix_keeps_chamfer_tcp_xyz(self):
+        from geodude_teleoperation.ee_viz import (
+            chamfer_tcp_world_from_wrist3,
+            motor_from_matrix,
+        )
+
+        T = chamfer_tcp_world_from_wrist3(np.eye(4))
+        motor = motor_from_matrix(T)
+        tr = motor.get_translator()
+        np.testing.assert_allclose(
+            [tr.x(), tr.y(), tr.z()], T[:3, 3], atol=1e-9)
+
+    def test_ghost_flange_keeps_tcp_and_slerps_rotation(self):
+        from geodude_teleoperation.ee_viz import (
+            chamfer_tcp_from_flange,
+            ghost_flange_world,
+        )
+
+        T_live = np.eye(4)
+        T_live[:3, 3] = [0.4, -0.2, 0.9]
+        T_field = np.eye(4)
+        T_field[:3, :3] = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+        T_field[:3, 3] = T_live[:3, 3]
+        T0 = ghost_flange_world(T_live, T_field, 0.0)
+        T1 = ghost_flange_world(T_live, T_field, 1.0)
+        tcp_from_flange = chamfer_tcp_from_flange()
+        np.testing.assert_allclose(T0 @ tcp_from_flange, T_live, atol=1e-9)
+        np.testing.assert_allclose(T1 @ tcp_from_flange, T_field, atol=1e-9)
+
+    def test_pingpong_alpha_hits_live_and_field(self):
+        from geodude_teleoperation.ee_viz import pingpong_alpha
+
+        self.assertAlmostEqual(pingpong_alpha(0.0, period=4.0), 0.0)
+        self.assertAlmostEqual(pingpong_alpha(2.0, period=4.0), 1.0)
+        self.assertAlmostEqual(pingpong_alpha(4.0, period=4.0), 0.0)
+
     def test_chamfer_rz_yaws_about_flange_z(self):
         import geodude_teleoperation.ee_viz as ee_viz
 

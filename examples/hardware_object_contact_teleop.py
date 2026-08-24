@@ -34,7 +34,16 @@ from geodude_teleoperation import (
     load_points,
     table_placement_translation,
 )
-from geodude_teleoperation.ee_viz import add_right_chamfer_visual, hide_gripper_visuals
+from geodude_teleoperation.ee_viz import (
+    add_ghost_chamfer_visual,
+    add_right_chamfer_visual,
+    chamfer_tcp_motor,
+    chamfer_tcp_world_from_wrist3,
+    ghost_flange_world,
+    hide_gripper_visuals,
+    matrix_from_motor,
+    pingpong_alpha,
+)
 from geodude_teleoperation.force_mode_contact import (
     ForceModeContactSession,
     reopen_gafropy,
@@ -44,8 +53,13 @@ from geodude_teleoperation.laser_frames import (
     is_laser_left_base_object,
     place_laser_object,
 )
-from geodude_teleoperation.mesh_fixture import reconstruct_mesh_from_points
+from geodude_teleoperation.mesh_fixture import (
+    clip_mesh_to_scan_points,
+    orient_surface_toward,
+    reconstruct_mesh_from_points,
+)
 from geodude_teleoperation.tcp_force import connect_tcp_force_reader, fz_from_tcp_force
+from geodude_teleoperation.virtual_fixture import FieldAlignPreview
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_OBJECT = str(ROOT / "assets" / "laser_profilometer" / "merged.ply")
@@ -124,7 +138,7 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
-        "--task-space", choices=["left_ee", "right_ee"], default="left_ee")
+        "--task-space", choices=["left_ee", "right_ee"], default="right_ee")
     parser.add_argument(
         "--device", choices=["keyboard", "spacemouse"], default="spacemouse")
     parser.add_argument(
@@ -228,13 +242,19 @@ def main():
         # or rewrite into right_base (that rotates the layup ~90°).
         placement = place_laser_object(args.object)
         object_surface = reconstruct_mesh_from_points(placement.points_vention)
+        n_poisson = len(object_surface.vertices)
+        object_surface = clip_mesh_to_scan_points(
+            object_surface, placement.points_vention)
+        orient_surface_toward(object_surface, np.array([0.0, 0.0, 1.0]))
         if args.normal_orientation < 0:
             object_surface.invert()
         print(
             "laser overlay: merged.ply left_base → vention "
             f"(+{placement.T_left_base_vention[:3, 3].round(3).tolist()} mount) "
             f"→ tag_0; T_tag0_rtde.t={placement.T_tag0_rtde[:3, 3].round(3).tolist()} "
-            "(right_base). Cloud is not copied into the right arm.",
+            "(right_base). Cloud is not copied into the right arm. "
+            f"scan surface {len(object_surface.vertices)}/{n_poisson} verts "
+            "(Poisson underside dropped, normals toward +Z).",
             flush=True,
         )
     else:
@@ -247,6 +267,7 @@ def main():
 
     key_direction = np.asarray(home_ee_motor.get_rotor().to_rotation_matrix())[:, 0]
     vf = OrientationField(object_surface, key_direction=key_direction)
+    field_preview = FieldAlignPreview(vf)
 
     approach_controller = _make_approach_controller(
         interface, task_space, home_ee_motor)
@@ -454,7 +475,7 @@ def main():
         print(
             "free-space scale: SpaceMouse lin=0.005 ang=0.05, "
             "admittance K=2000 D=20 dt=0.001 max|qdot|=0.8, twist_linear_scale=1 "
-            "(no VF project in approach)",
+            "(no VF project in approach; field preview is viser-only)",
             flush=True,
         )
 
@@ -481,17 +502,38 @@ def main():
             n_hidden = hide_gripper_visuals(robot_viz)
             update_chamfer = add_right_chamfer_visual(
                 viz, interface.get_system(), q=q_with_vention())
+            update_ghost = add_ghost_chamfer_visual(viz)
             print(
                 f"ee viz: hid {n_hidden} gripper meshes; "
-                "left flange blank, right chamfer on wrist_3 (visual only)",
+                "gray chamfer = live hardware, orange ghost slerps to the field "
+                "(viser only; pose spring held)",
                 flush=True,
             )
 
             viz.scene.add_point_cloud(
                 "/object", points=object_surface.vertices, colors=(200, 200, 200), point_size=0.002
             )
-
-            eeviz = viz.add_motor(viz_ee_motor)
+            verts = np.asarray(object_surface.vertices, dtype=float)
+            bbox_diag = float(np.linalg.norm(verts.max(axis=0) - verts.min(axis=0)))
+            z_len = float(np.clip(0.04 * bbox_diag, 0.015, 0.04))
+            print("field Z arrows: sampling approach axis on the object (scene tree /field_z)...",
+                  flush=True)
+            field_z = vf.field_z_arrows(verts, max_count=256, length=z_len)
+            viz.scene.add_arrows(
+                "/field_z",
+                points=field_z,
+                colors=(40, 90, 220),
+                shaft_radius=0.08 * z_len,
+                head_radius=0.2 * z_len,
+                head_length=0.35 * z_len,
+                visible=True,
+            )
+            print(
+                f"field Z: {len(field_z)} blue arrows OUT of the top (+normal). "
+                f"EE snap is the opposite (into the surface). "
+                f"Toggle /field_z in the viser scene tree.",
+                flush=True,
+            )
 
             def update():
                 if handoff_busy["busy"] or (
@@ -503,7 +545,17 @@ def main():
                 q = q_with_vention()
                 robot_viz.update(q)
                 update_chamfer(q)
-                eeviz.update(task_space.compute_ee_motor(q[joint_idx]))
+                fk = interface.get_system().compute_forward_kinematics(q)
+                T_wrist = np.asarray(
+                    fk.get_link_pose("right_ur5e/wrist_3_link").to_transformation_matrix())
+                T_live_tcp = chamfer_tcp_world_from_wrist3(T_wrist)
+                field_motor = field_preview.update(
+                    chamfer_tcp_motor(interface.get_system(), q),
+                    now=time.monotonic())
+                T_ghost = ghost_flange_world(
+                    T_live_tcp, matrix_from_motor(field_motor),
+                    pingpong_alpha(time.monotonic(), period=4.0))
+                update_ghost(T_ghost)
 
             viz.add_ticker(lambda: update())
 

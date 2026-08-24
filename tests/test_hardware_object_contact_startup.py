@@ -44,6 +44,11 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         self.assertFalse(mod.is_idle_twist(twist))
 
 
+    def test_default_task_space_is_right_ee(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args([])
+        self.assertEqual(args.task_space, "right_ee")
+
     def test_default_contact_backend_is_speedj(self):
         mod = _load_example()
         args = mod.build_arg_parser().parse_args([])

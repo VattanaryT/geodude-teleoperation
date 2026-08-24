@@ -114,6 +114,44 @@ def reconstruct_mesh_from_points(points: np.ndarray) -> trimesh.Trimesh:
     return trimesh.Trimesh(vertices=reconstructed.vertex_matrix(), faces=reconstructed.face_matrix(), process=True)
 
 
+def clip_mesh_to_scan_points(mesh, scan_points, dist_scale=3.0):
+    """Drop Poisson underside vertices that are not near the original scan."""
+    from scipy.spatial import cKDTree
+
+    scan = np.asarray(scan_points, dtype=float).reshape(-1, 3)
+    if len(scan) == 0 or mesh is None or len(mesh.vertices) == 0:
+        return mesh
+    tree = cKDTree(scan)
+    nn = tree.query(scan, k=min(2, len(scan)))[0]
+    if nn.ndim == 1:
+        spacing = 0.002
+    else:
+        d = nn[:, 1] if nn.shape[1] > 1 else nn[:, 0]
+        positive = d[d > 0]
+        spacing = float(np.median(positive)) if len(positive) else 0.002
+    max_dist = float(dist_scale) * max(spacing, 1e-6)
+    dist, _ = tree.query(np.asarray(mesh.vertices, dtype=float), k=1)
+    keep_vertex = dist <= max_dist
+    keep_face = keep_vertex[np.asarray(mesh.faces)]
+    keep_face = keep_face.all(axis=1) if keep_face.ndim == 2 else keep_face
+    clipped = mesh.copy()
+    clipped.update_faces(keep_face)
+    clipped.remove_unreferenced_vertices()
+    if len(clipped.faces) == 0 or len(clipped.vertices) == 0:
+        return mesh
+    return clipped
+
+
+def orient_surface_toward(mesh, direction):
+    """Invert so mean vertex normal points along ``direction`` (e.g. vention +Z)."""
+    direction = np.asarray(direction, dtype=float).reshape(3)
+    direction = direction / (np.linalg.norm(direction) + 1e-30)
+    mean_n = np.asarray(mesh.vertex_normals, dtype=float).mean(axis=0)
+    if float(mean_n @ direction) < 0.0:
+        mesh.invert()
+    return mesh
+
+
 def load_object_mesh(path, rotation=None, translation=None, normal_orientation=1) -> trimesh.Trimesh:
     """Loads path (mesh or point-cloud file) as a positioned trimesh.Trimesh with outward-facing
     normals. Mesh formats (.ply/.obj/.stl/...) load directly via trimesh; .pcd (no faces) is

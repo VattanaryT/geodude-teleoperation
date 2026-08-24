@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from scipy.spatial.transform import Rotation
+from scipy.spatial.transform import Rotation, Slerp
 
 _REPO = Path(__file__).resolve().parent.parent.parent
 CHAMFER_MESH = _REPO / "assets" / "robots" / "geodude" / "assets" / "chamfer_ee.stl"
@@ -19,6 +19,10 @@ FLANGE_FROM_WRIST3_QUAT_WXYZ = np.array(
 # A 90° X or Y rotation puts that face vertical (flat facing sideways).
 # Yaw about the flange axis after seating (positive = CCW looking along +z).
 CHAMFER_MESH_RZ_DEG = 40
+# Pendant chamfer TCP in UR tool0 / flange (geodude-teleoperation calibration/right.yaml).
+# Do not stack the 30 mm plates on top of this — they are already in the taught TCP.
+CHAMFER_TCP_FROM_FLANGE_XYZ = np.array([-0.0049, -0.00029, 0.14422], dtype=float)
+CHAMFER_TCP_FROM_FLANGE_ROTVEC = np.array([1.20695, 1.20049, 1.20171], dtype=float)
 
 
 def is_gripper_visual_link(name: str) -> bool:
@@ -47,6 +51,70 @@ def flange_from_wrist3() -> np.ndarray:
     return T
 
 
+def chamfer_tcp_from_flange() -> np.ndarray:
+    T = np.eye(4)
+    T[:3, :3] = Rotation.from_rotvec(CHAMFER_TCP_FROM_FLANGE_ROTVEC).as_matrix()
+    T[:3, 3] = CHAMFER_TCP_FROM_FLANGE_XYZ
+    return T
+
+
+def chamfer_tcp_from_wrist3() -> np.ndarray:
+    return flange_from_wrist3() @ chamfer_tcp_from_flange()
+
+
+def chamfer_tcp_world_from_wrist3(T_wrist3: np.ndarray) -> np.ndarray:
+    return np.asarray(T_wrist3, dtype=float).reshape(4, 4) @ chamfer_tcp_from_wrist3()
+
+
+def motor_from_matrix(T: np.ndarray):
+    import gafropy as ga
+
+    return ga.Motor.from_matrix(np.asarray(T, dtype=float).reshape(4, 4))
+
+
+def chamfer_tcp_motor(system, q):
+    """Chamfer pendant TCP in the gafropy world (vention-overlaid q)."""
+    fk = system.compute_forward_kinematics(np.asarray(q, dtype=float))
+    T_wrist = np.asarray(
+        fk.get_link_pose(RIGHT_WRIST3).to_transformation_matrix())
+    return motor_from_matrix(chamfer_tcp_world_from_wrist3(T_wrist))
+
+
+def matrix_from_motor(motor) -> np.ndarray:
+    return np.asarray(motor.to_transformation_matrix(), dtype=float)
+
+
+def flange_world_from_tcp(T_tcp: np.ndarray) -> np.ndarray:
+    return np.asarray(T_tcp, dtype=float).reshape(4, 4) @ np.linalg.inv(
+        chamfer_tcp_from_flange())
+
+
+def slerp_rotation(R0: np.ndarray, R1: np.ndarray, alpha: float) -> np.ndarray:
+    alpha = float(np.clip(alpha, 0.0, 1.0))
+    key = Rotation.concatenate([
+        Rotation.from_matrix(np.asarray(R0, dtype=float).reshape(3, 3)),
+        Rotation.from_matrix(np.asarray(R1, dtype=float).reshape(3, 3)),
+    ])
+    return Slerp([0.0, 1.0], key)(alpha).as_matrix()
+
+
+def pingpong_alpha(now: float, period: float = 4.0) -> float:
+    """0 at live, 1 at field, back to 0. Period is a full round trip."""
+    period = float(period)
+    x = (float(now) % period) / period
+    return 1.0 - abs(2.0 * x - 1.0)
+
+
+def ghost_flange_world(T_live_tcp: np.ndarray, T_field_tcp: np.ndarray, alpha: float) -> np.ndarray:
+    """Flange pose for a ghost chamfer that slerps about the live TCP."""
+    T_live = np.asarray(T_live_tcp, dtype=float).reshape(4, 4)
+    T_field = np.asarray(T_field_tcp, dtype=float).reshape(4, 4)
+    T = np.eye(4)
+    T[:3, 3] = T_live[:3, 3]
+    T[:3, :3] = slerp_rotation(T_live[:3, :3], T_field[:3, :3], alpha)
+    return flange_world_from_tcp(T)
+
+
 def seat_mesh_on_xy_origin(vertices: np.ndarray) -> np.ndarray:
     """Put the lowest face on z=0 and center xy on the origin (flange axis)."""
     v = np.asarray(vertices, dtype=float)
@@ -70,22 +138,47 @@ def chamfer_world_from_wrist3(T_wrist3: np.ndarray) -> np.ndarray:
     return np.asarray(T_wrist3, dtype=float).reshape(4, 4) @ flange_from_wrist3()
 
 
-def add_right_chamfer_visual(viz, system, *, q):
-    """Draw the chamfer on the right flange. Returns an updater(q)."""
+def _set_mesh_pose(handle, world: np.ndarray) -> None:
+    import trimesh
+
+    world = np.asarray(world, dtype=float).reshape(4, 4)
+    handle.wxyz = trimesh.transformations.quaternion_from_matrix(world)
+    handle.position = world[:3, 3]
+
+
+def _load_seated_chamfer(color_rgba):
     import trimesh
 
     raw = trimesh.load(str(CHAMFER_MESH), force="mesh")
     mesh = raw.copy()
     mesh.vertices = prepare_chamfer_vertices_m(np.asarray(raw.vertices))
-    handle = viz.scene.add_mesh_trimesh("/right_chamfer_ee", mesh)
+    mesh.visual.face_colors = np.tile(
+        np.asarray(color_rgba, dtype=np.uint8).reshape(1, 4),
+        (len(mesh.faces), 1))
+    return mesh
+
+
+def add_right_chamfer_visual(viz, system, *, q):
+    """Draw the chamfer on the right flange. Returns an updater(q)."""
+    handle = viz.scene.add_mesh_trimesh(
+        "/right_chamfer_ee", _load_seated_chamfer((160, 160, 160, 255)))
 
     def update(q_now):
         fk = system.compute_forward_kinematics(np.asarray(q_now, dtype=float))
         T_wrist = np.asarray(
             fk.get_link_pose(RIGHT_WRIST3).to_transformation_matrix())
-        world = chamfer_world_from_wrist3(T_wrist)
-        handle.wxyz = trimesh.transformations.quaternion_from_matrix(world)
-        handle.position = world[:3, 3]
+        _set_mesh_pose(handle, chamfer_world_from_wrist3(T_wrist))
 
     update(q)
+    return update
+
+
+def add_ghost_chamfer_visual(viz):
+    """Orange ghost mesh. Pass a flange-frame world pose to the updater."""
+    handle = viz.scene.add_mesh_trimesh(
+        "/right_chamfer_ee_field_ghost", _load_seated_chamfer((255, 140, 0, 140)))
+
+    def update(T_flange_world):
+        _set_mesh_pose(handle, T_flange_world)
+
     return update
