@@ -48,8 +48,18 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         mod = _load_example()
         args = mod.build_arg_parser().parse_args([])
         self.assertTrue(args.startup_align)
-        self.assertGreaterEqual(args.align_delay, 1.0)
+        self.assertIsNone(args.align_delay)
         self.assertGreaterEqual(args.align_duration, 2.0)
+
+    def test_snap_ghost_is_align_target_at_live_flange(self):
+        from geodude_teleoperation.ee_viz import align_flange_world
+
+        T0 = np.eye(4)
+        T0[:3, 3] = [0.4, -0.2, 0.9]
+        R_field = np.diag([1.0, -1.0, -1.0])
+        ghost = align_flange_world(T0, R_field, 1.0)
+        np.testing.assert_allclose(ghost[:3, 3], T0[:3, 3], atol=1e-9)
+        np.testing.assert_allclose(ghost[:3, :3], R_field, atol=1e-9)
 
     def test_drive_startup_align_enables_spring_then_holds(self):
         from geodude_teleoperation.ee_viz import StartupAlign

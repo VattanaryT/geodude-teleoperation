@@ -147,12 +147,29 @@ def ghost_flange_world(T_live_flange: np.ndarray, R_field: np.ndarray, p_tcp: np
     ``R_field`` column 2 is EE +Z (into the surface), opposite the blue
     /field_z arrows (object +normal). Do not compose the pendant TCP rotvec
     — that swings the 3mf through the table.
+
+    Holding TCP parks the flange on the far side of the tip (a retract). Startup
+    align uses ``align_flange_world`` instead so the tip moves toward the work.
     """
     T_live = np.asarray(T_live_flange, dtype=float).reshape(4, 4)
     R = slerp_rotation(T_live[:3, :3], R_field, alpha)
     T = np.eye(4)
     T[:3, :3] = R
     T[:3, 3] = np.asarray(p_tcp, dtype=float).reshape(3) - R @ CHAMFER_TCP_FROM_FLANGE_XYZ
+    return T
+
+
+def align_flange_world(T_live_flange: np.ndarray, R_field: np.ndarray,
+                       alpha: float) -> np.ndarray:
+    """Slerp flange rotation to the field, keeping live flange xyz.
+
+    Tool +Z into the surface then moves the tip toward the work. Same
+    ``R_field`` as ``ghost_flange_world``; different translation.
+    """
+    T_live = np.asarray(T_live_flange, dtype=float).reshape(4, 4)
+    T = np.eye(4)
+    T[:3, :3] = slerp_rotation(T_live[:3, :3], R_field, alpha)
+    T[:3, 3] = T_live[:3, 3]
     return T
 
 
@@ -176,12 +193,13 @@ class AlignTick:
 class StartupAlign:
     """One-shot flange slerp to the field. Spring tracks a moving target; no project() snap.
 
-    Wait ``delay_s`` (viser first), then ramp ``duration_s``, then hold when the
-    live flange is close to the field or ``settle_s`` elapses.
+    Wait until ``trigger()`` (``delay_s is None``) or ``delay_s`` seconds, then
+    ramp ``duration_s``, then hold when the live flange is close to the field
+    or ``settle_s`` elapses. Ramp keeps live flange xyz so the tip approaches.
     """
 
     def __init__(self, *, delay_s=3.0, duration_s=4.0, err_rad=0.05, settle_s=2.0):
-        self.delay_s = float(delay_s)
+        self.delay_s = None if delay_s is None else float(delay_s)
         self.duration_s = max(float(duration_s), 1e-6)
         self.err_rad = float(err_rad)
         self.settle_s = float(settle_s)
@@ -189,9 +207,9 @@ class StartupAlign:
         self._t0 = None
         self._T_flange0 = None
         self._R_field = None
-        self._p_tcp = None
         self._T_ee_from_flange = None
         self._goal_flange = None
+        self._triggered = False
 
     @property
     def finished(self):
@@ -201,6 +219,16 @@ class StartupAlign:
         if self.phase == "idle":
             self.phase = "wait"
             self._t0 = float(now)
+
+    def trigger(self):
+        if self.phase in ("idle", "wait"):
+            self._triggered = True
+
+    def desired_flange(self):
+        """Snap pose the orange ghost should show (alpha=1). None until wait ends."""
+        if self._T_flange0 is None or self._R_field is None:
+            return None
+        return align_flange_world(self._T_flange0, self._R_field, 1.0)
 
     def step(self, now, T_flange_live, R_field, T_ee_live):
         now = float(now)
@@ -212,19 +240,21 @@ class StartupAlign:
             return AlignTick("idle")
 
         if self.phase == "wait":
-            if (now - self._t0) < self.delay_s:
+            ready = (
+                self._triggered if self.delay_s is None
+                else (now - self._t0) >= self.delay_s)
+            if not ready:
                 return AlignTick("wait")
             self._T_flange0 = T_flange_live.copy()
             self._R_field = R_field.copy()
-            self._p_tcp = live_tcp_xyz_from_flange(T_flange_live)
             self._T_ee_from_flange = np.linalg.inv(T_flange_live) @ T_ee_live
             self._t0 = now
             self.phase = "ramp"
 
         if self.phase == "ramp":
             alpha = float(np.clip((now - self._t0) / self.duration_s, 0.0, 1.0))
-            T_flange = ghost_flange_world(
-                self._T_flange0, self._R_field, self._p_tcp, alpha)
+            T_flange = align_flange_world(
+                self._T_flange0, self._R_field, alpha)
             T_ee = T_flange @ self._T_ee_from_flange
             if alpha >= 1.0:
                 self._goal_flange = T_flange

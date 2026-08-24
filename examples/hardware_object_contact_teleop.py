@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import pathlib
 import socket
+import threading
 import time
 
 import gafropy as ga
@@ -37,6 +38,7 @@ from geodude_teleoperation import (
 from geodude_teleoperation.ee_viz import (
     add_ghost_chamfer_visual,
     add_right_chamfer_visual,
+    align_flange_world,
     chamfer_world_from_wrist3,
     ghost_flange_world,
     hide_gripper_visuals,
@@ -208,8 +210,9 @@ def build_arg_parser():
         "--no-startup-align", dest="startup_align", action="store_false",
         help="skip the one-shot field orientation align")
     parser.add_argument(
-        "--align-delay", type=float, default=3.0,
-        help="seconds to wait after viser starts before the align slerp")
+        "--align-delay", type=float, default=None,
+        help="seconds to wait after viser starts before the align slerp "
+             "(default: wait for Enter; orange ghost shows the snap first)")
     parser.add_argument(
         "--align-duration", type=float, default=4.0,
         help="seconds to slerp live orientation onto the field (no snap)")
@@ -374,22 +377,43 @@ def main():
         position = interface.get_state().get_position()[joint_idx]
         return task_space.compute_ee_motor(position)
 
+    def snap_target_flange(T_flange):
+        """Field orientation at the live TCP, applied at the live flange xyz."""
+        R_field = vf.approach_basis_at(live_tcp_xyz_from_flange(T_flange))
+        return R_field, align_flange_world(T_flange, R_field, 1.0)
+
+    def start_enter_to_align():
+        def _wait():
+            try:
+                input()
+            except EOFError:
+                return
+            if align is not None:
+                align.trigger()
+                print("startup align: Enter received", flush=True)
+
+        threading.Thread(target=_wait, daemon=True, name="align-enter").start()
+
     def run_startup_align(T_flange, T_ee):
         if align is None or mode["active"] != "approach":
-            return
+            return None
         if align.phase == "idle":
             align.arm(time.monotonic())
-            print(
-                f"startup align: waiting {args.align_delay:.0f}s (watch viser), then "
-                f"{args.align_duration:.0f}s orientation slerp with the spring on",
-                flush=True,
-            )
-        R_field = vf.approach_basis_at(live_tcp_xyz_from_flange(T_flange))
+            if args.align_delay is not None:
+                print(
+                    f"startup align: waiting {args.align_delay:.0f}s (watch viser), then "
+                    f"{args.align_duration:.0f}s orientation slerp with the spring on",
+                    flush=True,
+                )
+        R_field, _ = snap_target_flange(T_flange)
         cmd = drive_startup_align(
             align, approach_controller, time.monotonic(), T_flange, R_field, T_ee)
         if cmd.phase != align_phase["name"]:
             align_phase["name"] = cmd.phase
             print(f"startup align: {cmd.phase}", flush=True)
+            if cmd.finished and sim_probe["p"] is not None:
+                sim_probe["p"] = SimTcpProbe(live_tcp_xyz_from_flange(T_flange))
+        return cmd
 
     def rebind_after_gafropy_reopen(new_interface):
         nonlocal interface, task_space, joint_idx, approach_controller
@@ -482,9 +506,6 @@ def main():
         if handoff_busy["busy"]:
             return
         if align is not None and not align.finished:
-            if sim_probe["p"] is not None and align.phase == "wait":
-                route_spacemouse_twist(
-                    twist, sim_probe=sim_probe["p"], on_hardware=_hardware_twist)
             return
         route_spacemouse_twist(
             twist, sim_probe=sim_probe["p"], on_hardware=_hardware_twist)
@@ -547,9 +568,10 @@ def main():
         device.start(on_twist, on_button)
         if sim_probe["p"] is not None:
             print(
-                "viser preview: SpaceMouse moves orange /right_chamfer_ee_field_ghost; "
-                "UR stays held. Toggle the ghost in the scene tree. "
-                "--no-viz sends the stick to hardware.",
+                "viser: orange /right_chamfer_ee_field_ghost is the snap target until "
+                "startup align finishes (Press Enter in this terminal). After that, "
+                "SpaceMouse moves the ghost; UR stays held. --no-viz sends the stick "
+                "to hardware.",
                 flush=True,
             )
         else:
@@ -570,6 +592,10 @@ def main():
             print(f"Teleoperating '{args.task_space}' on real geodude (headless) "
                   f"-- {backend_note}; button {args.mode_button} toggles. Ctrl+C to quit.")
             start_control_and_device()
+            if align is not None and args.align_delay is None:
+                print("startup align: Press Enter in this terminal to slerp UR onto the field.",
+                      flush=True)
+                start_enter_to_align()
             while True:
                 if align is not None and not align.finished:
                     q = q_with_vention()
@@ -600,8 +626,8 @@ def main():
             sim_probe["p"] = SimTcpProbe(live_tcp_xyz_from_flange(T_live0))
             print(
                 f"ee viz: hid {n_hidden} gripper meshes; "
-                "gray chamfer = held hardware; orange ghost is a viser-only TCP "
-                "(SpaceMouse xyz, field orientation). No live↔field slerp. "
+                "gray chamfer = held hardware; orange ghost is the snap target "
+                "(field orientation at the live flange) until you press Enter. "
                 "Hide /right_chamfer_ee_field_ghost in the scene tree if you do not want it.",
                 flush=True,
             )
@@ -661,20 +687,34 @@ def main():
                 T_wrist = np.asarray(
                     fk.get_link_pose("right_ur5e/wrist_3_link").to_transformation_matrix())
                 T_live_flange = chamfer_world_from_wrist3(T_wrist)
+                T_ee = np.asarray(live_ee_motor().to_transformation_matrix())
+                if align is not None and not align.finished:
+                    run_startup_align(T_live_flange, T_ee)
+                    T_ghost = align.desired_flange()
+                    if T_ghost is None:
+                        _, T_ghost = snap_target_flange(T_live_flange)
+                    update_ghost(T_ghost)
+                    return
                 probe = sim_probe["p"]
                 R_field = field_preview.update_approach_basis(
                     probe.xyz(), now=time.monotonic())
                 p_tcp = probe.step(R_field)
                 T_ghost = ghost_flange_world(T_live_flange, R_field, p_tcp, 1.0)
                 update_ghost(T_ghost)
-                T_ee = np.asarray(live_ee_motor().to_transformation_matrix())
-                run_startup_align(T_live_flange, T_ee)
 
             viz.add_ticker(lambda: update())
 
             start_control_and_device()
+            if align is not None and args.align_delay is None:
+                print(
+                    "startup align: look at the orange ghost, then Press Enter in this "
+                    "terminal to slerp UR to it.",
+                    flush=True,
+                )
+                start_enter_to_align()
 
-            viz.show(message=f"startup align on '{args.task_space}' after delay, then hold "
+            viz.show(message=f"startup align on '{args.task_space}': orange ghost is "
+                     f"the snap target; Press Enter in the terminal to slerp, then hold "
                      f"-- {backend_note}. viser at http://localhost:{viz.port} -- ctrl-c to quit.")
     except KeyboardInterrupt:
         pass
