@@ -41,6 +41,8 @@ from geodude_teleoperation.ee_viz import (
     ghost_flange_world,
     hide_gripper_visuals,
     live_tcp_xyz_from_flange,
+    motor_from_matrix,
+    StartupAlign,
     SimTcpProbe,
 )
 from geodude_teleoperation.force_mode_contact import (
@@ -122,6 +124,19 @@ def route_spacemouse_twist(twist, *, sim_probe, on_hardware):
     return False
 
 
+def drive_startup_align(align, controller, now, T_flange, R_field, T_ee):
+    """Track a slerped flange target. Hold and freeze when the one-shot finishes."""
+    was_done = align.finished
+    cmd = align.step(now, T_flange, R_field, T_ee)
+    if cmd.T_ee is not None:
+        controller.get_objective().set_target(motor_from_matrix(cmd.T_ee))
+        controller.set_input_active(True)
+    elif cmd.finished and not was_done:
+        controller.set_input_active(False)
+        controller.hold_live_pose()
+    return cmd
+
+
 def enter_speedj_contact(*, mode, contact_controller, approach_controller, interface=None):
     """Keep the pose-spring speedJ plant. Overlay DualLoop Z. Do not swap to line admittance."""
     del interface  # caller may pass it; we must not interface.control(contact)
@@ -186,6 +201,18 @@ def build_arg_parser():
              "'force_mode' is UR hybrid force/position, not admittance.")
     parser.add_argument("--no-viz", action="store_true",
                         help="disable the viser visualization")
+    parser.add_argument(
+        "--startup-align", dest="startup_align", action="store_true", default=True,
+        help="after viser is up, slerp the live flange onto the field (one-shot)")
+    parser.add_argument(
+        "--no-startup-align", dest="startup_align", action="store_false",
+        help="skip the one-shot field orientation align")
+    parser.add_argument(
+        "--align-delay", type=float, default=3.0,
+        help="seconds to wait after viser starts before the align slerp")
+    parser.add_argument(
+        "--align-duration", type=float, default=4.0,
+        help="seconds to slerp live orientation onto the field (no snap)")
     parser.add_argument(
         "--vention-height", type=float, default=DEFAULT_VENTION_HEIGHT,
         help="physical vention rail height in meters for both arms (hardware does "
@@ -338,10 +365,31 @@ def main():
     robot_viz = None
     eeviz = None
     sim_probe = {"p": None}
+    align = (
+        StartupAlign(delay_s=args.align_delay, duration_s=args.align_duration)
+        if args.startup_align else None)
+    align_phase = {"name": None}
 
     def live_ee_motor():
         position = interface.get_state().get_position()[joint_idx]
         return task_space.compute_ee_motor(position)
+
+    def run_startup_align(T_flange, T_ee):
+        if align is None or mode["active"] != "approach":
+            return
+        if align.phase == "idle":
+            align.arm(time.monotonic())
+            print(
+                f"startup align: waiting {args.align_delay:.0f}s (watch viser), then "
+                f"{args.align_duration:.0f}s orientation slerp with the spring on",
+                flush=True,
+            )
+        R_field = vf.approach_basis_at(live_tcp_xyz_from_flange(T_flange))
+        cmd = drive_startup_align(
+            align, approach_controller, time.monotonic(), T_flange, R_field, T_ee)
+        if cmd.phase != align_phase["name"]:
+            align_phase["name"] = cmd.phase
+            print(f"startup align: {cmd.phase}", flush=True)
 
     def rebind_after_gafropy_reopen(new_interface):
         nonlocal interface, task_space, joint_idx, approach_controller
@@ -433,12 +481,20 @@ def main():
     def on_twist(twist):
         if handoff_busy["busy"]:
             return
+        if align is not None and not align.finished:
+            if sim_probe["p"] is not None and align.phase == "wait":
+                route_spacemouse_twist(
+                    twist, sim_probe=sim_probe["p"], on_hardware=_hardware_twist)
+            return
         route_spacemouse_twist(
             twist, sim_probe=sim_probe["p"], on_hardware=_hardware_twist)
 
     def on_button(index):
         # Handoff is rising-edge button only (SpaceMouseTeleop); twists never toggle mode.
         if index != args.mode_button or handoff_busy["busy"]:
+            return
+        if align is not None and not align.finished:
+            print("startup align running; ignoring mode button", flush=True)
             return
         if args.contact_backend == "force_mode":
             if mode["active"] == "approach":
@@ -515,7 +571,15 @@ def main():
                   f"-- {backend_note}; button {args.mode_button} toggles. Ctrl+C to quit.")
             start_control_and_device()
             while True:
-                time.sleep(0.1)
+                if align is not None and not align.finished:
+                    q = q_with_vention()
+                    fk = interface.get_system().compute_forward_kinematics(q)
+                    T_wrist = np.asarray(
+                        fk.get_link_pose("right_ur5e/wrist_3_link").to_transformation_matrix())
+                    T_flange = chamfer_world_from_wrist3(T_wrist)
+                    T_ee = np.asarray(live_ee_motor().to_transformation_matrix())
+                    run_startup_align(T_flange, T_ee)
+                time.sleep(0.02)
         else:
             viz = gafropy_viz.Visualizer()
             print(f"viser running at http://localhost:{viz.port} -- "
@@ -603,12 +667,14 @@ def main():
                 p_tcp = probe.step(R_field)
                 T_ghost = ghost_flange_world(T_live_flange, R_field, p_tcp, 1.0)
                 update_ghost(T_ghost)
+                T_ee = np.asarray(live_ee_motor().to_transformation_matrix())
+                run_startup_align(T_live_flange, T_ee)
 
             viz.add_ticker(lambda: update())
 
             start_control_and_device()
 
-            viz.show(message=f"Field preview on '{args.task_space}' — orange ghost is sim, UR held "
+            viz.show(message=f"startup align on '{args.task_space}' after delay, then hold "
                      f"-- {backend_note}. viser at http://localhost:{viz.port} -- ctrl-c to quit.")
     except KeyboardInterrupt:
         pass

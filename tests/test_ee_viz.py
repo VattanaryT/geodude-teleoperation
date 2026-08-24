@@ -142,6 +142,45 @@ class EeVizTest(unittest.TestCase):
         xyz = probe.step(np.eye(3))
         np.testing.assert_allclose(xyz, [0.0, 0.0, 1.0])
 
+    def test_startup_align_waits_then_slerps_without_snap(self):
+        from geodude_teleoperation.ee_viz import (
+            StartupAlign,
+            ghost_flange_world,
+            live_tcp_xyz_from_flange,
+            orientation_error_rad,
+        )
+
+        T0 = np.eye(4)
+        T0[:3, 3] = [0.0, 0.0, 1.0]
+        R_field = np.diag([1.0, -1.0, -1.0])
+        T_ee = T0.copy()
+        align = StartupAlign(delay_s=1.0, duration_s=2.0, err_rad=0.05, settle_s=0.5)
+        align.arm(0.0)
+        wait = align.step(0.5, T0, R_field, T_ee)
+        self.assertEqual(wait.phase, "wait")
+        self.assertIsNone(wait.T_ee)
+        self.assertFalse(wait.input_active)
+
+        start = align.step(1.0, T0, R_field, T_ee)
+        self.assertTrue(start.input_active)
+        np.testing.assert_allclose(start.T_ee[:3, :3], T0[:3, :3], atol=1e-9)
+
+        mid = align.step(2.0, T0, R_field, T_ee)
+        err_mid = orientation_error_rad(T0[:3, :3], mid.T_ee[:3, :3])
+        err_full = orientation_error_rad(T0[:3, :3], R_field)
+        self.assertGreater(err_mid, 0.1)
+        self.assertLess(err_mid, err_full - 0.1)
+
+        end = align.step(3.0, T0, R_field, T_ee)
+        T_goal = ghost_flange_world(T0, R_field, live_tcp_xyz_from_flange(T0), 1.0)
+        np.testing.assert_allclose(end.T_ee[:3, :3], T_goal[:3, :3], atol=1e-9)
+        np.testing.assert_allclose(
+            end.T_ee[:3, 3], T_goal[:3, 3], atol=1e-9)
+
+        done = align.step(3.6, T_goal, R_field, T_goal)
+        self.assertTrue(done.finished)
+        self.assertFalse(done.input_active)
+
     def test_chamfer_rz_yaws_about_flange_z(self):
         import geodude_teleoperation.ee_viz as ee_viz
 

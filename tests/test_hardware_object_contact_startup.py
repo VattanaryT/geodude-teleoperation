@@ -44,10 +44,60 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         self.assertFalse(mod.is_idle_twist(twist))
 
 
-    def test_default_task_space_is_right_ee(self):
+    def test_default_startup_align_is_on(self):
         mod = _load_example()
         args = mod.build_arg_parser().parse_args([])
-        self.assertEqual(args.task_space, "right_ee")
+        self.assertTrue(args.startup_align)
+        self.assertGreaterEqual(args.align_delay, 1.0)
+        self.assertGreaterEqual(args.align_duration, 2.0)
+
+    def test_drive_startup_align_enables_spring_then_holds(self):
+        from geodude_teleoperation.ee_viz import StartupAlign
+
+        mod = _load_example()
+
+        class Obj:
+            def __init__(self):
+                self.target = None
+
+            def set_target(self, motor):
+                self.target = motor
+
+        class Ctrl:
+            def __init__(self):
+                self.active = False
+                self.held = False
+                self._obj = Obj()
+
+            def get_objective(self):
+                return self._obj
+
+            def set_input_active(self, active):
+                self.active = active
+
+            def hold_live_pose(self):
+                self.held = True
+
+        T0 = np.eye(4)
+        T0[:3, 3] = [0.0, 0.0, 1.0]
+        R_field = np.diag([1.0, -1.0, -1.0])
+        align = StartupAlign(delay_s=0.5, duration_s=0.5, err_rad=0.05, settle_s=0.1)
+        align.arm(0.0)
+        ctrl = Ctrl()
+        wait = mod.drive_startup_align(align, ctrl, 0.1, T0, R_field, T0)
+        self.assertEqual(wait.phase, "wait")
+        self.assertFalse(ctrl.active)
+        ramp = mod.drive_startup_align(align, ctrl, 0.5, T0, R_field, T0)
+        self.assertTrue(ctrl.active)
+        self.assertIsNotNone(ctrl._obj.target)
+        mod.drive_startup_align(align, ctrl, 1.0, T0, R_field, T0)
+        T_goal = np.eye(4)
+        T_goal[:3, :3] = R_field
+        T_goal[:3, 3] = T0[:3, 3]
+        done = mod.drive_startup_align(align, ctrl, 1.2, T_goal, R_field, T_goal)
+        self.assertTrue(done.finished)
+        self.assertFalse(ctrl.active)
+        self.assertTrue(ctrl.held)
 
     def test_default_contact_backend_is_speedj(self):
         mod = _load_example()

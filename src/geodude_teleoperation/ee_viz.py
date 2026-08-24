@@ -156,6 +156,94 @@ def ghost_flange_world(T_live_flange: np.ndarray, R_field: np.ndarray, p_tcp: np
     return T
 
 
+def orientation_error_rad(R0: np.ndarray, R1: np.ndarray) -> float:
+    """Geodesic angle between two rotation matrices."""
+    rel = Rotation.from_matrix(R0).inv() * Rotation.from_matrix(R1)
+    return float(rel.magnitude())
+
+
+class AlignTick:
+    __slots__ = ("phase", "T_ee", "input_active", "finished", "alpha")
+
+    def __init__(self, phase, T_ee=None, input_active=False, finished=False, alpha=0.0):
+        self.phase = phase
+        self.T_ee = T_ee
+        self.input_active = input_active
+        self.finished = finished
+        self.alpha = float(alpha)
+
+
+class StartupAlign:
+    """One-shot flange slerp to the field. Spring tracks a moving target; no project() snap.
+
+    Wait ``delay_s`` (viser first), then ramp ``duration_s``, then hold when the
+    live flange is close to the field or ``settle_s`` elapses.
+    """
+
+    def __init__(self, *, delay_s=3.0, duration_s=4.0, err_rad=0.05, settle_s=2.0):
+        self.delay_s = float(delay_s)
+        self.duration_s = max(float(duration_s), 1e-6)
+        self.err_rad = float(err_rad)
+        self.settle_s = float(settle_s)
+        self.phase = "idle"
+        self._t0 = None
+        self._T_flange0 = None
+        self._R_field = None
+        self._p_tcp = None
+        self._T_ee_from_flange = None
+        self._goal_flange = None
+
+    @property
+    def finished(self):
+        return self.phase == "done"
+
+    def arm(self, now):
+        if self.phase == "idle":
+            self.phase = "wait"
+            self._t0 = float(now)
+
+    def step(self, now, T_flange_live, R_field, T_ee_live):
+        now = float(now)
+        T_flange_live = np.asarray(T_flange_live, dtype=float).reshape(4, 4)
+        T_ee_live = np.asarray(T_ee_live, dtype=float).reshape(4, 4)
+        R_field = np.asarray(R_field, dtype=float).reshape(3, 3)
+
+        if self.phase == "idle":
+            return AlignTick("idle")
+
+        if self.phase == "wait":
+            if (now - self._t0) < self.delay_s:
+                return AlignTick("wait")
+            self._T_flange0 = T_flange_live.copy()
+            self._R_field = R_field.copy()
+            self._p_tcp = live_tcp_xyz_from_flange(T_flange_live)
+            self._T_ee_from_flange = np.linalg.inv(T_flange_live) @ T_ee_live
+            self._t0 = now
+            self.phase = "ramp"
+
+        if self.phase == "ramp":
+            alpha = float(np.clip((now - self._t0) / self.duration_s, 0.0, 1.0))
+            T_flange = ghost_flange_world(
+                self._T_flange0, self._R_field, self._p_tcp, alpha)
+            T_ee = T_flange @ self._T_ee_from_flange
+            if alpha >= 1.0:
+                self._goal_flange = T_flange
+                self.phase = "settle"
+                self._t0 = now
+            return AlignTick("ramp" if alpha < 1.0 else "settle",
+                             T_ee=T_ee, input_active=True, alpha=alpha)
+
+        if self.phase == "settle":
+            T_ee = self._goal_flange @ self._T_ee_from_flange
+            err = orientation_error_rad(T_flange_live[:3, :3], self._R_field)
+            if err <= self.err_rad or (now - self._t0) >= self.settle_s:
+                self.phase = "done"
+                return AlignTick("done", input_active=False, finished=True, alpha=1.0)
+            return AlignTick("settle", T_ee=T_ee, input_active=True, alpha=1.0)
+
+        return AlignTick("done", finished=True, alpha=1.0)
+
+
 def seat_mesh_on_xy_origin(vertices: np.ndarray) -> np.ndarray:
     """Put the lowest face on z=0 and center xy on the origin (flange axis)."""
     v = np.asarray(vertices, dtype=float)
