@@ -386,10 +386,11 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
     tool-Z feed along CLI ``force_sign``; CONTACT is DualLoop ``Fe = Fd − Fs`` with
     ``Fs = force_sign · fz`` on the same-tick wrench and ``Fext`` left at 0
     (mapped through Z damping: ``set_desired_wrench[5] = v_z * z_damping``).
-    CONTACT engages when ``|Fs| ≥ max(0.4 N, 0.25·|Fd|)``; unload needs ``|Fs| < 0.4 N``
-    for ``lost_s``. ``force_sign`` is never latched from Fz polarity.
-    UR speedJ does not yield, so CONTACT sits (press velocity 0, retract allowed)
-    for ``sit_s`` after the gate — DualLoop's path wait analog — then the PID may trim.
+    CONTACT engages when compression ``Fs ≥ max(0.4 N, 0.25·|Fd|)`` with
+    ``Fs = −force_sign · fz`` (UR ``ActualTCPForce`` is the reaction, so a +Z
+    press reads ``Fz < 0``). Unload needs ``Fs < 0.4 N`` for ``lost_s``.
+    ``force_sign`` is never latched from Fz polarity. Over target, press velocity
+    is 0 or retract — speedJ must not keep inching into a rigid stop (C153).
     """
 
     def __init__(self, vf, config, target_force=5.0, kp_force=0.001, ki_force=0.0, kd_force=0.0,
@@ -466,7 +467,9 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._on_vz = callback
 
     def _fs(self, fz_raw):
-        return self._press_sign * float(fz_raw)
+        # UR ActualTCPForce is environment-on-TCP (reaction). Press along +Z reads Fz < 0.
+        # DualLoop wants Fs > 0 in compression: Fs = −force_sign · fz.
+        return -self._press_sign * float(fz_raw)
 
     def _read_fz_raw(self):
         if self._measured_fz_fn is not None:
@@ -478,7 +481,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
     def _press_velocity(self, fs, now):
         """Positive = press into the part (tool Z = press_sign * this)."""
         if self._z_mode == "approach":
-            if abs(fs) >= self._contact_engage_n:
+            if fs >= self._contact_engage_n:
                 self._z_mode = "contact"
                 self._unload_since = None
                 self._contact_since = now
@@ -489,7 +492,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
             else:
                 return self._v_approach
 
-        if abs(fs) < self._contact_release_n:
+        if fs < self._contact_release_n:
             if self._unload_since is None:
                 self._unload_since = now
             elif self._lost_s > 0.0 and (now - self._unload_since) >= self._lost_s:
@@ -523,6 +526,12 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         if sitting:
             # DualLoop path waits ~2 s at load. speedJ cannot yield, so do not press.
             return min(0.0, v_pid)
+        if fs >= self._target_force:
+            # Over target: hold or retract. Never keep inching into a rigid stop (C153).
+            return min(0.0, v_pid)
+        if fs <= 0.0:
+            # Not in compression (UR Fz same sign as press). Do not ram.
+            return 0.0
         return v_pid
 
     def _slew_vz(self, v_z):
