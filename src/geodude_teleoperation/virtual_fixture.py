@@ -2,6 +2,8 @@ import gafropy
 import numpy as np
 from scipy.spatial import ConvexHull, cKDTree
 
+from geodude_teleoperation.stringer_field import length_tangents
+
 
 def _orient_approach_into_surface(local_basis):
 
@@ -198,46 +200,33 @@ def boundary_sample_indices(n_vertices, num_boundary_samples=None,
 class OrientationField:
     """Ambient orientation field around a mesh's surface, via gafropy.RotorFieldDiffusion.
 
-    A tangent direction (`key_direction`, projected onto a source vertex's tangent plane) is
-    diffused across the mesh surface via gafropy.ConnectionLaplacian (the Vector Heat Method)
-    into a per-vertex boundary rotor, combining tangent + surface normal. That boundary rotor
-    field is then extended into ambient R^3 via gafropy.RotorFieldDiffusion: a spatial-heat-
-    kernel-weighted Riemannian (Frechet-mean) average over the boundary rotors, which by
-    construction never leaves the unit-rotor manifold (see
-    gafro/geometry/RotorFieldDiffusion.hpp's own docstring for the exact math).
+    Surface frames follow the old stringer path: PCA end-cap heat (``flow=length``),
+    ``x = ∇u`` along the long axis, ``z`` = surface normal, ``y = z × x``. That
+    boundary rotor field is extended into ambient R^3 via RotorFieldDiffusion
+    (startup only; queries are deterministic Frechet means, not Walk-on-Spheres).
 
     Query cost is capped: reconstructed clouds default to
     `DEFAULT_MAX_BOUNDARY_SAMPLES` Frechet-mean samples. Spatial kernel default is
     `(5 * mean_edge)^2` so mm-scale laser edges do not make the field twitch along a path.
     Queries use a planar hull signed distance: the outer ~6 cm of the object
     already overlaps the table-flat field, then eases out to full table by 45 cm.
-
-    Deterministic -- unlike the previous diffused_fields Walk-on-Spheres implementation,
-    rerunning gives bit-for-bit identical results, and there is no Monte Carlo
-    batch_size/convergence_threshold to tune.
     """
 
-    def __init__(self, mesh, key_direction, source_vertex=None, t_surface=None, t_spatial=None,
-                 num_boundary_samples=None, max_iterations=50, smoothing=0.75):
+    def __init__(self, mesh, key_direction=None, source_vertex=None, t_surface=None,
+                 t_spatial=None, num_boundary_samples=None, max_iterations=50,
+                 smoothing=0.75, end_line_fraction=0.06, swap_end_lines=False,
+                 diffusion_scalar=5000.0):
+        del key_direction, source_vertex, t_surface
         vertices = np.asarray(mesh.vertices, dtype=np.float64)
         normals = np.asarray(mesh.vertex_normals, dtype=np.float64)
         normals = normals / np.linalg.norm(normals, axis=1, keepdims=True)
         mean_edge = float(mesh.edges_unique_length.mean())
 
-        vertex = source_vertex if source_vertex is not None else int(np.argmax(vertices[:, 2]))
-
-        direction = np.asarray(key_direction, dtype=np.float64)
-        direction = direction / np.linalg.norm(direction)
-        v0 = _tangent_direction(mesh, vertex, direction)
-
-        complex_ = gafropy.SimplicialComplex.build_from_faces(len(vertices), mesh.faces.tolist())
-        connection = gafropy.ConnectionLaplacian.build(complex_, list(vertices))
-        t_surface = t_surface if t_surface is not None else 5.0 * connection.get_mean_edge_length_squared()
-
-        diffused = np.asarray(connection.diffuse_vector(v0, vertex, t_surface))
-        magnitude = np.linalg.norm(diffused, axis=1)
-        degenerate = magnitude < 1e-9
-        tangent = np.where(degenerate[:, None], v0[None, :], diffused / np.maximum(magnitude, 1e-30)[:, None])
+        tangent, sink, source, _axis = length_tangents(
+            mesh, fraction=end_line_fraction, swap=swap_end_lines,
+            diffusion_scalar=diffusion_scalar)
+        self.sink_points = vertices[sink]
+        self.source_points = vertices[source]
 
         rotors = _continuous_boundary_rotors(mesh, tangent, normals)
 

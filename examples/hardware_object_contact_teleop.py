@@ -635,6 +635,20 @@ def main():
             viz.scene.add_point_cloud(
                 "/object", points=object_surface.vertices, colors=(200, 200, 200), point_size=0.002
             )
+            viz.scene.add_point_cloud(
+                "/field_source", points=vf.source_points, colors=(220, 50, 40),
+                point_size=0.004,
+            )
+            viz.scene.add_point_cloud(
+                "/field_sink", points=vf.sink_points, colors=(40, 90, 220),
+                point_size=0.004,
+            )
+            print(
+                f"field BCs: {len(vf.source_points)} source (red /field_source) and "
+                f"{len(vf.sink_points)} sink (blue /field_sink) end-cap vertices. "
+                "Toggle them in the scene tree.",
+                flush=True,
+            )
             verts = np.asarray(object_surface.vertices, dtype=float)
             bbox_diag = float(np.linalg.norm(verts.max(axis=0) - verts.min(axis=0)))
             z_len = float(np.clip(0.04 * bbox_diag, 0.015, 0.04))
