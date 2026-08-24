@@ -116,6 +116,33 @@ def _continuous_boundary_rotors(mesh, tangent, normal):
     return [_quaternion_to_fiber_rotor(*quats_wxyz[i]) for i in range(n)]
 
 
+DEFAULT_MAX_BOUNDARY_SAMPLES = 2048
+# Heat-kernel length in mean-edge units. mean_edge^2 is too local on laser
+# reconstructions (mm edges): orientation then tracks scan noise as the probe moves.
+DEFAULT_T_SPATIAL_EDGE_FACTOR = 5.0
+
+
+def boundary_sample_indices(n_vertices, num_boundary_samples=None,
+                            max_default=DEFAULT_MAX_BOUNDARY_SAMPLES):
+    """Vertex subset used as RotorFieldDiffusion samples.
+
+    Small meshes keep every vertex. Large reconstructed clouds default to a cap so
+    each project() Frechet mean stays cheap enough for interactive motion.
+    """
+    n = int(n_vertices)
+    if n <= 0:
+        return np.arange(0, dtype=int)
+    if num_boundary_samples is not None:
+        k = min(max(int(num_boundary_samples), 1), n)
+    elif n <= max_default:
+        return np.arange(n)
+    else:
+        k = max_default
+    if k >= n:
+        return np.arange(n)
+    return np.unique(np.linspace(0, n - 1, k, dtype=int))
+
+
 class OrientationField:
     """Ambient orientation field around a mesh's surface, via gafropy.RotorFieldDiffusion.
 
@@ -126,6 +153,10 @@ class OrientationField:
     kernel-weighted Riemannian (Frechet-mean) average over the boundary rotors, which by
     construction never leaves the unit-rotor manifold (see
     gafro/geometry/RotorFieldDiffusion.hpp's own docstring for the exact math).
+
+    Query cost is capped: reconstructed clouds default to
+    `DEFAULT_MAX_BOUNDARY_SAMPLES` Frechet-mean samples. Spatial kernel default is
+    `(5 * mean_edge)^2` so mm-scale laser edges do not make the field twitch along a path.
 
     Deterministic -- unlike the previous diffused_fields Walk-on-Spheres implementation,
     rerunning gives bit-for-bit identical results, and there is no Monte Carlo
@@ -156,15 +187,12 @@ class OrientationField:
 
         rotors = _continuous_boundary_rotors(mesh, tangent, normals)
 
-        if num_boundary_samples is not None:
-            n = min(num_boundary_samples, len(vertices))
-            indices = np.unique(np.linspace(0, len(vertices) - 1, n, dtype=int))
-        else:
-            indices = np.arange(len(vertices))
-
+        indices = boundary_sample_indices(len(vertices), num_boundary_samples)
         positions = [vertices[i] for i in indices]
         self._field = gafropy.RotorFieldDiffusion(positions, [rotors[i] for i in indices])
-        self._t_spatial = t_spatial if t_spatial is not None else mean_edge ** 2
+        self._t_spatial = (
+            t_spatial if t_spatial is not None
+            else (DEFAULT_T_SPATIAL_EDGE_FACTOR * mean_edge) ** 2)
         self._max_iterations = max_iterations
         self._kdtree = cKDTree(np.asarray(positions))
         self._smoothing = smoothing

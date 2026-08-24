@@ -92,6 +92,30 @@ def apply_up_gate(remapped: np.ndarray, linear_scale: float, up_threshold_fracti
     return result
 
 
+DEFAULT_LINEAR_SCALE = 0.05
+# At full deflection, cover this fraction of the object bbox diagonal per second,
+# then cap at DEFAULT_LINEAR_SCALE. Hemisphere (diag ~3 m) still hits 0.05;
+# merged.ply (diag ~0.46 m) drops to ~9 mm/sample instead of 5 cm/sample.
+FULL_DEFLECTION_DIAG_PER_SEC = 1.0
+MAX_STEP_DIAG_FRACTION = 0.02
+
+
+def resolve_probe_linear_scale(bbox_diag, frequency, explicit=None,
+                               default_cap=DEFAULT_LINEAR_SCALE) -> float:
+    """SpaceMouse m/sample. Cap at the legacy 0.05; shrink for real-scale scans."""
+    if explicit is not None:
+        return float(explicit)
+    diag = float(bbox_diag)
+    freq = float(frequency)
+    if diag <= 0.0 or freq <= 0.0:
+        return float(default_cap)
+    return min(float(default_cap), FULL_DEFLECTION_DIAG_PER_SEC * diag / freq)
+
+
+def probe_max_step(bbox_diag, fraction=MAX_STEP_DIAG_FRACTION) -> float:
+    return max(1e-4, float(fraction) * float(bbox_diag))
+
+
 class LinearAccumulator:
     """Thread-safe accumulator for remapped linear readings between redraw ticks. Written (added
     to) by the SpaceMouse's ~50Hz background poll thread; drained (read-and-reset to zero) once
@@ -110,6 +134,24 @@ class LinearAccumulator:
         with self._lock:
             value, self._accumulated = self._accumulated, np.zeros(3)
             return value
+
+    def take_capped(self, max_step: float) -> np.ndarray:
+        """Apply at most `max_step` meters this tick; leave the rest queued.
+
+        Slow field queries make the 15 Hz loop miss ticks. Drain-all then jumps
+        by the whole backlog (jumpy TCP while moving, still at rest). Cap keeps
+        speed bounded; remainder is not dropped.
+        """
+        max_step = float(max_step)
+        with self._lock:
+            pending = self._accumulated
+            n = float(np.linalg.norm(pending))
+            if n <= max_step or n < 1e-15:
+                self._accumulated = np.zeros(3)
+                return pending.copy()
+            applied = pending * (max_step / n)
+            self._accumulated = pending - applied
+            return applied
 
 
 class ProbeState:
@@ -242,12 +284,13 @@ def main() -> None:
     parser.add_argument("--key-direction", type=float, nargs=3, default=[0.0, 0.0, 1.0])
     parser.add_argument("--source", type=int, default=None)
     parser.add_argument("--t-surface", type=float, default=None)
-    parser.add_argument("--t-spatial", type=float, default=None, help="RotorFieldDiffusion spatial kernel bandwidth (default: mean-edge^2)")
+    parser.add_argument("--t-spatial", type=float, default=None, help="RotorFieldDiffusion spatial kernel bandwidth (default: (5*mean_edge)^2)")
     parser.add_argument("--num-boundary-samples", type=int, default=None)
     parser.add_argument("--max-iterations", type=int, default=50)
     parser.add_argument("--smoothing", type=float, default=0.75, help="OrientationField NLERP smoothing factor (0 = no smoothing, closer to 1 = smoother/laggier)")
     parser.add_argument("--start-offset", type=float, default=None, help="starting distance above the source vertex, along key-direction (default: 10x mean edge length)")
-    parser.add_argument("--linear-scale", type=float, default=0.05, help="SpaceMouse linear step size, passed straight to SpaceMouseTeleop")
+    parser.add_argument("--linear-scale", type=float, default=None,
+                        help="SpaceMouse linear step size (m/sample). Default: min(0.05, bbox_diag/Hz) so merged.ply is not 5 cm/sample")
     parser.add_argument("--deadzone", type=float, default=0.05)
     parser.add_argument("--frequency", type=float, default=50.0, help="SpaceMouse poll rate -- on_twist is now O(1) (see module docstring), so this can stay high without causing lag")
     parser.add_argument("--redraw-rate", type=float, default=15.0,
@@ -267,6 +310,10 @@ def main() -> None:
     args = parser.parse_args()
 
     object_mesh, mean_edge, source_index, field, key_direction = build_field(args)
+    bbox_diag = float(np.linalg.norm(object_mesh.bounding_box.extents))
+    args.linear_scale = resolve_probe_linear_scale(
+        bbox_diag, args.frequency, explicit=args.linear_scale)
+    max_step = probe_max_step(bbox_diag)
 
     start_offset = args.start_offset if args.start_offset is not None else 10.0 * mean_edge
 
@@ -291,7 +338,6 @@ def main() -> None:
 
     object_mesh.visual.vertex_colors = np.full((len(object_vertices), 4), [200, 200, 210, 90], dtype=np.uint8)
     viz.scene.add_mesh_trimesh("/object", object_mesh)
-    bbox_diag = float(np.linalg.norm(object_mesh.bounding_box.extents))
     scene.add_frame("/axes", axes_length=0.15 * bbox_diag, axes_radius=0.004 * bbox_diag, origin_radius=0.0)
 
     arrow_scale = 3.0 * mean_edge
@@ -316,7 +362,7 @@ def main() -> None:
         # through a backlog of stale-but-queued updates -- which looks exactly like continued
         # movement, without any actual bug in the position/accumulator logic itself (verified
         # separately, see --self-check). Fixed: skip entirely when idle.
-        pending = accumulator.drain()
+        pending = accumulator.take_capped(max_step)
         if not force and np.allclose(pending, 0.0):
             return False
 
@@ -350,6 +396,12 @@ def main() -> None:
     device.start(on_twist, on_button)
 
     print("Open the viser URL printed above in a browser to view the scene.")
+    print(
+        f"probe motion: linear_scale={args.linear_scale:.5f} m/sample "
+        f"(full defl ~{args.linear_scale * args.frequency:.3f} m/s), "
+        f"max_step={max_step:.4f} m/tick, bbox_diag={bbox_diag:.3f} m, "
+        f"mean_edge={mean_edge:.4f} m"
+    )
     print("Move the SpaceMouse to move the point through the field. Ctrl+C to exit.")
     redraw_period = 1.0 / args.redraw_rate
     try:
