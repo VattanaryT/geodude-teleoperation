@@ -1,3 +1,17 @@
+"""Hardware object-contact teleop for geodude.
+
+Free space: gafropy speedJ + SpaceMouse (approach mode).
+
+Contact (default): UR ``force_mode`` via ``ur_rtde`` — controller holds tool-Z
+force; SpaceMouse slides on the surface (tool-Z velocity ignored). Smooth
+handoff settles, ramps force, and re-opens gafropy on exit.
+
+The legacy host speedJ + force-PID contact path is kept behind
+``--contact-backend speedj`` (hidden / not recommended until gafropy exposes
+ActualTCPForce on ``get_wrench()``).
+"""
+from __future__ import annotations
+
 import argparse
 import pathlib
 import socket
@@ -22,6 +36,12 @@ from geodude_teleoperation import (
     load_points,
     table_placement_translation,
 )
+from geodude_teleoperation.force_mode_contact import (
+    ForceModeContactSession,
+    reopen_gafropy,
+    shutdown_gafropy_for_handoff,
+)
+from geodude_teleoperation.tcp_force import connect_tcp_force_reader, fz_from_tcp_force
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_OBJECT = str(ROOT / "assets" / "laser_profilometer" / "merged.ply")
@@ -54,6 +74,24 @@ def _dashboard_bring_up(ip: str) -> None:
     print(f"{ip}: RUNNING")
 
 
+def _make_approach_controller(interface, task_space, home_ee_motor):
+    # Match hardware_free_teleop defaults for smooth free-space tracking.
+    # Do NOT attach OrientationField here: vf.project() every stick sample snaps
+    # orientation and makes speedJ feel discontinuous vs the SpaceMouse.
+    approach = AdmittanceTeleoperationController(
+        inertia=np.diag([1.0] * 6),
+        damping=np.diag([20.0] * 6),
+        stiffness=np.diag([2000.0] * 6),
+        dt=0.001,
+        max_joint_velocity=0.8,
+        twist_linear_scale=1.0,
+    )
+    approach.set_task_space(task_space)
+    approach.set_interface(interface)
+    approach.set_objective(ga.control.SingleArmMotorControlObjective(home_ee_motor))
+    return approach
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -75,10 +113,21 @@ def main():
         help="sign correction for point-cloud objects' PCA-estimated normals (see teleoperation.py)")
     parser.add_argument(
         "--target-force", type=float, default=5.0,
-        help="desired contact force (N) pressing the tool into the object in contact mode")
+        help="desired contact force (N) along tool Z in contact mode")
+    parser.add_argument(
+        "--force-sign", type=float, default=-1.0,
+        help="multiply target force along task +Z (default -1 for live UR; "
+             "flip to +1 if the arm lifts instead of pressing)")
+    parser.add_argument(
+        "--no-zero-ft", dest="zero_ft_sensor", action="store_false",
+        help="skip RTDE zeroFtSensor before force_mode handoff")
     parser.add_argument(
         "--mode-button", type=int, default=0,
         help="spacemouse button index that toggles between approach and contact mode")
+    parser.add_argument(
+        "--contact-backend", choices=["force_mode", "speedj"], default="force_mode",
+        help="contact implementation (default: force_mode). "
+             "'speedj' is the legacy host PID path — hidden/unsafe until get_wrench works.")
     parser.add_argument("--no-viz", action="store_true",
                         help="disable the viser visualization")
     parser.add_argument(
@@ -93,15 +142,24 @@ def main():
         "--right-vention-height", type=float, default=None,
         help="override --vention-height for the right rail only")
     args = parser.parse_args()
+    print(
+        f"contact: backend={args.contact_backend}  "
+        f"force_sign={args.force_sign:g}  "
+        f"Fd={args.force_sign * args.target_force:+.1f}N",
+        flush=True,
+    )
+
+    with open(args.hardware_config) as f:
+        hardware_config = yaml.safe_load(f)
 
     if args.bring_up:
-        with open(args.hardware_config) as f:
-            hardware_config = yaml.safe_load(f)
         for control_group, entry in hardware_config.items():
             _dashboard_bring_up(entry["robot_ip"])
 
-    config = ri.Configuration(MODEL, "hardware", args.hardware_config)
-    interface = ri.RobotInterface(config)
+    task_group = "left_ur5e" if args.task_space == "left_ee" else "right_ur5e"
+    robot_ip = hardware_config[task_group]["robot_ip"]
+
+    interface = ri.RobotInterface(ri.Configuration(MODEL, "hardware", args.hardware_config))
     interface.initialize()
 
     left_vention = args.left_vention_height if args.left_vention_height is not None else args.vention_height
@@ -122,9 +180,6 @@ def main():
     live_position = interface.get_state().get_position()[joint_idx]
     home_ee_motor = task_space.compute_ee_motor(live_position)
 
-    # Object / table pose in the same frame viser uses (rails overlaid). The
-    # hold-pose objective stays on unpatched hardware FK so the C++ loop does
-    # not see a 0.25 m z-error and command the UR joints up.
     viz_position = q_with_vention()[joint_idx]
     viz_ee_motor = task_space.compute_ee_motor(viz_position)
     viz_translator = viz_ee_motor.get_translator()
@@ -144,80 +199,208 @@ def main():
         normal_orientation=args.normal_orientation)
 
     key_direction = np.asarray(home_ee_motor.get_rotor().to_rotation_matrix())[:, 0]
-
     vf = OrientationField(object_surface, key_direction=key_direction)
 
-    # Hold the live pose. vf.project() replaces orientation with the field's
-    # local approach basis; using that as the first objective would immediately
-    # servo the arm, before viser is even up.
-    approach_controller = AdmittanceTeleoperationController()
-    approach_controller.set_virtual_fixture(vf)
-    approach_controller.set_task_space(task_space)
-    approach_controller.set_interface(interface)
-    approach_controller.set_objective(
-        ga.control.SingleArmMotorControlObjective(home_ee_motor))
+    approach_controller = _make_approach_controller(
+        interface, task_space, home_ee_motor)
 
-    contact_stiffness = np.diag([3000.0] * 5 + [0.0])
-    contact_damping = np.diag([20.0] * 5 + [20.0])
-    contact_config = ga.control.VelocityAdmittanceControllerConfig()
-    contact_config.dt = 0.01
-    contact_config.max_linear_speed = 0.1
-    contact_config.max_angular_speed = 0.5
-    contact_config.admittance = ga.control.AdmittanceConfig(
-        inertia=1.0 * np.eye(6), damping=contact_damping, stiffness=contact_stiffness)
+    # --- legacy speedJ contact (hidden; only if --contact-backend speedj) ---
+    contact_controller = None
+    measured_fz_fn = None
+    close_tcp_force = None
+    if args.contact_backend == "speedj":
+        contact_stiffness = np.diag([400.0] * 5 + [0.0])
+        contact_damping = np.diag([40.0] * 5 + [40.0])
+        contact_config = ga.control.VelocityAdmittanceControllerConfig()
+        contact_config.dt = 0.01
+        contact_config.max_linear_speed = 0.01
+        contact_config.max_angular_speed = 0.15
+        contact_config.admittance = ga.control.AdmittanceConfig(
+            inertia=1.0 * np.eye(6), damping=contact_damping, stiffness=contact_stiffness)
+        try:
+            read_tcp_force, close_tcp_force = connect_tcp_force_reader(robot_ip)
+            measured_fz_fn = lambda: fz_from_tcp_force(read_tcp_force())
+            print(f"contact FT: RTDE ActualTCPForce from {robot_ip}", flush=True)
+        except Exception as exc:
+            print(
+                f"\033[93mWARNING: cannot open RTDE ActualTCPForce on {robot_ip} "
+                f"({exc}). speedj contact will refuse without Fz.\033[0m",
+                flush=True,
+            )
+        contact_controller = ContactTeleoperationController(
+            vf, contact_config, target_force=args.target_force,
+            kp_force=2.0, ki_force=0.5, force_limit=10.0, force_ramp_s=2.0,
+            measured_fz_fn=measured_fz_fn)
+        contact_controller.set_task_space(task_space)
+        contact_controller.set_interface(interface)
+        contact_controller.set_objective(
+            ga.control.SingleArmLineControlObjective(
+                home_ee_motor.transform_line(ga.Line.Z())))
 
-    contact_controller = ContactTeleoperationController(
-        vf, contact_config, target_force=args.target_force)
-    contact_controller.set_task_space(task_space)
-    contact_controller.set_interface(interface)
-    contact_controller.set_objective(
-        ga.control.SingleArmLineControlObjective(
-            vf.project(home_ee_motor).transform_line(ga.Line.Z())))
+    force_session = ForceModeContactSession(
+        robot_ip,
+        target_force=args.target_force,
+        force_sign=args.force_sign,
+        force_ramp_s=2.0,
+        zero_ft_sensor=args.zero_ft_sensor,
+    )
 
     mode = {"active": "approach"}
+    handoff_busy = {"busy": False}
     device = None
     viz = None
+    robot_viz = None
+    eeviz = None
 
     def live_ee_motor():
         position = interface.get_state().get_position()[joint_idx]
         return task_space.compute_ee_motor(position)
 
-    def on_twist(twist):
-        if is_idle_twist(twist):
-            return
-        active = approach_controller if mode["active"] == "approach" else contact_controller
-        active.update_command(twist)
+    def rebind_after_gafropy_reopen(new_interface):
+        nonlocal interface, task_space, joint_idx, approach_controller
+        interface = new_interface
+        task_space = interface.get_task_space(args.task_space)
+        if task_space is None:
+            raise RuntimeError(f"task space '{args.task_space}' missing after reopen")
+        joint_idx = np.array(task_space.get_joint_indices())
+        ee = live_ee_motor()
+        approach_controller = _make_approach_controller(interface, task_space, ee)
+        if robot_viz is not None:
+            robot_viz.update(q_with_vention())
+        if eeviz is not None:
+            eeviz.update(ee)
 
-    def on_button(index):
-        if index != args.mode_button:
+    def enter_force_mode_contact():
+        nonlocal interface
+        if handoff_busy["busy"]:
+            return
+        handoff_busy["busy"] = True
+        try:
+            print("-> contact handoff: settling speedJ, then force_mode...", flush=True)
+            # Hold current pose (no vf.project snap) while still under gafropy.
+            approach_controller.get_objective().set_target(live_ee_motor())
+            time.sleep(0.35)
+            shutdown_gafropy_for_handoff(interface, settle_s=0.35)
+            force_session.enter(settle_s=0.2)
+            mode["active"] = "contact"
+            print(
+                f"-> contact mode (force_mode): Fd={args.force_sign * args.target_force:+.1f}N "
+                "tool Z; SpaceMouse XY slide only",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"\033[91mforce_mode handoff failed: {exc}\033[0m", flush=True)
+            force_session.exit(settle_s=0.2)
+            interface = reopen_gafropy(MODEL, args.hardware_config, robot_ip=robot_ip)
+            rebind_after_gafropy_reopen(interface)
+            interface.control(approach_controller, blocking=False)
+            mode["active"] = "approach"
+            print("-> approach mode restored after failed handoff", flush=True)
+        finally:
+            handoff_busy["busy"] = False
+
+    def enter_approach_from_force_mode():
+        nonlocal interface
+        if handoff_busy["busy"]:
+            return
+        handoff_busy["busy"] = True
+        try:
+            print("-> approach handoff: ending force_mode, restoring speedJ...", flush=True)
+            force_session.exit(settle_s=0.35)
+            interface = reopen_gafropy(MODEL, args.hardware_config, robot_ip=robot_ip)
+            rebind_after_gafropy_reopen(interface)
+            # Live pose target — no snap to a stale pre-contact objective.
+            approach_controller.set_input_active(False)
+            approach_controller.hold_live_pose()
+            interface.control(approach_controller, blocking=False)
+            mode["active"] = "approach"
+            print("-> approach mode: holding live pose", flush=True)
+        except Exception as exc:
+            print(f"\033[91mapproach handoff failed: {exc}\033[0m", flush=True)
+        finally:
+            handoff_busy["busy"] = False
+
+    def on_twist(twist):
+        if handoff_busy["busy"]:
+            return
+        # Hands-off / rest bias: freeze — zero speedJ (approach) and clear speedL (contact).
+        if is_idle_twist(twist):
+            if mode["active"] == "approach":
+                approach_controller.set_input_active(False)
+                approach_controller.hold_live_pose()
+            if args.contact_backend == "force_mode" and force_session.active:
+                force_session.clear_twist()
             return
         if mode["active"] == "approach":
+            approach_controller.update_command(twist)
+            return
+        if args.contact_backend == "force_mode":
+            if force_session.active:
+                # Spacemouse twist is body/tool frame; force session zeros tool Z.
+                force_session.set_twist(twist.get_linear(), twist.get_angular())
+            return
+        if contact_controller is not None:
+            contact_controller.update_command(twist)
+
+    def on_button(index):
+        # Handoff is rising-edge button only (SpaceMouseTeleop); twists never toggle mode.
+        if index != args.mode_button or handoff_busy["busy"]:
+            return
+        if args.contact_backend == "force_mode":
+            if mode["active"] == "approach":
+                enter_force_mode_contact()
+            else:
+                enter_approach_from_force_mode()
+            return
+
+        # --- speedj backend (legacy / hidden) ---
+        assert contact_controller is not None
+        if mode["active"] == "approach":
+            if measured_fz_fn is None:
+                print(
+                    "\033[91mrefusing speedj contact: no ActualTCPForce reader\033[0m",
+                    flush=True,
+                )
+                return
             mode["active"] = "contact"
             contact_controller.get_objective().set_target(
-                vf.project(live_ee_motor()).transform_line(ga.Line.Z()))
+                live_ee_motor().transform_line(ga.Line.Z()))
             interface.control(contact_controller, blocking=False)
             contact_controller.start()
-            print(f"-> contact mode: pressing at {args.target_force:.1f}N "
-                  "along the field's local approach direction")
+            print(f"-> contact mode (speedj): {args.target_force:.1f}N tool Z", flush=True)
         else:
             contact_controller.stop()
             mode["active"] = "approach"
             approach_controller.get_objective().set_target(live_ee_motor())
             interface.control(approach_controller, blocking=False)
-            print("-> approach mode: holding live pose, field orientation on spacemouse input")
+            print("-> approach mode: holding live pose", flush=True)
 
     def start_control_and_device():
         nonlocal device
+        # Start frozen: no speedJ until a non-idle SpaceMouse reading arrives.
+        approach_controller.set_input_active(False)
+        approach_controller.hold_live_pose()
         interface.control(approach_controller, blocking=False)
         device = KeyboardTeleop(
-            step=0.0025) if args.device == "keyboard" else SpaceMouseTeleop()
+            step=0.0025) if args.device == "keyboard" else SpaceMouseTeleop(
+                # Slightly finer than default 0.01: with twist_linear_scale=1, full
+                # deflection ~= 0.5 m/s command rate (was ~1 m/s with 2x*0.01@50Hz).
+                linear_scale=0.005, angular_scale=0.05)
         device.start(on_twist, on_button)
+        print(
+            "free-space scale: SpaceMouse lin=0.005 ang=0.05, "
+            "admittance K=2000 D=20 dt=0.001 max|qdot|=0.8, twist_linear_scale=1 "
+            "(no VF project in approach)",
+            flush=True,
+        )
 
     try:
+        backend_note = (
+            "force_mode contact" if args.contact_backend == "force_mode"
+            else "speedj contact (legacy)")
         if args.no_viz:
             print(f"Teleoperating '{args.task_space}' on real geodude (headless) "
-                  f"-- holding live pose until spacemouse input; "
-                  f"button {args.mode_button} toggles contact. Ctrl+C to quit.")
+                  f"-- {backend_note}; button {args.mode_button} toggles. Ctrl+C to quit.")
             start_control_and_device()
             while True:
                 time.sleep(0.1)
@@ -226,9 +409,9 @@ def main():
             print(f"viser running at http://localhost:{viz.port} -- "
                   "holding pose; open the page before moving the spacemouse.")
 
-            robot = viz.add_robot(interface.get_system(),
-                                  name="geodude", joint_sliders=False)
-            robot.update(q_with_vention())
+            robot_viz = viz.add_robot(interface.get_system(),
+                                      name="geodude", joint_sliders=False)
+            robot_viz.update(q_with_vention())
 
             viz.scene.add_point_cloud(
                 "/object", points=object_surface.vertices, colors=(200, 200, 200), point_size=0.002
@@ -237,8 +420,11 @@ def main():
             eeviz = viz.add_motor(viz_ee_motor)
 
             def update():
+                if handoff_busy["busy"] or mode["active"] == "contact":
+                    # During force_mode, gafropy state is stale / shut down.
+                    return
                 q = q_with_vention()
-                robot.update(q)
+                robot_viz.update(q)
                 eeviz.update(task_space.compute_ee_motor(q[joint_idx]))
 
             viz.add_ticker(lambda: update())
@@ -246,16 +432,23 @@ def main():
             start_control_and_device()
 
             viz.show(message=f"Teleoperating '{args.task_space}' on real geodude "
-                     f"-- holding live pose until spacemouse input; "
-                     f"button {args.mode_button} toggles contact. "
+                     f"-- {backend_note}; button {args.mode_button} toggles. "
                      f"viser at http://localhost:{viz.port} -- ctrl-c to quit.")
     except KeyboardInterrupt:
         pass
     finally:
         if device is not None:
             device.stop()
-        contact_controller.stop()
-        interface.shutdown()
+        if force_session.active:
+            force_session.exit(settle_s=0.2)
+        if contact_controller is not None:
+            contact_controller.stop()
+        if close_tcp_force is not None:
+            close_tcp_force()
+        try:
+            interface.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

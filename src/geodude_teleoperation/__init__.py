@@ -4,6 +4,7 @@ from geodude_teleoperation.controller import (
     LineAdmittanceTeleoperationController,
     TeleoperationController,
 )
+from geodude_teleoperation.force_mode_contact import ForceModeContactSession
 from geodude_teleoperation.keyboard import KeyboardTeleop
 from geodude_teleoperation.mesh_fixture import (
     compute_resting_orientation,
@@ -25,6 +26,7 @@ __all__ = [
     "AdmittanceTeleoperationController",
     "LineAdmittanceTeleoperationController",
     "ContactTeleoperationController",
+    "ForceModeContactSession",
     "SpaceMouseTeleop",
     "is_idle_twist",
     "KeyboardTeleop",
