@@ -17,12 +17,51 @@ from scipy.spatial.transform import Rotation
 
 
 def compute_resting_orientation(points):
+    """Rotation that sits the object on z=0 with its broader end down.
+
+    PCA's thin-axis eigenvector has an arbitrary sign, so aligning it to +Z
+    inverts a hemisphere that was already a dome (~50% of the time). After
+    that align, put the wider cap on the table so a dome stays a dome (flat
+    rim down, pole up) instead of a bowl hanging through the table.
+    """
     centered = points - points.mean(axis=0)
     eigvals, eigvecs = np.linalg.eigh(np.cov(centered.T))
     thin_axis = eigvecs[:, 0]  # smallest eigenvalue = least variance
 
     rotation, _ = Rotation.align_vectors([[0.0, 0.0, 1.0]], [thin_axis])
-    return rotation.as_matrix()
+    R = np.asarray(rotation.as_matrix(), dtype=np.float64)
+    rotated = centered @ R.T
+    z = rotated[:, 2]
+    zmin = float(z.min())
+    zmax = float(z.max())
+    span = zmax - zmin
+    band = 0.1 * span if span > 1e-12 else 1.0
+    xy_center = rotated.mean(axis=0)[:2]
+    high = rotated[z > zmax - band]
+    low = rotated[z < zmin + band]
+    radius_high = float(np.linalg.norm(high[:, :2] - xy_center, axis=1).mean())
+    radius_low = float(np.linalg.norm(low[:, :2] - xy_center, axis=1).mean())
+    # Dome: narrow cap up, wide rim on the table. Bowl is the opposite.
+    if radius_high > radius_low:
+        R = np.diag([1.0, -1.0, -1.0]) @ R
+    return R
+
+
+def table_placement_translation(points, rotation, table_xyz, xy_offset=(0.15, 0.0)):
+    """Translation matching load_object_mesh (vertices @ R.T + t, no centering).
+
+    Lowest rotated point lands on table_xyz[2]; xy centroid lands on
+    table_xyz[:2] + xy_offset. Do not mix a centroid-subtracted min-z with the
+    uncentered mesh transform: that hung a PCA-flipped unit hemisphere ~1 m
+    below the table.
+    """
+    rotated = np.asarray(points, dtype=np.float64) @ np.asarray(rotation, dtype=np.float64).T
+    table_xyz = np.asarray(table_xyz, dtype=np.float64)
+    offset = np.asarray(xy_offset, dtype=np.float64)
+    translation = np.empty(3, dtype=np.float64)
+    translation[:2] = table_xyz[:2] + offset - rotated.mean(axis=0)[:2]
+    translation[2] = table_xyz[2] - rotated[:, 2].min()
+    return translation
 
 
 def read_ascii_pcd(path):

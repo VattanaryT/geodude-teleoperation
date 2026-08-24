@@ -11,6 +11,30 @@ import gafropy
 import numpy as np
 
 
+def is_idle_twist(twist, linear_scale=0.01, angular_scale=0.1, deadzone=0.05,
+                  rest_margin=4.0) -> bool:
+    """True when the reading is hands-off, including typical rest bias.
+
+    SpaceMouseTeleop already zeros raw axes below `deadzone`, then scales. Rest
+    bias just above that deadzone still becomes a nonzero Twist (default
+    angular_scale 0.1 turns 0.1 raw yaw into 0.01). Callers that replace
+    orientation on every update_command (approach-mode virtual fixtures) must
+    treat that as idle, or the wrist servos with no operator input.
+
+    `rest_margin * deadzone * scale` is the per-axis idle cap, using the same
+    defaults as SpaceMouseTeleop. Linear and angular are separate because the
+    two scales differ by 10x: a shared atol large enough to swallow rest yaw
+    would also swallow a full-deflection translation.
+    """
+    values = np.asarray(twist.to_array(), dtype=float)
+    angular = values[:3]
+    linear = values[3:]
+    return bool(
+        np.all(np.abs(linear) <= rest_margin * deadzone * linear_scale)
+        and np.all(np.abs(angular) <= rest_margin * deadzone * angular_scale)
+    )
+
+
 class SpaceMouseTeleop:
     def __init__(self, linear_scale=0.01, angular_scale=0.1, deadzone=0.05, frequency=50.0):
         self._linear_scale = linear_scale

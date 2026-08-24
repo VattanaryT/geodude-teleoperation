@@ -10,8 +10,9 @@ from geodude_teleoperation.mesh_fixture import (
     load_object_mesh,
     load_points,
     read_ascii_pcd,
+    table_placement_translation,
 )
-from geodude_teleoperation.spacemouse import SpaceMouseTeleop
+from geodude_teleoperation.spacemouse import SpaceMouseTeleop, is_idle_twist
 from geodude_teleoperation.vention import (
     DEFAULT_VENTION_HEIGHT,
     apply_vention_heights,
@@ -25,9 +26,11 @@ __all__ = [
     "LineAdmittanceTeleoperationController",
     "ContactTeleoperationController",
     "SpaceMouseTeleop",
+    "is_idle_twist",
     "KeyboardTeleop",
     "OrientationField",
     "compute_resting_orientation",
+    "table_placement_translation",
     "load_object_mesh",
     "load_points",
     "read_ascii_pcd",

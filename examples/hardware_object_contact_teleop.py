@@ -17,26 +17,18 @@ from geodude_teleoperation import (
     SpaceMouseTeleop,
     apply_vention_heights,
     compute_resting_orientation,
+    is_idle_twist,
     load_object_mesh,
     load_points,
+    table_placement_translation,
 )
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-DEFAULT_OBJECT = str(ROOT / "assets" / "objects" / "hemisphere.stl")
+DEFAULT_OBJECT = str(ROOT / "assets" / "laser_profilometer" / "merged.ply")
 MODEL = str(ROOT / "assets" / "robots" / "geodude" / "geodude.yaml")
 DEFAULT_HARDWARE_CONFIG = str(ROOT / "assets" / "robots" / "geodude" / "geodude_hardware.yaml")
 
-DEFAULT_VENTION_HEIGHT = 0.25
-
-
-def is_idle_twist(twist, atol=1e-9) -> bool:
-    """True when the device is sending a zero command.
-
-    SpaceMouseTeleop calls on_twist at 50 Hz including zeros. Approach mode's
-    virtual fixture replaces orientation on every update, so forwarding idle
-    packets at startup would immediately servo the arm onto the field.
-    """
-    return bool(np.allclose(np.asarray(twist.to_array()), 0.0, atol=atol))
+DEFAULT_VENTION_HEIGHT = 0.60
 
 
 def _dashboard_bring_up(ip: str) -> None:
@@ -141,19 +133,11 @@ def main():
     rail_height = left_vention if args.task_space == "left_ee" else right_vention
     vention_offset = float(viz_position[0]) - rail_height
     table_reference_xyz = home_xyz - np.array([0.0, 0.0, vention_offset])
-    plane_z = table_reference_xyz[2]
 
     object_points_raw = load_points(args.object)
-    object_centroid_raw = object_points_raw.mean(axis=0)
-
     rotation = compute_resting_orientation(object_points_raw)
-    rotated_centered = (object_points_raw - object_centroid_raw) @ rotation.T
-
-    translation = np.zeros(3)
-    translation[:2] = (table_reference_xyz[:2] + np.array([0.15, 0.0])
-                       - object_centroid_raw[:2])
-    translation[2] = plane_z - \
-        (rotated_centered[:, 2].min() + object_centroid_raw[2])
+    translation = table_placement_translation(
+        object_points_raw, rotation, table_reference_xyz)
 
     object_surface = load_object_mesh(
         args.object, rotation=rotation, translation=translation,

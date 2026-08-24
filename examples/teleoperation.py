@@ -17,6 +17,7 @@ from geodude_teleoperation import (
     compute_resting_orientation,
     load_object_mesh,
     load_points,
+    table_placement_translation,
 )
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -91,19 +92,10 @@ def main():
     else:
         table_reference_xyz = np.array([home_xyz[0], home_xyz[1], 0.0])
 
-    plane_z = table_reference_xyz[2]
-
     object_points_raw = load_points(args.object)
-    object_centroid_raw = object_points_raw.mean(axis=0)
-
-    rotation = (compute_resting_orientation(object_points_raw))
-    rotated_centered = (object_points_raw - object_centroid_raw) @ rotation.T
-
-    translation = np.zeros(3)
-    translation[:2] = (table_reference_xyz[:2] + np.array([0.15, 0.0])
-                       - object_centroid_raw[:2])
-    translation[2] = plane_z - \
-        (rotated_centered[:, 2].min() + object_centroid_raw[2])
+    rotation = compute_resting_orientation(object_points_raw)
+    translation = table_placement_translation(
+        object_points_raw, rotation, table_reference_xyz)
 
     object_surface = load_object_mesh(
         args.object, rotation=rotation, translation=translation,
