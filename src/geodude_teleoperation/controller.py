@@ -153,9 +153,25 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         self._stiffness = np.array(self._stiffness, dtype=float, copy=True)
         self._kz_pose = float(self._stiffness[5, 5])
         self._z_compliant = False
+        self._slide_twist = np.zeros(6)
+        self._max_slide_mps = 0.015
+        self._max_slide_radps = 0.12
 
     def set_input_active(self, active: bool) -> None:
         self._input_active = bool(active)
+        if not self._input_active:
+            self._slide_twist = np.zeros(6)
+
+    def contact_slide_twist(self):
+        return np.array(self._slide_twist, copy=True)
+
+    def merged_contact_twist(self, vz):
+        """DualLoop merge: slide never presses. Retract while sliding is still allowed."""
+        twist = np.array(self._slide_twist, dtype=float)
+        vz = float(vz)
+        sliding = np.linalg.norm(twist[:5]) > 1e-4
+        twist[5] = min(0.0, vz) if sliding else vz
+        return twist
 
     def hold_live_pose(self) -> None:
         """Snap objective to the current EE so the next teleop step has no pose jump."""
@@ -175,13 +191,22 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         """Zero pose-spring Kz so a Z overlay is not fought. Stick Z is ignored."""
         self._z_compliant = bool(compliant)
         self._stiffness[5, 5] = 0.0 if self._z_compliant else self._kz_pose
+        if not self._z_compliant:
+            self._slide_twist = np.zeros(6)
 
     def compute_control_command(self, robot_state, objective_state, task_space_state):
         jacobian = np.asarray(task_space_state.get_jacobian())
         n_joints = int(jacobian.shape[1])
         vz = float(self._tool_z_velocity)
 
-        if not self._input_active:
+        if self._z_compliant:
+            # DualLoop merge: stick ⊥n + ω as a capped Cartesian velocity, force owns Z.
+            # Do not run the K=2000 pose spring while loaded (that is the slide C153).
+            twist = self.merged_contact_twist(vz)
+            j_inverse = np.linalg.inv(
+                jacobian.T @ jacobian + 1e-6 * np.eye(jacobian.shape[1]))
+            qdot = j_inverse @ jacobian.T @ twist
+        elif not self._input_active:
             qdot = np.zeros(n_joints)
         else:
             error = np.asarray(objective_state.get_error())
@@ -211,12 +236,10 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
             qdot = self._dt * \
                 j_inverse @ jacobian.T @ (task_acceleration - bias)
 
-        if abs(vz) > 1e-12:
-            twist = np.zeros(6)
-            twist[5] = vz
-            j_inverse = np.linalg.inv(
-                jacobian.T @ jacobian + 1e-6 * np.eye(jacobian.shape[1]))
-            qdot = qdot + j_inverse @ jacobian.T @ twist
+            if abs(vz) > 1e-12:
+                twist = np.zeros(6)
+                twist[5] = vz
+                qdot = qdot + j_inverse @ jacobian.T @ twist
 
         speed = np.linalg.norm(qdot)
         if speed > self._max_joint_velocity:
@@ -231,15 +254,26 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         self._interface = interface
 
     def update_command(self, twist):
+        angular = np.asarray(twist.get_angular(), dtype=float).reshape(3)
+        linear = self._twist_linear_scale * np.asarray(twist.get_linear(), dtype=float).reshape(3)
+        if self._z_compliant:
+            linear[2] = 0.0
+            lin_xy = np.linalg.norm(linear[:2])
+            if lin_xy > self._max_slide_mps:
+                linear[:2] *= self._max_slide_mps / lin_xy
+            ang = np.linalg.norm(angular)
+            if ang > self._max_slide_radps:
+                angular = angular * (self._max_slide_radps / ang)
+            self._slide_twist = np.array(
+                [angular[0], angular[1], angular[2], linear[0], linear[1], 0.0])
+            self._input_active = True
+            return
+
         task_space = self.get_task_space()
         joint_indices = np.asarray(task_space.get_joint_indices())
         position = self._interface.get_state().get_position()[joint_indices]
         ee = task_space.compute_ee_motor(position)
 
-        angular = twist.get_angular()
-        linear = self._twist_linear_scale * np.asarray(twist.get_linear(), dtype=float)
-        if self._z_compliant:
-            linear[2] = 0.0
         increment = gafropy.Motor.exp(
             angular[0], angular[1], angular[2], linear[0], linear[1], linear[2])
         reference = ee.multiply(increment)
@@ -492,7 +526,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
             else:
                 return self._v_approach
 
-        if fs < self._contact_release_n:
+        if abs(fs) < self._contact_release_n:
             if self._unload_since is None:
                 self._unload_since = now
             elif self._lost_s > 0.0 and (now - self._unload_since) >= self._lost_s:
@@ -509,9 +543,12 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
             return self._v_approach
 
         fe = self._target_force - fs
-        self._integral = np.clip(
-            self._integral + fe * self._update_period,
-            -self._integral_limit, self._integral_limit)
+        if fs > 0.0:
+            self._integral = np.clip(
+                self._integral + fe * self._update_period,
+                -self._integral_limit, self._integral_limit)
+        else:
+            self._integral = 0.0
         deriv = 0.0 if self._prev_error is None else \
             (fe - self._prev_error) / self._update_period
         self._prev_error = fe
@@ -523,15 +560,18 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
             and self._contact_since is not None
             and (now - self._contact_since) < self._sit_s
         )
-        if sitting:
-            # DualLoop path waits ~2 s at load. speedJ cannot yield, so do not press.
+        if sitting and fs >= 0.5 * self._target_force:
+            # DualLoop path waits ~2 s at real load. speedJ cannot yield, so do not press.
             return min(0.0, v_pid)
         if fs >= self._target_force:
             # Over target: hold or retract. Never keep inching into a rigid stop (C153).
             return min(0.0, v_pid)
-        if fs <= 0.0:
-            # Not in compression (UR Fz same sign as press). Do not ram.
-            return 0.0
+        if fs < 0.0:
+            # FT sign flip / not compressed: DualLoop still presses, but slowly on UR.
+            return v_pid
+        if fs < 0.5 * self._target_force:
+            # Light contact: keep the approach feed so we actually reach Fd.
+            return self._v_approach
         return v_pid
 
     def _slew_vz(self, v_z):

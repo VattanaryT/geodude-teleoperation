@@ -258,8 +258,8 @@ def main():
             )
         contact_controller = ContactTeleoperationController(
             vf, contact_config, target_force=args.target_force,
-            kp_force=0.001, ki_force=0.0,
-            v_approach=0.005, max_v_hold=0.001, z_damping=z_damping,
+            kp_force=0.001, ki_force=0.0003,
+            v_approach=0.005, max_v_hold=0.002, z_damping=z_damping,
             v_slew_mps2=0.05, lost_s=1.0, sit_s=2.0,
             force_sign=args.force_sign,
             measured_fz_fn=measured_fz_fn)
@@ -407,8 +407,8 @@ def main():
                 interface=interface,
             )
             print(
-                f"-> contact mode (speedj): pose spring + Z overlay (no line swap); "
-                f"APPROACH 5mm/s, sit 2s, then PID to {args.target_force:.1f}N",
+                f"-> contact mode (speedj): XY slide ≤15mm/s, no press while sliding; "
+                f"APPROACH 5mm/s, sit 2s, PID to {args.target_force:.1f}N",
                 flush=True,
             )
         else:
