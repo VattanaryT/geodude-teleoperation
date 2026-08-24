@@ -52,7 +52,7 @@ DEFAULT_OBJECT = str(ROOT / "assets" / "laser_profilometer" / "merged.ply")
 MODEL = str(ROOT / "assets" / "robots" / "geodude" / "geodude.yaml")
 DEFAULT_HARDWARE_CONFIG = str(ROOT / "assets" / "robots" / "geodude" / "geodude_hardware.yaml")
 
-DEFAULT_VENTION_HEIGHT = 0.60
+DEFAULT_VENTION_HEIGHT = 0.51
 
 
 def _dashboard_bring_up(ip: str) -> None:
@@ -163,8 +163,7 @@ def build_arg_parser():
     parser.add_argument(
         "--vention-height", type=float, default=DEFAULT_VENTION_HEIGHT,
         help="physical vention rail height in meters for both arms (hardware does "
-             "not sense these joints; used for visualization FK). Default matches "
-             "geodude.yaml keyframe 'ready'.")
+             "not sense these joints; used for visualization FK).")
     parser.add_argument(
         "--left-vention-height", type=float, default=None,
         help="override --vention-height for the left rail only")

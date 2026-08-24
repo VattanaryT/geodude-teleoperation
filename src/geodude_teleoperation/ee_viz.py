@@ -17,6 +17,8 @@ FLANGE_FROM_WRIST3_QUAT_WXYZ = np.array(
     [-0.7071067811865475, 0.7071067811865475, 0.0, 0.0], dtype=float)
 # CAD already has the mount face on z=0 (xy ≈ 75 mm, tool along +z ≈ 120 mm).
 # A 90° X or Y rotation puts that face vertical (flat facing sideways).
+# Yaw about the flange axis after seating (positive = CCW looking along +z).
+CHAMFER_MESH_RZ_DEG = 40
 
 
 def is_gripper_visual_link(name: str) -> bool:
@@ -56,9 +58,12 @@ def seat_mesh_on_xy_origin(vertices: np.ndarray) -> np.ndarray:
 
 
 def prepare_chamfer_vertices_m(vertices_mm: np.ndarray) -> np.ndarray:
-    """Scale mm→m, then seat the CAD z=0 mount face on the flange origin."""
-    v = np.asarray(vertices_mm, dtype=float) * CHAMFER_MESH_SCALE
-    return seat_mesh_on_xy_origin(v)
+    """Scale mm→m, seat the CAD z=0 mount on the flange, then yaw about +z."""
+    v = seat_mesh_on_xy_origin(
+        np.asarray(vertices_mm, dtype=float) * CHAMFER_MESH_SCALE)
+    if CHAMFER_MESH_RZ_DEG:
+        v = Rotation.from_euler("z", CHAMFER_MESH_RZ_DEG, degrees=True).apply(v)
+    return v
 
 
 def chamfer_world_from_wrist3(T_wrist3: np.ndarray) -> np.ndarray:
