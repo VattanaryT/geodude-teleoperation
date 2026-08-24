@@ -39,6 +39,11 @@ from geodude_teleoperation.force_mode_contact import (
     reopen_gafropy,
     shutdown_gafropy_for_handoff,
 )
+from geodude_teleoperation.laser_frames import (
+    is_laser_left_base_object,
+    place_laser_object,
+)
+from geodude_teleoperation.mesh_fixture import reconstruct_mesh_from_points
 from geodude_teleoperation.tcp_force import connect_tcp_force_reader, fz_from_tcp_force
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -218,13 +223,27 @@ def main():
     table_reference_xyz = home_xyz - np.array([0.0, 0.0, vention_offset])
 
     object_points_raw = load_points(args.object)
-    rotation = compute_resting_orientation(object_points_raw)
-    translation = table_placement_translation(
-        object_points_raw, rotation, table_reference_xyz)
-
-    object_surface = load_object_mesh(
-        args.object, rotation=rotation, translation=translation,
-        normal_orientation=args.normal_orientation)
+    if is_laser_left_base_object(args.object):
+        # Calibrated Keyence merge: left_base → vention → tag_0. Do not PCA-rest
+        # or rewrite into right_base (that rotates the layup ~90°).
+        placement = place_laser_object(args.object)
+        object_surface = reconstruct_mesh_from_points(placement.points_vention)
+        if args.normal_orientation < 0:
+            object_surface.invert()
+        print(
+            "laser overlay: merged.ply left_base → vention "
+            f"(+{placement.T_left_base_vention[:3, 3].round(3).tolist()} mount) "
+            f"→ tag_0; T_tag0_rtde.t={placement.T_tag0_rtde[:3, 3].round(3).tolist()} "
+            "(right_base). Cloud is not copied into the right arm.",
+            flush=True,
+        )
+    else:
+        rotation = compute_resting_orientation(object_points_raw)
+        translation = table_placement_translation(
+            object_points_raw, rotation, table_reference_xyz)
+        object_surface = load_object_mesh(
+            args.object, rotation=rotation, translation=translation,
+            normal_orientation=args.normal_orientation)
 
     key_direction = np.asarray(home_ee_motor.get_rotor().to_rotation_matrix())[:, 0]
     vf = OrientationField(object_surface, key_direction=key_direction)
