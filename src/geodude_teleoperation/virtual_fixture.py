@@ -1,6 +1,6 @@
 import gafropy
 import numpy as np
-from scipy.spatial import cKDTree
+from scipy.spatial import ConvexHull, cKDTree
 
 
 def _orient_approach_into_surface(local_basis):
@@ -120,6 +120,58 @@ DEFAULT_MAX_BOUNDARY_SAMPLES = 2048
 # Heat-kernel length in mean-edge units. mean_edge^2 is too local on laser
 # reconstructions (mm edges): orientation then tracks scan noise as the probe moves.
 DEFAULT_T_SPATIAL_EDGE_FACTOR = 5.0
+# Past the object, blend toward a table-flat frame (vention +Z) so the EE
+# does not keep the last into-surface tilt and drive through the table.
+# ``NEAR`` is negative: the outer hull already overlaps the table field.
+FAR_FIELD_OVERLAP = 0.06
+FAR_FIELD_NEAR = -FAR_FIELD_OVERLAP
+FAR_FIELD_FAR = 0.45
+
+
+def far_field_weight(distance, near=FAR_FIELD_NEAR, far=FAR_FIELD_FAR):
+    """0 in the object core, 1 once ``distance`` clears ``far``.
+
+    Ease-out cubic (not smoothstep): the rim has immediate slope so leaving the
+    part does not keep a dead zone of object tilt. ``near`` may be negative to
+    overlap the table field into the hull's outer band.
+    """
+    d = float(distance)
+    near = float(near)
+    far = float(far)
+    if far <= near:
+        return 0.0 if d <= near else 1.0
+    if d <= near:
+        return 0.0
+    if d >= far:
+        return 1.0
+    t = (d - near) / (far - near)
+    return 1.0 - (1.0 - t) ** 3
+
+
+def planar_hull_signed_distance(points_xy, query_xy):
+    """Negative inside the 2D convex hull, positive outside. Unsigned fallback."""
+    pts = np.asarray(points_xy, dtype=float).reshape(-1, 2)
+    q = np.asarray(query_xy, dtype=float).reshape(2)
+    if len(pts) < 3:
+        distance, _ = cKDTree(pts).query(q)
+        return float(distance)
+    try:
+        equations = ConvexHull(pts).equations
+    except Exception:
+        distance, _ = cKDTree(pts).query(q)
+        return float(distance)
+    vals = equations[:, :2] @ q + equations[:, 2]
+    norms = np.linalg.norm(equations[:, :2], axis=1)
+    return float(np.max(vals / np.maximum(norms, 1e-30)))
+
+
+def table_flat_basis(up=None, tangent=None):
+    """Outward table frame: +Z along ``up`` (default world/vention +Z)."""
+    n = (np.array([0.0, 0.0, 1.0], dtype=float) if up is None
+         else np.asarray(up, dtype=float).reshape(3))
+    t = (np.array([1.0, 0.0, 0.0], dtype=float) if tangent is None
+         else np.asarray(tangent, dtype=float).reshape(3))
+    return _boundary_frame(t, n)
 
 
 def boundary_sample_indices(n_vertices, num_boundary_samples=None,
@@ -157,6 +209,8 @@ class OrientationField:
     Query cost is capped: reconstructed clouds default to
     `DEFAULT_MAX_BOUNDARY_SAMPLES` Frechet-mean samples. Spatial kernel default is
     `(5 * mean_edge)^2` so mm-scale laser edges do not make the field twitch along a path.
+    Queries use a planar hull signed distance: the outer ~6 cm of the object
+    already overlaps the table-flat field, then eases out to full table by 45 cm.
 
     Deterministic -- unlike the previous diffused_fields Walk-on-Spheres implementation,
     rerunning gives bit-for-bit identical results, and there is no Monte Carlo
@@ -195,27 +249,56 @@ class OrientationField:
             else (DEFAULT_T_SPATIAL_EDGE_FACTOR * mean_edge) ** 2)
         self._max_iterations = max_iterations
         self._kdtree = cKDTree(np.asarray(positions))
+        xy = vertices[:, :2]
+        self._xy_tree = cKDTree(xy)
+        try:
+            self._hull_eq = ConvexHull(xy).equations if len(xy) >= 3 else None
+        except Exception:
+            self._hull_eq = None
         self._smoothing = smoothing
         self._last_basis = np.eye(3)
         self._has_last = False
-        self._last_approach_basis = None
-        self._has_last_approach = False
+        self._table_flat = table_flat_basis()
+        self._far_near = FAR_FIELD_NEAR
+        self._far_far = FAR_FIELD_FAR
 
     def get_distance(self, position):
         distance, _ = self._kdtree.query(np.asarray(position))
         return float(distance)
 
+    def get_planar_signed_distance(self, position):
+        p = np.asarray(position, dtype=float).reshape(3)[:2]
+        if self._hull_eq is None:
+            distance, _ = self._xy_tree.query(p)
+            return float(distance)
+        vals = self._hull_eq[:, :2] @ p + self._hull_eq[:, 2]
+        norms = np.linalg.norm(self._hull_eq[:, :2], axis=1)
+        return float(np.max(vals / np.maximum(norms, 1e-30)))
+
+    def _object_local_basis(self, position):
+        try:
+            rotor = self._field.diffuse(
+                position, self._t_spatial, max_iterations=self._max_iterations)
+            return _fiber_rotor_to_rotation_matrix(rotor)
+        except RuntimeError:
+            return None
+
+    def _blended_local_basis(self, position, *, fallback):
+        local = self._object_local_basis(position)
+        if local is None:
+            local = np.array(fallback, copy=True)
+        w = far_field_weight(
+            self.get_planar_signed_distance(position), self._far_near, self._far_far)
+        if w >= 1.0:
+            return np.array(self._table_flat, copy=True)
+        if w > 0.0:
+            local = _nlerp_matrices(local, self._table_flat, w)
+        return local
+
     def project(self, proposed_reference):
         translator, position = _motor_position(proposed_reference)
-
-        try:
-            rotor = self._field.diffuse(position, self._t_spatial, max_iterations=self._max_iterations)
-            local_basis = _fiber_rotor_to_rotation_matrix(rotor)
-        except RuntimeError:
-            # Every boundary sample's spatial weight underflowed to zero -- position too far
-            # from the object at this t_spatial. Fall back to the last known-good orientation
-            # rather than raising through this control-critical call path.
-            local_basis = self._last_basis if self._has_last else np.eye(3)
+        fallback = self._last_basis if self._has_last else self._table_flat
+        local_basis = self._blended_local_basis(position, fallback=fallback)
 
         if self._has_last and self._smoothing > 0:
             local_basis = _nlerp_matrices(
@@ -230,22 +313,13 @@ class OrientationField:
     def approach_basis_at(self, position):
         """Approach frame at ``position``. Does not update project() smoothing state.
 
-        Spatial-weight underflow keeps the last successful approach frame
-        (flipped identity if none yet) instead of snapping to world -Z.
+        Near the object this is into-surface field Z. Far away it blends to a
+        table-flat approach (EE +Z = world −Z) so travel across the workstation
+        stays level instead of keeping the last stringer tilt through the table.
         """
         position = np.asarray(position, dtype=float).reshape(3)
-        try:
-            rotor = self._field.diffuse(
-                position, self._t_spatial, max_iterations=self._max_iterations)
-            local_basis = _fiber_rotor_to_rotation_matrix(rotor)
-        except RuntimeError:
-            if self._has_last_approach:
-                return np.array(self._last_approach_basis, copy=True)
-            return _orient_approach_into_surface(np.eye(3))
-        basis = _orient_approach_into_surface(local_basis)
-        self._last_approach_basis = basis
-        self._has_last_approach = True
-        return np.array(basis, copy=True)
+        local_basis = self._blended_local_basis(position, fallback=self._table_flat)
+        return _orient_approach_into_surface(local_basis)
 
     def display_basis_at(self, position):
         """Object +Z frame whose +Z matches /field_z arrows (out of the working face)."""
@@ -275,6 +349,30 @@ def field_z_segments(origins, z_dirs, length):
     n = np.linalg.norm(z, axis=1, keepdims=True)
     z = z / np.maximum(n, 1e-30)
     return np.stack([origins, origins + float(length) * z], axis=1)
+
+
+def workstation_field_z_arrows(points, *, pad=0.4, spacing=0.08, length=0.03,
+                               exclude_radius=0.02, up=None):
+    """Table-plane +Z arrows around the object (the expanded far field).
+
+    Default exclude is small so light-blue arrows overlap the object's outer
+    edge instead of leaving a gap.
+    """
+    points = np.asarray(points, dtype=float).reshape(-1, 3)
+    z = float(points[:, 2].min())
+    lo = points[:, :2].min(axis=0) - float(pad)
+    hi = points[:, :2].max(axis=0) + float(pad)
+    xs = np.arange(lo[0], hi[0] + 0.5 * float(spacing), float(spacing))
+    ys = np.arange(lo[1], hi[1] + 0.5 * float(spacing), float(spacing))
+    xx, yy = np.meshgrid(xs, ys)
+    grid = np.column_stack([xx.ravel(), yy.ravel(), np.full(xx.size, z)])
+    dist, _ = cKDTree(points).query(grid)
+    origins = grid[dist > float(exclude_radius)]
+    if len(origins) == 0:
+        return np.zeros((0, 2, 3))
+    z_dir = table_flat_basis(up=up)[:, 2]
+    z_dirs = np.broadcast_to(z_dir, origins.shape)
+    return field_z_segments(origins, z_dirs, length)
 
 
 class FieldAlignPreview:

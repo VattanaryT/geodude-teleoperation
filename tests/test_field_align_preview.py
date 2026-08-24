@@ -113,20 +113,16 @@ def _stub_orientation_field():
     vf._max_iterations = 50
     vf._has_last = False
     vf._last_basis = np.eye(3)
-    vf._has_last_approach = False
-    vf._last_approach_basis = None
+    vf._table_flat = np.eye(3)
+    vf._far_near = 0.04
+    vf._far_far = 0.20
+    vf.get_planar_signed_distance = lambda position: -1.0
     return vf
 
 
-class _DiffuseThenUnderflow:
-    def __init__(self):
-        self.n = 0
-
+class _AlwaysSucceeds:
     def diffuse(self, position, t, max_iterations=50):
         del position, t, max_iterations
-        if self.n:
-            raise RuntimeError("underflow")
-        self.n += 1
         return "rotor"
 
 
@@ -136,27 +132,98 @@ class _AlwaysUnderflow:
         raise RuntimeError("underflow")
 
 
-class ApproachBasisHoldTest(unittest.TestCase):
-    def test_underflow_keeps_last_successful_approach(self):
+class FarFieldBlendTest(unittest.TestCase):
+    def test_far_field_weight_is_zero_near_and_one_far(self):
+        from geodude_teleoperation.virtual_fixture import far_field_weight
+
+        self.assertEqual(far_field_weight(0.0, near=0.04, far=0.20), 0.0)
+        self.assertEqual(far_field_weight(0.04, near=0.04, far=0.20), 0.0)
+        self.assertEqual(far_field_weight(0.20, near=0.04, far=0.20), 1.0)
+        self.assertEqual(far_field_weight(1.0, near=0.04, far=0.20), 1.0)
+        mid = far_field_weight(0.12, near=0.04, far=0.20)
+        self.assertGreater(mid, 0.0)
+        self.assertLess(mid, 1.0)
+
+    def test_ease_out_has_weight_at_the_rim(self):
+        from geodude_teleoperation.virtual_fixture import far_field_weight
+
+        # Smoothstep would still be ~0.03 here and keep object tilt through the table.
+        w = far_field_weight(0.05, near=0.0, far=0.45)
+        self.assertGreater(w, 0.2)
+        self.assertLess(w, 0.5)
+
+    def test_overlap_starts_inside_the_hull(self):
+        from geodude_teleoperation.virtual_fixture import (
+            FAR_FIELD_FAR,
+            FAR_FIELD_NEAR,
+            far_field_weight,
+        )
+
+        self.assertLess(FAR_FIELD_NEAR, 0.0)
+        rim = far_field_weight(0.0, near=FAR_FIELD_NEAR, far=FAR_FIELD_FAR)
+        self.assertGreater(rim, 0.0)
+        self.assertLess(rim, 0.5)
+        core = far_field_weight(FAR_FIELD_NEAR, near=FAR_FIELD_NEAR, far=FAR_FIELD_FAR)
+        self.assertEqual(core, 0.0)
+
+    def test_planar_hull_signed_distance_inside_and_outside(self):
+        from geodude_teleoperation.virtual_fixture import planar_hull_signed_distance
+
+        square = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
+        self.assertLess(planar_hull_signed_distance(square, [0.5, 0.5]), 0.0)
+        outside = planar_hull_signed_distance(square, [1.5, 0.5])
+        self.assertGreater(outside, 0.0)
+        self.assertAlmostEqual(outside, 0.5, places=5)
+
+    def test_near_object_keeps_object_approach(self):
         import geodude_teleoperation.virtual_fixture as vf_mod
 
         local = np.array(
             [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
         vf = _stub_orientation_field()
-        vf._field = _DiffuseThenUnderflow()
+        vf._field = _AlwaysSucceeds()
+        vf.get_planar_signed_distance = lambda position: -1.0
         with patch.object(vf_mod, "_fiber_rotor_to_rotation_matrix", return_value=local):
-            first = vf.approach_basis_at([0.0, 0.0, 0.0])
-            held = vf.approach_basis_at([100.0, 0.0, 0.0])
-        np.testing.assert_allclose(first, vf_mod._orient_approach_into_surface(local))
-        np.testing.assert_allclose(held, first)
-        self.assertFalse(vf._has_last)
+            near = vf.approach_basis_at([0.0, 0.0, 0.0])
+        np.testing.assert_allclose(near, vf_mod._orient_approach_into_surface(local))
 
-    def test_underflow_before_any_success_is_identity_approach(self):
+    def test_far_from_object_is_table_flat_approach(self):
+        import geodude_teleoperation.virtual_fixture as vf_mod
+
+        local = np.array(
+            [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        vf = _stub_orientation_field()
+        vf._field = _AlwaysSucceeds()
+        vf.get_planar_signed_distance = lambda position: 1.0
+        with patch.object(vf_mod, "_fiber_rotor_to_rotation_matrix", return_value=local):
+            far = vf.approach_basis_at([1.0, 0.0, 0.0])
+        np.testing.assert_allclose(
+            far, vf_mod._orient_approach_into_surface(np.eye(3)))
+        np.testing.assert_allclose(far[:, 2], [0.0, 0.0, -1.0])
+
+    def test_underflow_far_away_is_table_flat_not_last_tilt(self):
         from geodude_teleoperation.virtual_fixture import _orient_approach_into_surface
 
         vf = _stub_orientation_field()
         vf._field = _AlwaysUnderflow()
-        held = vf.approach_basis_at([100.0, 0.0, 0.0])
-        np.testing.assert_allclose(held, _orient_approach_into_surface(np.eye(3)))
-        self.assertFalse(getattr(vf, "_has_last_approach", False))
+        vf.get_planar_signed_distance = lambda position: 1.0
+        far = vf.approach_basis_at([1.0, 0.0, 0.0])
+        np.testing.assert_allclose(far, _orient_approach_into_surface(np.eye(3)))
+
+
+class WorkstationFieldArrowTest(unittest.TestCase):
+    def test_workstation_arrows_point_up_and_skip_object(self):
+        from geodude_teleoperation.virtual_fixture import workstation_field_z_arrows
+
+        pts = np.array([[0.0, 0.0, 0.0], [0.01, 0.0, 0.0], [0.0, 0.01, 0.0]])
+        segs = workstation_field_z_arrows(
+            pts, pad=0.2, spacing=0.1, length=0.05, exclude_radius=0.05)
+        self.assertGreater(len(segs), 0)
+        np.testing.assert_allclose(segs[:, 0, 2], 0.0)
+        dirs = segs[:, 1] - segs[:, 0]
+        dirs = dirs / np.linalg.norm(dirs, axis=1, keepdims=True)
+        np.testing.assert_allclose(dirs, np.tile([0.0, 0.0, 1.0], (len(segs), 1)))
+        for origin in segs[:, 0]:
+            self.assertGreater(
+                float(np.linalg.norm(pts - origin, axis=1).min()), 0.05 - 1e-9)
 

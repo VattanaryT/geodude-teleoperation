@@ -58,7 +58,7 @@ from geodude_teleoperation.mesh_fixture import (
     reconstruct_mesh_from_points,
 )
 from geodude_teleoperation.tcp_force import connect_tcp_force_reader, fz_from_tcp_force
-from geodude_teleoperation.virtual_fixture import FieldAlignPreview
+from geodude_teleoperation.virtual_fixture import FieldAlignPreview, workstation_field_z_arrows
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_OBJECT = str(ROOT / "assets" / "laser_profilometer" / "merged.ply")
@@ -564,6 +564,22 @@ def main():
                 f"field Z: {len(field_z)} blue arrows OUT of the top (object +normal). "
                 f"Orange EE +Z points into the surface (anti-parallel to arrows). "
                 f"Toggle /field_z and /right_chamfer_ee_field_ghost in the viser scene tree.",
+                flush=True,
+            )
+            ws_z = workstation_field_z_arrows(verts, length=z_len)
+            viz.scene.add_arrows(
+                "/field_z_workstation",
+                points=ws_z,
+                colors=(150, 200, 255),
+                shaft_radius=0.06 * z_len,
+                head_radius=0.16 * z_len,
+                head_length=0.3 * z_len,
+                visible=True,
+            )
+            print(
+                f"workstation field: {len(ws_z)} light-blue +Z arrows on the table plane "
+                f"(outer ~6 cm of the object overlaps this frame, full table by ~45 cm). "
+                f"Toggle /field_z_workstation in the scene tree.",
                 flush=True,
             )
 
