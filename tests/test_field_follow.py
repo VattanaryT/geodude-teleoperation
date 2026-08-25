@@ -237,6 +237,22 @@ class FieldFollowTest(unittest.TestCase):
             follow, ctrl, 0.0, _motor_at([0.0, 0.0, 1.0]),
             live_ee_xyz=np.array([0.0, 0.0, 1.0]), max_ee_jump_m=0.005)
         self.assertFalse(ctrl.active)
+        np.testing.assert_allclose(follow.xyz, [0.0, 0.0, 1.0], atol=1e-9)
+        self.assertTrue(follow.idle)
+
+    def test_invalid_project_rotation_is_reverted(self):
+        class BoomVf:
+            def project(self, motor):
+                T = np.asarray(motor.to_transformation_matrix(), dtype=float)
+                T[:3, :3] = np.eye(3) * 1.0e6
+                return motor_from_matrix(T)
+
+        follow = FieldFollow(BoomVf(), hz=50.0)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        tick = follow.tick(0.0, _motor_at([0.0, 0.0, 1.0]))
+        self.assertTrue(tick.idle)
+        np.testing.assert_allclose(follow.xyz, [0.0, 0.0, 1.0], atol=1e-9)
 
 
 class ProjectHelperProcessTest(unittest.TestCase):

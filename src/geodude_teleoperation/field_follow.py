@@ -49,6 +49,20 @@ def _motor_at(xyz, R):
     return motor_from_matrix(T)
 
 
+def _is_rotation(R, atol=0.08):
+    R = np.asarray(R, dtype=float).reshape(3, 3)
+    if not np.all(np.isfinite(R)):
+        return False
+    if abs(float(np.linalg.det(R)) - 1.0) > atol:
+        return False
+    return float(np.linalg.norm(R @ R.T - np.eye(3))) <= 3.0 * atol
+
+
+def _is_finite_xyz(xyz):
+    p = np.asarray(xyz, dtype=float).reshape(3)
+    return bool(np.all(np.isfinite(p))) and float(np.linalg.norm(p)) < 20.0
+
+
 def _limit_rotation(R_prev, R_new, max_rad):
     """Slerp toward ``R_new`` so one project() cannot flip tool Z (TCP-held flange jump)."""
     max_rad = float(max_rad)
@@ -115,6 +129,7 @@ class FieldFollow:
         self._R = np.eye(3)
         self._last_t = float("-inf")
         self.last_target = None
+        self._undo = None
         self.log = []
 
     @property
@@ -222,6 +237,18 @@ class FieldFollow:
         if dist > self._max_lead_m:
             self._xyz = live + lead * (self._max_lead_m / dist)
 
+    def revert_tick(self):
+        """Undo the last committed follow step (bad project / mapped EE jump)."""
+        if self._undo is None:
+            return
+        xyz, R, last = self._undo
+        self._xyz = None if xyz is None else np.array(xyz, copy=True)
+        self._R = np.array(R, copy=True)
+        self.last_target = last
+        self._undo = None
+        self._pending[:] = 0.0
+        self._idle = True
+
     def tick(self, now, proposed_motor, live_xyz=None):
         now = float(now)
         if self._xyz is None:
@@ -236,12 +263,30 @@ class FieldFollow:
         self._last_t = now
         if float(np.linalg.norm(delta)) < 1e-15:
             return FollowTick(idle=False)
+        self._undo = (
+            None if self._xyz is None else self._xyz.copy(),
+            self._R.copy(),
+            self.last_target,
+        )
         self._xyz = self._xyz + self._R @ delta
         self._clamp_lead(live_xyz)
         target, project_ms = self._project(self._xyz, self._R)
         T = np.asarray(target.to_transformation_matrix(), dtype=float)
-        self._R = _limit_rotation(self._R, T[:3, :3], self._max_dR_rad)
-        self._xyz = T[:3, 3].copy()
+        R_raw = T[:3, :3]
+        xyz_new = T[:3, 3].copy()
+        live_ok = live_xyz is None or (
+            _is_finite_xyz(live_xyz)
+            and float(np.linalg.norm(
+                xyz_new - np.asarray(live_xyz, dtype=float).reshape(3))) < 0.5)
+        if not (_is_finite_xyz(xyz_new) and _is_rotation(R_raw) and live_ok):
+            self.revert_tick()
+            return FollowTick(idle=True)
+        R_new = _limit_rotation(self._undo[1], R_raw, self._max_dR_rad)
+        if not _is_rotation(R_new):
+            self.revert_tick()
+            return FollowTick(idle=True)
+        self._R = R_new
+        self._xyz = xyz_new
         target = _motor_at(self._xyz, self._R)
         self.last_target = target
         quat = _quat_wxyz_from_motor(target)
@@ -275,11 +320,15 @@ def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
         if live_ee_xyz is not None:
             T = np.asarray(target.to_transformation_matrix(), dtype=float)
             jump = float(np.linalg.norm(T[:3, 3] - np.asarray(live_ee_xyz, dtype=float).reshape(3)))
-            if jump > float(max_ee_jump_m):
+            if jump > float(max_ee_jump_m) or not np.isfinite(jump):
+                follow.revert_tick()
+                if live_xyz is not None:
+                    follow.set_idle(live_xyz)
                 controller.set_input_active(False)
                 print(
-                    f"field follow: skip set_target, EE jump {jump:.3f}m "
-                    f"(cap {float(max_ee_jump_m):.3f}m)",
+                    "\033[93mfield follow: skip set_target, EE jump "
+                    f"{jump:.3f}m (cap {float(max_ee_jump_m):.3f}m); "
+                    "follow state reverted. Lift off, then continue.\033[0m",
                     flush=True,
                 )
                 return tick
