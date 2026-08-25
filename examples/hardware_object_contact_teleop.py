@@ -12,9 +12,13 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import select
 import socket
+import sys
+import termios
 import threading
 import time
+import tty
 
 import gafropy as ga
 import numpy as np
@@ -124,6 +128,25 @@ def route_spacemouse_twist(twist, *, sim_probe, on_hardware):
         return True
     on_hardware(twist)
     return False
+
+
+def apply_terminal_key(key, *, align, sim_teleop):
+    """Enter starts hardware align. ``t`` toggles viser-only stick while waiting."""
+    if align is None or align.finished:
+        return None
+    waiting = align.phase in ("idle", "wait") and not align._triggered
+    if key in ("t", "T"):
+        if not waiting:
+            return None
+        sim_teleop["on"] = not sim_teleop["on"]
+        return "sim_on" if sim_teleop["on"] else "sim_off"
+    if key in ("\n", "\r"):
+        if align.phase not in ("idle", "wait"):
+            return None
+        sim_teleop["on"] = False
+        align.trigger()
+        return "align"
+    return None
 
 
 def drive_startup_align(align, controller, now, T_flange, R_field, T_ee):
@@ -368,6 +391,7 @@ def main():
     robot_viz = None
     eeviz = None
     sim_probe = {"p": None}
+    sim_teleop = {"on": False}
     align = (
         StartupAlign(delay_s=args.align_delay, duration_s=args.align_duration)
         if args.startup_align else None)
@@ -382,17 +406,42 @@ def main():
         R_field = vf.approach_basis_at(live_tcp_xyz_from_flange(T_flange))
         return R_field, align_flange_world(T_flange, R_field, 1.0)
 
-    def start_enter_to_align():
-        def _wait():
-            try:
-                input()
-            except EOFError:
-                return
-            if align is not None:
-                align.trigger()
-                print("startup align: Enter received", flush=True)
+    def start_align_keys():
+        if args.device == "keyboard":
+            return
 
-        threading.Thread(target=_wait, daemon=True, name="align-enter").start()
+        def _run():
+            fd = sys.stdin.fileno()
+            old = termios.tcgetattr(fd)
+            try:
+                tty.setcbreak(fd)
+                while align is not None and not align.finished:
+                    ready, _, _ = select.select([sys.stdin], [], [], 0.1)
+                    if not ready:
+                        continue
+                    on_align_key(sys.stdin.read(1))
+            except Exception:
+                pass
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+        threading.Thread(target=_run, daemon=True, name="align-keys").start()
+
+    def on_align_key(key):
+        msg = apply_terminal_key(key, align=align, sim_teleop=sim_teleop)
+        if msg == "sim_on":
+            print(
+                "sim teleop ON: SpaceMouse moves the orange ghost. "
+                "Press t to snap it back to live TCP. Enter aligns hardware.",
+                flush=True,
+            )
+        elif msg == "sim_off":
+            print(
+                "sim teleop OFF: orange ghost is the live-TCP snap preview.",
+                flush=True,
+            )
+        elif msg == "align":
+            print("startup align: Enter received", flush=True)
 
     def run_startup_align(T_flange, T_ee):
         if align is None or mode["active"] != "approach":
@@ -506,6 +555,9 @@ def main():
         if handoff_busy["busy"]:
             return
         if align is not None and not align.finished:
+            if sim_teleop["on"] and sim_probe["p"] is not None:
+                route_spacemouse_twist(
+                    twist, sim_probe=sim_probe["p"], on_hardware=lambda _: None)
             return
         route_spacemouse_twist(
             twist, sim_probe=sim_probe["p"], on_hardware=_hardware_twist)
@@ -565,13 +617,15 @@ def main():
                 # Slightly finer than default 0.01: with twist_linear_scale=1, full
                 # deflection ~= 0.5 m/s command rate (was ~1 m/s with 2x*0.01@50Hz).
                 linear_scale=0.005, angular_scale=0.05)
-        device.start(on_twist, on_button)
+        if args.device == "keyboard":
+            device.start(on_twist, on_button, on_key=on_align_key)
+        else:
+            device.start(on_twist, on_button)
         if sim_probe["p"] is not None:
             print(
-                "viser: orange /right_chamfer_ee_field_ghost is the snap target until "
-                "startup align finishes (Press Enter in this terminal). After that, "
-                "SpaceMouse moves the ghost; UR stays held. --no-viz sends the stick "
-                "to hardware.",
+                "viser: orange ghost is the live-TCP snap preview. Press t to "
+                "SpaceMouse-teleop the ghost in sim; t again resets it to live TCP. "
+                "Enter aligns hardware. After align, stick moves the ghost; UR stays held.",
                 flush=True,
             )
         else:
@@ -593,9 +647,12 @@ def main():
                   f"-- {backend_note}; button {args.mode_button} toggles. Ctrl+C to quit.")
             start_control_and_device()
             if align is not None and args.align_delay is None:
-                print("startup align: Press Enter in this terminal to slerp UR onto the field.",
-                      flush=True)
-                start_enter_to_align()
+                print(
+                    "startup align: Press Enter to slerp UR onto the field. "
+                    "Press t for viser-only stick (headless has no ghost).",
+                    flush=True,
+                )
+                start_align_keys()
             while True:
                 if align is not None and not align.finished:
                     q = q_with_vention()
@@ -704,9 +761,20 @@ def main():
                 T_ee = np.asarray(live_ee_motor().to_transformation_matrix())
                 if align is not None and not align.finished:
                     run_startup_align(T_live_flange, T_ee)
-                    T_ghost = align.desired_flange()
-                    if T_ghost is None:
-                        _, T_ghost = snap_target_flange(T_live_flange)
+                    probe = sim_probe["p"]
+                    if sim_teleop["on"] and probe is not None:
+                        R_field = field_preview.update_approach_basis(
+                            probe.xyz(), now=time.monotonic())
+                        p_tcp = probe.step(R_field)
+                        T_ghost = ghost_flange_world(
+                            T_live_flange, R_field, p_tcp, 1.0)
+                    else:
+                        p_live = live_tcp_xyz_from_flange(T_live_flange)
+                        if probe is not None:
+                            probe.set_xyz(p_live)
+                        T_ghost = align.desired_flange()
+                        if T_ghost is None:
+                            _, T_ghost = snap_target_flange(T_live_flange)
                     update_ghost(T_ghost)
                     return
                 probe = sim_probe["p"]
@@ -721,14 +789,14 @@ def main():
             start_control_and_device()
             if align is not None and args.align_delay is None:
                 print(
-                    "startup align: look at the orange ghost, then Press Enter in this "
-                    "terminal to slerp UR to it.",
+                    "startup align: orange ghost is the live-TCP snap. Press t to "
+                    "teleop it in viser; t again resets to live TCP. Enter slerps UR.",
                     flush=True,
                 )
-                start_enter_to_align()
+                start_align_keys()
 
-            viz.show(message=f"startup align on '{args.task_space}': orange ghost is "
-                     f"the snap target; Press Enter in the terminal to slerp, then hold "
+            viz.show(message=f"startup align on '{args.task_space}': t=sim ghost, "
+                     f"Enter=hardware slerp, then hold "
                      f"-- {backend_note}. viser at http://localhost:{viz.port} -- ctrl-c to quit.")
     except KeyboardInterrupt:
         pass

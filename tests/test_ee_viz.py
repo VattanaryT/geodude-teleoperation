@@ -162,6 +162,15 @@ class EeVizTest(unittest.TestCase):
         xyz = probe.step(np.eye(3))
         np.testing.assert_allclose(xyz, [0.0, 0.0, 1.0])
 
+    def test_sim_tcp_set_xyz_resets_probe_and_pending(self):
+        from geodude_teleoperation.ee_viz import SimTcpProbe
+
+        probe = SimTcpProbe([0.0, 0.0, 1.0])
+        probe.add_body_linear([0.2, 0.0, 0.0])
+        probe.set_xyz([0.4, -0.1, 0.9])
+        np.testing.assert_allclose(probe.xyz(), [0.4, -0.1, 0.9])
+        np.testing.assert_allclose(probe.step(np.eye(3)), [0.4, -0.1, 0.9])
+
     def test_startup_align_waits_then_slerps_without_snap(self):
         from geodude_teleoperation.ee_viz import (
             StartupAlign,

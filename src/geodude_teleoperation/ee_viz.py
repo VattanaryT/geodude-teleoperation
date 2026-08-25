@@ -126,6 +126,11 @@ class SimTcpProbe:
         with self._lock:
             return self._xyz.copy()
 
+    def set_xyz(self, xyz):
+        with self._lock:
+            self._xyz = np.asarray(xyz, dtype=float).reshape(3).copy()
+            self._pending[:] = 0.0
+
     def step(self, R_ee):
         with self._lock:
             delta = self._pending

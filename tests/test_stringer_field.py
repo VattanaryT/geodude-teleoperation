@@ -8,7 +8,7 @@ from geodude_teleoperation.stringer_field import (
     end_cap_source_sink,
     length_tangents,
 )
-from geodude_teleoperation.virtual_fixture import OrientationField
+from geodude_teleoperation.virtual_fixture import OrientationField, lock_roll_to_axis
 
 
 def _long_box():
@@ -38,7 +38,7 @@ class EndCapBandTest(unittest.TestCase):
             rng.uniform(-0.05, 0.05, 800),
             rng.uniform(-0.005, 0.005, 800),
         ])
-        sink, source, axis = end_cap_source_sink(pts)
+        sink, source, axis = end_cap_source_sink(pts, flow="width")
         self.assertGreater(abs(axis[1]), 0.9)
         self.assertGreater(float(np.ptp(pts[source, 0])), 0.25)
         self.assertGreater(float(np.ptp(pts[sink, 0])), 0.25)
@@ -102,6 +102,34 @@ class OrientationFieldLengthTest(unittest.TestCase):
         src = Path(vf_mod.__file__).read_text(encoding="utf-8")
         self.assertNotIn("WalkOnSpheres", src)
         self.assertIn("RotorFieldDiffusion", src)
+
+
+class RollLockTest(unittest.TestCase):
+    def test_diagonal_roll_is_reclocked_to_length_axis(self):
+        z = np.array([0.0, 0.0, -1.0])
+        x = np.array([1.0, 1.0, 0.0])
+        x = x / np.linalg.norm(x)
+        y = np.cross(z, x)
+        y = y / np.linalg.norm(y)
+        R = np.column_stack([x, y, z])
+        out = lock_roll_to_axis(R, np.array([1.0, 0.0, 0.0]))
+        np.testing.assert_allclose(out[:, 2], z, atol=1e-9)
+        self.assertGreater(float(out[0, 0]), 0.99)
+        self.assertLess(abs(float(out[1, 0])), 0.05)
+
+    def test_axis_parallel_to_tool_z_keeps_field_x(self):
+        R = np.eye(3)
+        out = lock_roll_to_axis(R, np.array([0.0, 0.0, 1.0]))
+        np.testing.assert_allclose(out, R)
+
+    def test_table_flat_x_follows_pca_length(self):
+        mesh = _long_box()
+        vf = OrientationField(mesh)
+        np.testing.assert_allclose(
+            np.abs(vf._table_flat[:, 0]), [1.0, 0.0, 0.0], atol=0.15)
+        R = vf.approach_basis_at(np.array([0.8, 0.0, 0.0]))
+        np.testing.assert_allclose(R[:, 2], [0.0, 0.0, -1.0], atol=0.05)
+        self.assertGreater(abs(float(R[0, 0])), 0.9)
 
 
 if __name__ == "__main__":

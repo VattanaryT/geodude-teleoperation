@@ -49,12 +49,15 @@ class KeyboardTeleop:
         self._running = threading.Event()
         self._on_twist = None
         self._on_button = None
+        self._on_key = None
 
-    def start(self, on_twist, on_button=None):
+    def start(self, on_twist, on_button=None, on_key=None):
         """on_twist(twist: gafropy.Twist) is called once per movement keypress
-        with a fixed-size step; on_button(index) fires on 't' (0) / 'v' (1)."""
+        with a fixed-size step; on_button(index) fires on 't' (0) / 'v' (1).
+        on_key(key) gets unmapped keys such as Enter (startup align)."""
         self._on_twist = on_twist
         self._on_button = on_button
+        self._on_key = on_key
         self._running.set()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -81,6 +84,9 @@ class KeyboardTeleop:
                 key = sys.stdin.read(1)
 
                 try:
+                    if self._on_key is not None and key in ("t", "T", "\n", "\r"):
+                        self._on_key(key)
+                        continue
                     mapping = _KEY_TWIST.get(key)
                     if mapping is None:
                         continue

@@ -13,6 +13,33 @@ def _orient_approach_into_surface(local_basis):
     return approach_basis
 
 
+def lock_roll_to_axis(approach, axis, min_sin=0.15):
+    """Keep tool +Z; yaw so +X is ``axis`` projected into the tool XY plane.
+
+    Rotor interpolation and far-field nlerp can leave +X diagonal even when
+    surface heat is along the stringer. Reclocking to the PCA length axis
+    removes that extra roll. Degenerate when ``axis`` is parallel to tool Z
+    (end-caps): keep the field's own +X.
+    """
+    R = np.asarray(approach, dtype=float).reshape(3, 3)
+    z = R[:, 2]
+    a = np.asarray(axis, dtype=float).reshape(3)
+    nrm = np.linalg.norm(a)
+    if nrm < 1e-12:
+        return np.array(R, copy=True)
+    a = a / nrm
+    x = a - np.dot(a, z) * z
+    mag = np.linalg.norm(x)
+    if mag < float(min_sin):
+        return np.array(R, copy=True)
+    x = x / mag
+    if np.dot(x, R[:, 0]) < 0.0:
+        x = -x
+    y = np.cross(z, x)
+    y = y / np.linalg.norm(y)
+    return np.column_stack([x, y, z])
+
+
 def _motor_position(motor):
     translator = motor.get_translator()
     return translator, np.array([translator.x(), translator.y(), translator.z()])
@@ -201,9 +228,9 @@ class OrientationField:
     """Ambient orientation field around a mesh's surface, via gafropy.RotorFieldDiffusion.
 
     Surface frames follow the old stringer path: PCA end-cap heat,
-    ``x = ∇u``, ``z`` = surface normal, ``y = z × x``. Default ``flow='width'``
-    puts source/sink on the long sides (stripes along the part).
-    ``flow='length'`` uses the short end-caps instead. That boundary rotor
+    ``x = ∇u``, ``z`` = surface normal, ``y = z × x``. Default ``flow='length'``
+    puts source/sink on the short end-caps (heat along the long axis).
+    ``flow='width'`` uses the long sides instead. That boundary rotor
     field is extended into ambient R^3 via RotorFieldDiffusion
     (startup only; queries are deterministic Frechet means, not Walk-on-Spheres).
 
@@ -217,16 +244,20 @@ class OrientationField:
     def __init__(self, mesh, key_direction=None, source_vertex=None, t_surface=None,
                  t_spatial=None, num_boundary_samples=None, max_iterations=50,
                  smoothing=0.75, end_line_fraction=0.06, swap_end_lines=False,
-                 diffusion_scalar=5000.0, flow="width"):
+                 diffusion_scalar=5000.0, flow="length"):
         del key_direction, source_vertex, t_surface
         vertices = np.asarray(mesh.vertices, dtype=np.float64)
         normals = np.asarray(mesh.vertex_normals, dtype=np.float64)
         normals = normals / np.linalg.norm(normals, axis=1, keepdims=True)
         mean_edge = float(mesh.edges_unique_length.mean())
 
-        tangent, sink, source, _axis = length_tangents(
+        tangent, sink, source, axis = length_tangents(
             mesh, fraction=end_line_fraction, swap=swap_end_lines,
             flow=flow, diffusion_scalar=diffusion_scalar)
+        mean_t = np.mean(tangent, axis=0)
+        if np.dot(mean_t, axis) < 0.0:
+            axis = -np.asarray(axis, dtype=float)
+        self._length_axis = axis / np.linalg.norm(axis)
         self.sink_points = vertices[sink]
         self.source_points = vertices[source]
 
@@ -249,7 +280,7 @@ class OrientationField:
         self._smoothing = smoothing
         self._last_basis = np.eye(3)
         self._has_last = False
-        self._table_flat = table_flat_basis()
+        self._table_flat = table_flat_basis(tangent=self._length_axis)
         self._far_near = FAR_FIELD_NEAR
         self._far_far = FAR_FIELD_FAR
 
@@ -286,6 +317,13 @@ class OrientationField:
             local = _nlerp_matrices(local, self._table_flat, w)
         return local
 
+    def _approach_from_local(self, local_basis):
+        approach = _orient_approach_into_surface(local_basis)
+        axis = getattr(self, "_length_axis", None)
+        if axis is None:
+            return approach
+        return lock_roll_to_axis(approach, axis)
+
     def project(self, proposed_reference):
         translator, position = _motor_position(proposed_reference)
         fallback = self._last_basis if self._has_last else self._table_flat
@@ -297,7 +335,7 @@ class OrientationField:
         self._last_basis = local_basis
         self._has_last = True
 
-        approach_basis = _orient_approach_into_surface(local_basis)
+        approach_basis = self._approach_from_local(local_basis)
         rotor = gafropy.Rotor.from_matrix(approach_basis)
         return gafropy.Motor(translator, rotor)
 
@@ -307,10 +345,11 @@ class OrientationField:
         Near the object this is into-surface field Z. Far away it blends to a
         table-flat approach (EE +Z = world −Z) so travel across the workstation
         stays level instead of keeping the last stringer tilt through the table.
+        Roll about tool Z is the PCA length axis in the tool XY plane.
         """
         position = np.asarray(position, dtype=float).reshape(3)
         local_basis = self._blended_local_basis(position, fallback=self._table_flat)
-        return _orient_approach_into_surface(local_basis)
+        return self._approach_from_local(local_basis)
 
     def display_basis_at(self, position):
         """Object +Z frame whose +Z matches /field_z arrows (out of the working face)."""

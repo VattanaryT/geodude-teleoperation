@@ -251,6 +251,42 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         self.assertFalse(consumed)
         self.assertEqual(hardware, [twist])
 
+    def test_t_toggles_sim_teleop_until_enter_aligns(self):
+        from geodude_teleoperation.ee_viz import StartupAlign
+
+        mod = _load_example()
+        align = StartupAlign(delay_s=None, duration_s=1.0)
+        sim = {"on": False}
+        self.assertEqual(
+            mod.apply_terminal_key("t", align=align, sim_teleop=sim), "sim_on")
+        self.assertTrue(sim["on"])
+        self.assertEqual(
+            mod.apply_terminal_key("t", align=align, sim_teleop=sim), "sim_off")
+        self.assertFalse(sim["on"])
+        sim["on"] = True
+        self.assertEqual(
+            mod.apply_terminal_key("\n", align=align, sim_teleop=sim), "align")
+        self.assertFalse(sim["on"])
+        self.assertTrue(align._triggered)
+        self.assertIsNone(
+            mod.apply_terminal_key("t", align=align, sim_teleop=sim))
+
+    def test_sim_teleop_twist_reaches_probe_before_align(self):
+        from geodude_teleoperation.ee_viz import SimTcpProbe, StartupAlign
+
+        probe = SimTcpProbe([0.0, 0.0, 1.0])
+        hardware = []
+        align = StartupAlign(delay_s=None, duration_s=1.0)
+        sim = {"on": True}
+        twist = ga.Twist.from_array(np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.05]))
+        # Same gate as on_twist while waiting: stick only if sim teleop is on.
+        if align is not None and not align.finished and sim["on"]:
+            mod = _load_example()
+            mod.route_spacemouse_twist(
+                twist, sim_probe=probe, on_hardware=hardware.append)
+        self.assertEqual(hardware, [])
+        np.testing.assert_allclose(probe.step(np.eye(3)), [0.0, 0.0, 1.05])
+
 
 if __name__ == "__main__":
     unittest.main()
