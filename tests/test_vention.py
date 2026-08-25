@@ -7,6 +7,7 @@ from geodude_teleoperation.vention import (
     RIGHT_VENTION_JOINT,
     apply_vention_heights,
     vention_dof_indices,
+    vention_q_for_base_z,
 )
 
 
@@ -61,6 +62,11 @@ class VentionOverlayTest(unittest.TestCase):
         system = FakeSystem([FakeJoint(LEFT_VENTION_JOINT, 0)])
         with self.assertRaises(KeyError):
             apply_vention_heights(system, np.zeros(2), left=0.25, right=0.25)
+
+    def test_calibrated_1_65m_mount_clamps_to_rail_limit(self):
+        # 1.65 - 1.12 = 0.53, yaml limit 0.5
+        self.assertAlmostEqual(vention_q_for_base_z(1.65), 0.5)
+        self.assertAlmostEqual(vention_q_for_base_z(1.12 + 0.25), 0.25)
 
 
 if __name__ == "__main__":

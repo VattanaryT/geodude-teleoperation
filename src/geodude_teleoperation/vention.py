@@ -18,6 +18,16 @@ RIGHT_VENTION_JOINT = "right_arm_linear_vention"
 
 # Matches geodude.yaml keyframe "ready" and the examples' DEFAULT_VENTION_HEIGHT.
 DEFAULT_VENTION_HEIGHT = 0.25
+# Prismatic origin z in geodude.yaml. Calibrated T_*_base_vention t_z is 1.65 m;
+# rail q = 0.25 then leaves the UR mount 280 mm low vs that frame.
+VENTION_PRISMATIC_ORIGIN_Z = 1.12
+VENTION_Q_MAX = 0.5
+
+
+def vention_q_for_base_z(z_vention: float) -> float:
+    """Rail q so yaml UR mount z matches a calibrated vention z, clamped to limits."""
+    return float(np.clip(
+        float(z_vention) - VENTION_PRISMATIC_ORIGIN_Z, 0.0, VENTION_Q_MAX))
 
 
 def vention_dof_indices(system) -> dict[str, int]:

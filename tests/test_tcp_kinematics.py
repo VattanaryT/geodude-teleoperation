@@ -7,7 +7,10 @@ from geodude_teleoperation.tcp_kinematics import (
     MODEL,
     apply_right_ur6,
     poses_in_right_base,
+    right_base_points_to_world,
     rotation_error_deg,
+    ur_arm_xyz_in_right_base,
+    wrap_ur6_to_pm_pi,
     write_geodude_model_with_right_ur6,
 )
 
@@ -38,14 +41,53 @@ class TcpKinematicsFixtureTest(unittest.TestCase):
             ee_mm = np.linalg.norm(frames["yaml_ee"][:3, 3] - pose[:3]) * 1e3
             self.assertGreater(ee_mm, 50.0)
 
+    def test_wrap_puts_bag_wrists_inside_pm_pi_same_chamfer(self):
+        q6 = self.q_ur6[0]
+        wrapped = wrap_ur6_to_pm_pi(q6)
+        self.assertTrue(np.any(np.abs(q6) > np.pi))
+        np.testing.assert_array_less(np.abs(wrapped), np.pi + 1e-12)
+        q0 = np.asarray(self.system.get_default_configuration(), dtype=float)
+        p_raw = poses_in_right_base(self.system, apply_right_ur6(self.system, q0, q6))
+        p_wrap = poses_in_right_base(self.system, apply_right_ur6(self.system, q0, wrapped))
+        err_mm = np.linalg.norm(p_raw["chamfer"][:3, 3] - p_wrap["chamfer"][:3, 3]) * 1e3
+        self.assertLess(err_mm, 0.1)
+        bag_mm = np.linalg.norm(p_wrap["chamfer"][:3, 3] - self.tcp[0, :3]) * 1e3
+        self.assertLess(bag_mm, 3.0)
+
+    def test_right_arm_chain_is_ur5e_fk(self):
+        q0 = np.asarray(self.system.get_default_configuration(), dtype=float)
+        q = apply_right_ur6(self.system, q0, wrap_ur6_to_pm_pi(self.q_ur6[0]))
+        arms = ur_arm_xyz_in_right_base(self.system, q)
+        self.assertEqual(set(arms), {"left", "right"})
+        self.assertEqual(len(arms["right"]), 7)
+        upper_to_forearm = np.linalg.norm(arms["right"][3] - arms["right"][2])
+        self.assertAlmostEqual(upper_to_forearm, 0.425, delta=0.02)
+        wrist3 = poses_in_right_base(self.system, q)
+        tip = arms["right"][-1]
+        self.assertAlmostEqual(
+            np.linalg.norm(tip - wrist3["flange"][:3, 3]) * 1e3, 100.0, delta=2.0)
+
+    def test_right_base_roundtrip_to_gafro_world(self):
+        from geodude_teleoperation.ee_viz import chamfer_tcp_world_from_wrist3
+
+        q0 = np.asarray(self.system.get_default_configuration(), dtype=float)
+        q = apply_right_ur6(self.system, q0, wrap_ur6_to_pm_pi(self.q_ur6[0]))
+        p_rb = poses_in_right_base(self.system, q)["chamfer"][:3, 3]
+        p_w = right_base_points_to_world(self.system, q, p_rb)[0]
+        fk = self.system.compute_forward_kinematics(q)
+        T_wrist = np.asarray(
+            fk.get_link_pose("right_ur5e/wrist_3_link").to_transformation_matrix())
+        p_fk = chamfer_tcp_world_from_wrist3(T_wrist)[:3, 3]
+        self.assertLess(np.linalg.norm(p_w - p_fk) * 1e3, 0.1)
+
     def test_patched_ready_keyframe_matches_bag_start_joints(self):
         import tempfile
 
         import gafropy as ga
 
-        q6 = self.q_ur6[0]
+        q6 = wrap_ur6_to_pm_pi(self.q_ur6[0])
         dest = Path(tempfile.mkdtemp()) / "geodude.yaml"
-        write_geodude_model_with_right_ur6(q6, dest, src=MODEL)
+        write_geodude_model_with_right_ur6(self.q_ur6[0], dest, src=MODEL)
         patched = ga.SystemSerialization.load(str(dest))
         ready = np.asarray(patched.get_keyframe("ready").qpos, dtype=float)
         home = np.asarray(patched.get_keyframe("home").qpos, dtype=float)
@@ -60,6 +102,7 @@ class TcpKinematicsFixtureTest(unittest.TestCase):
         idx = [by_name[BAG_JOINT_TO_GAFRO[n]] for n in UR6_ORDER]
         np.testing.assert_allclose(ready[idx], q6, atol=1e-9)
         np.testing.assert_allclose(home[idx], q6, atol=1e-9)
+        self.assertLessEqual(float(np.max(np.abs(ready[idx]))), np.pi)
         frames = poses_in_right_base(patched, want)
         err_mm = np.linalg.norm(frames["chamfer"][:3, 3] - self.tcp[0, :3]) * 1e3
         self.assertLess(err_mm, 3.0)

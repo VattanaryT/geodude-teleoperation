@@ -88,3 +88,35 @@ def apply_stringer_view(server, points: np.ndarray) -> None:
         client.camera.up_direction = up
         client.camera.position = eye
         client.camera.look_at = center
+
+
+def draw_arm_skeletons(
+    server,
+    arms: dict[str, np.ndarray],
+    *,
+    prefix: str = "/arm",
+    handles: dict | None = None,
+) -> dict:
+    """Draw left/right UR5e FK chains. Reuse ``handles`` so the sticks move."""
+    if handles is None:
+        handles = {}
+    colors = {"right": (80, 180, 255), "left": (170, 170, 175)}
+    for side, xyz in arms.items():
+        pts = np.asarray(xyz, dtype=float).reshape(-1, 3)
+        if len(pts) < 2:
+            continue
+        rgb = colors.get(side, (160, 160, 160))
+        segs = np.asarray(polyline_segments(pts), dtype=np.float32)
+        key = f"{prefix}/{side}"
+        if key in handles:
+            handles[key].points = segs
+            for i, p in enumerate(pts):
+                handles[f"{key}/j{i}"].position = tuple(float(x) for x in p)
+            continue
+        handles[key] = server.scene.add_line_segments(
+            key, points=segs, colors=rgb, thickness=0.028,
+        )
+        for i, p in enumerate(pts):
+            handles[f"{key}/j{i}"] = server.scene.add_icosphere(
+                f"{key}/j{i}", radius=0.022, color=rgb, position=p)
+    return handles

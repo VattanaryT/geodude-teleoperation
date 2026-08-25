@@ -4,12 +4,15 @@ from pathlib import Path
 import numpy as np
 
 from geodude_teleoperation.laser_frames import (
+    DEFAULT_T_RIGHT,
     compose_T_tag0_rtde,
     is_laser_left_base_object,
     load_SE3,
     load_t_vention,
     place_laser_object,
     place_laser_points,
+    right_base_points_to_vention,
+    right_base_R_to_vention,
     transform_points,
 )
 
@@ -82,3 +85,66 @@ class LaserPlacementTest(unittest.TestCase):
             np.linalg.norm(raw.mean(axis=0) - placed.points_vention.mean(axis=0)),
             0.5,
         )
+
+
+class RightBaseVentionOverlayTest(unittest.TestCase):
+    """Hardware draws right_base clouds with T_right, not yaml UR FK.
+
+    Yaml mount at rail=0.25 is 280 mm below T_right, so FK overlay puts the
+    stringer under the worktop (z=0.755). Calibrated overlay sits on it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tcp = np.asarray(
+            np.load(
+                Path(__file__).resolve().parent
+                / "fixtures"
+                / "bimanual_0_tcp_fk_samples.npz"
+            )["tcp_pose_xyzw"][0, :3],
+            dtype=float,
+        )
+        cls.T_right = load_SE3(DEFAULT_T_RIGHT)
+        cls.worktop_z = 0.755
+
+    def test_calibrated_overlay_puts_bag_tcp_on_worktop(self):
+        p = right_base_points_to_vention(self.tcp)[0]
+        self.assertGreater(p[2], self.worktop_z - 0.02)
+        self.assertLess(p[2], self.worktop_z + 0.20)
+        np.testing.assert_allclose(
+            p, transform_points(self.T_right, self.tcp)[0], atol=1e-12)
+
+    def test_yaml_fk_overlay_is_the_under_table_bug(self):
+        import gafropy as ga
+
+        from geodude_teleoperation.tcp_kinematics import (
+            MODEL,
+            apply_right_ur6,
+            right_base_points_to_world,
+            wrap_ur6_to_pm_pi,
+        )
+        from geodude_teleoperation.vention import (
+            DEFAULT_VENTION_HEIGHT,
+            apply_vention_heights,
+        )
+
+        data = np.load(
+            Path(__file__).resolve().parent
+            / "fixtures"
+            / "bimanual_0_tcp_fk_samples.npz"
+        )
+        system = ga.SystemSerialization.load(str(MODEL))
+        q0 = np.asarray(system.get_default_configuration(), dtype=float)
+        q = apply_vention_heights(
+            system,
+            apply_right_ur6(system, q0, wrap_ur6_to_pm_pi(data["q_ur6"][0])),
+            DEFAULT_VENTION_HEIGHT,
+            DEFAULT_VENTION_HEIGHT,
+        )
+        p_fk = right_base_points_to_world(system, q, self.tcp)[0]
+        self.assertLess(p_fk[2], self.worktop_z - 0.10)
+
+    def test_R_maps_with_T_right_rotation(self):
+        R = np.eye(3)
+        np.testing.assert_allclose(
+            right_base_R_to_vention(R), self.T_right[:3, :3], atol=1e-12)

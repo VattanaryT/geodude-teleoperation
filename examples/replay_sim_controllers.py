@@ -1,6 +1,7 @@
 """Check 6: closed-loop MuJoCo replay through speedJ + DualLoop (not hardware).
 
-Same right_base wrist-cam viewer as check 5 (stringer + bag path + live TCP).
+Same geodude.yaml mesh placement as hardware_object_contact_teleop: object in
+vention via ``T_right_base_vention`` (not yaml UR FK), chamfer on flange.
 The gafro plant is yaml ``right_ee``. DualLoop Fz is bag playback, not MuJoCo
 contact. Default boots the right UR at bag start joints so cyan sits on orange
 at t=0. In contact, DualLoop owns tool-Z: score XY, not 3D TCP.
@@ -22,6 +23,7 @@ from pathlib import Path
 import gafropy as ga
 import numpy as np
 from gafropy import robot_interface as ri
+from gafropy import viz as gafropy_viz
 from scipy.spatial.transform import Rotation
 
 from geodude_teleoperation import AdmittanceTeleoperationController, ContactTeleoperationController
@@ -42,14 +44,26 @@ from geodude_teleoperation.sim_replay import (
     summarize_tracking,
     ur_reaction_fz,
 )
+from geodude_teleoperation.ee_viz import (
+    add_right_chamfer_visual,
+    chamfer_tcp_world_from_wrist3,
+    chamfer_world_from_wrist3,
+    hide_gripper_visuals,
+)
+from geodude_teleoperation.laser_frames import (
+    DEFAULT_T_RIGHT,
+    load_SE3,
+    right_base_R_to_vention,
+    right_base_points_to_vention,
+)
 from geodude_teleoperation.tcp_kinematics import (
     MODEL,
     poses_in_right_base,
     write_geodude_model_with_right_ur6,
 )
+from geodude_teleoperation.vention import apply_vention_heights, vention_q_for_base_z
 from geodude_teleoperation.viser_view import (
     AXIS_RGB,
-    apply_stringer_view,
     axis_arrows,
     contact_segment_colors,
     polyline_segments,
@@ -170,6 +184,13 @@ def main() -> None:
             flush=True,
         )
 
+    cam_pre = None
+    if not args.headless:
+        cam_src = args.cam if args.cam is not None else (
+            _DEFAULT_CAM if _DEFAULT_CAM.is_file() else args.bag)
+        print(f"loading wrist cam from {cam_src} ({WRIST_CAM_TOPIC})", flush=True)
+        cam_pre = load_wrist_cam(cam_src, WRIST_CAM_TOPIC)
+
     model_file = MODEL
     if not args.no_bag_start:
         if not args.joints.is_file():
@@ -223,6 +244,14 @@ def main() -> None:
         q = np.asarray(interface.get_state().get_position(), dtype=float)
         return q, poses_in_right_base(system, q)
 
+    T_right = load_SE3(DEFAULT_T_RIGHT)
+    q_rail = vention_q_for_base_z(float(T_right[2, 3]))
+
+    def q_for_viz(q=None):
+        q = np.asarray(
+            interface.get_state().get_position() if q is None else q, dtype=float)
+        return apply_vention_heights(system, q, q_rail, q_rail)
+
     def on_enter():
         i = fz_state["i"]
         fd = 15.0 if fn is None else abs(float(fn[i]))
@@ -271,7 +300,7 @@ def main() -> None:
             plant_vz=float(approach._tool_z_velocity),
         ))
         if view["draw"] is not None:
-            view["draw"](i, frames["chamfer"][:3, 3], frames["flange"][:3, :3], err)
+            view["draw"](i, frames["chamfer"][:3, 3], frames["flange"][:3, :3], err, _q)
 
     def run_clock() -> None:
         last_mode = None
@@ -320,8 +349,9 @@ def main() -> None:
             print(format_tracking_table(rows), flush=True)
 
     interface.control(approach, blocking=False)
-    approach.set_input_active(False)
     approach.hold_live_pose()
+    # Zero qdot lets MuJoCo gravity dump the arm while viser loads the wrist cam.
+    approach.set_input_active(True)
     _q0, fr0 = live_frames()
     start_mm = float(np.linalg.norm(fr0["chamfer"][:3, 3] - bag0) * 1e3)
     start_note = (
@@ -330,57 +360,83 @@ def main() -> None:
     )
     print(
         f"sim chamfer vs bag TCP at t=0: {start_mm:.1f} mm ({start_note}). "
-        f"Overlay is right_base like check 5.",
+        f"Viser object uses T_right_base_vention (hardware overlay); "
+        f"rails drawn at {q_rail:.2f} m so the UR mount matches that frame.",
         flush=True,
     )
 
     def _build_wrist_view():
-        import viser
-
         n_pose = len(ep.poses)
         actual = np.asarray(ep.poses[:, :3], dtype=float)
         replay_xyz = integrate_desired_xyz(ep.action_xyz[0], ep.R_field, ep.a_local)
         mode_flags = np.zeros(n_pose, dtype=bool)
         mode_flags[: min(n_pose, len(raw))] = raw[:n_pose]
-        cam_src = args.cam if args.cam is not None else (
-            _DEFAULT_CAM if _DEFAULT_CAM.is_file() else args.bag)
-        print(f"loading wrist cam from {cam_src} ({WRIST_CAM_TOPIC})", flush=True)
-        cam_t, jpegs = load_wrist_cam(cam_src, WRIST_CAM_TOPIC)
+        if cam_pre is None:
+            cam_src = args.cam if args.cam is not None else (
+                _DEFAULT_CAM if _DEFAULT_CAM.is_file() else args.bag)
+            print(f"loading wrist cam from {cam_src} ({WRIST_CAM_TOPIC})", flush=True)
+            cam_t, jpegs = load_wrist_cam(cam_src, WRIST_CAM_TOPIC)
+        else:
+            cam_t, jpegs = cam_pre
         stamps = np.asarray(ep.timestamps, dtype=float)
         idx = nearest_indices(stamps, cam_t)
+        q0 = q_for_viz()
         cloud = load_points(args.ply) if args.ply.is_file() else None
+        cloud_w = None if cloud is None else right_base_points_to_vention(cloud)
+        actual_w = right_base_points_to_vention(actual)
+        replay_w = right_base_points_to_vention(replay_xyz)
         if cloud is None:
             print(f"stringer ply missing: {args.ply}", flush=True)
         else:
-            print(f"stringer {args.ply.name} in right_base ({len(cloud)} pts)", flush=True)
-        server = viser.ViserServer(port=args.port)
+            print(
+                f"stringer {args.ply.name} in vention via T_right_base_vention "
+                f"(worktop overlay, not yaml FK)",
+                flush=True,
+            )
+
+        viz = gafropy_viz.Visualizer(port=args.port)
+        server = viz.server
         server.gui.configure_theme(control_width="large")
         server.gui.main_panel.dock_right()
         server.gui.main_panel.set_width(560)
-        apply_stringer_view(server, cloud if cloud is not None else actual)
-        if cloud is not None:
-            server.scene.add_point_cloud(
-                "/object", points=cloud, colors=(180, 180, 185), point_size=0.002)
-        server.scene.add_line_segments(
-            "/replay", points=polyline_segments(replay_xyz),
+        robot_viz = viz.add_robot(interface.get_system(), name="geodude", joint_sliders=False)
+        robot_viz.update(q0)
+        n_hid = hide_gripper_visuals(robot_viz)
+        update_chamfer = add_right_chamfer_visual(viz, interface.get_system(), q=q0)
+        print(f"ee viz: hid {n_hid} gripper meshes; gray chamfer = live sim tool", flush=True)
+        if cloud_w is not None:
+            viz.scene.add_point_cloud(
+                "/object", points=cloud_w, colors=(200, 200, 200), point_size=0.002)
+        viz.scene.add_line_segments(
+            "/replay", points=polyline_segments(replay_w),
             colors=contact_segment_colors(mode_flags, n_pose - 1),
             thickness=0.0025,
         )
-        server.scene.add_line_segments(
-            "/actual", points=polyline_segments(actual),
+        viz.scene.add_line_segments(
+            "/actual", points=polyline_segments(actual_w),
             colors=(255, 170, 40), thickness=0.0015,
         )
-        server.scene.add_frame("/axes", axes_length=0.08, axes_radius=0.003)
         first = annotate_wrist_frame(
             decode_jpeg(jpegs[int(idx[0])]), mode="free", t_s=0.0, f_n=None)
         caption = server.gui.add_markdown("## check 6")
         img = server.gui.add_image(first, label="wrist_cam_0", format="jpeg")
 
-        def draw(i: int, live_xyz: np.ndarray, live_R: np.ndarray, _err: float) -> None:
+        def draw(i: int, live_xyz: np.ndarray, live_R: np.ndarray, _err: float,
+                 q=None) -> None:
+            del live_R
             i = int(np.clip(i, 0, n_pose - 1))
+            qv = q_for_viz(q)
+            robot_viz.update(qv)
+            update_chamfer(qv)
+            fk = system.compute_forward_kinematics(qv)
+            T_wrist = np.asarray(
+                fk.get_link_pose("right_ur5e/wrist_3_link").to_transformation_matrix())
+            T_flange = chamfer_world_from_wrist3(T_wrist)
+            T_tcp = chamfer_tcp_world_from_wrist3(T_wrist)
             p = actual[i]
-            R_f = ep.R_field[min(i, len(ep.R_field) - 1)]
-            R_b = R_flange[min(i, len(R_flange) - 1)]
+            p_w = right_base_points_to_vention(p)[0]
+            R_f = right_base_R_to_vention(
+                ep.R_field[min(i, len(ep.R_field) - 1)])
             contact_i = bool(mode_flags[i])
             mode = "contact" if contact_i else "free"
             fn_i = None if fn is None else float(fn[min(i, len(fn) - 1)])
@@ -394,20 +450,21 @@ def main() -> None:
                 f"xy={xy_mm:.0f}mm  abs={abs_mm:.0f}mm"
             )
             server.scene.add_frame(
-                "/flange", wxyz=wxyz_from_R(R_b), position=p,
+                "/flange", wxyz=wxyz_from_R(T_flange[:3, :3]), position=T_flange[:3, 3],
                 axes_length=0.05, axes_radius=0.0025)
             server.scene.add_arrows(
-                "/R_field", points=axis_arrows(p, R_f, 0.06), colors=AXIS_RGB,
+                "/R_field", points=axis_arrows(p_w, R_f, 0.06), colors=AXIS_RGB,
                 shaft_radius=0.0015, head_radius=0.0035, head_length=0.008)
             server.scene.add_icosphere(
-                "/tcp_bag", radius=0.006, color=(255, 170, 40), position=p)
-            server.scene.add_frame(
-                "/sim_tcp", wxyz=wxyz_from_R(live_R), position=live_xyz,
-                axes_length=0.05, axes_radius=0.0025)
+                "/tcp_bag", radius=0.006, color=(255, 170, 40), position=p_w)
             server.scene.add_icosphere(
-                "/tcp_sim", radius=0.007, color=(80, 180, 255), position=live_xyz)
+                "/tcp_sim", radius=0.007, color=(80, 180, 255), position=T_tcp[:3, 3])
 
-        print(f"viser http://localhost:{args.port}  orange=bag  cyan=sim", flush=True)
+        print(
+            f"viser http://localhost:{args.port}  "
+            f"T_right overlay  rails={q_rail:.2f}m  orange=bag  cyan=sim TCP",
+            flush=True,
+        )
         return draw
 
     try:

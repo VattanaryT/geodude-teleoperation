@@ -3,7 +3,12 @@ from pathlib import Path
 
 import numpy as np
 
-from geodude_teleoperation.viser_view import framed_camera, sitting_up_axis, wxyz_from_R
+from geodude_teleoperation.viser_view import (
+    draw_arm_skeletons,
+    framed_camera,
+    sitting_up_axis,
+    wxyz_from_R,
+)
 
 
 class SittingUpAxisTest(unittest.TestCase):
@@ -42,6 +47,26 @@ class FramedCameraTest(unittest.TestCase):
 class WxyzFromRTest(unittest.TestCase):
     def test_identity_is_w_first(self):
         np.testing.assert_allclose(wxyz_from_R(np.eye(3)), [1.0, 0.0, 0.0, 0.0], atol=1e-12)
+
+
+class ArmSkeletonDrawTest(unittest.TestCase):
+    def test_polyline_from_joint_xyz(self):
+        from geodude_teleoperation.viser_view import polyline_segments
+
+        xyz = np.array([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [0.1, 0.2, 0.0]])
+        segs = polyline_segments(xyz)
+        self.assertEqual(segs.shape, (2, 2, 3))
+        np.testing.assert_allclose(segs[0, 1], [0.1, 0.0, 0.0])
+        self.assertTrue(callable(draw_arm_skeletons))
+        class _H:
+            def __init__(self):
+                self.points = None
+                self.position = None
+        h = {"/arm/right": _H(), "/arm/right/j0": _H(), "/arm/right/j1": _H()}
+        xyz = {"right": np.array([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0]])}
+        draw_arm_skeletons(None, xyz, handles=h)
+        np.testing.assert_allclose(h["/arm/right"].points[0, 1], [0.1, 0.0, 0.0])
+        self.assertEqual(h["/arm/right/j1"].position[0], 0.1)
 
 
 @unittest.skipUnless(

@@ -80,6 +80,31 @@ def transform_points(T: np.ndarray, points: np.ndarray) -> np.ndarray:
     return (T[:3, :3] @ P.T).T + T[:3, 3]
 
 
+def _T_right(T_right_base_vention: np.ndarray | None) -> np.ndarray:
+    if T_right_base_vention is not None:
+        return np.asarray(T_right_base_vention, dtype=float).reshape(4, 4)
+    return load_SE3(DEFAULT_T_RIGHT)
+
+
+def right_base_points_to_vention(
+    points: np.ndarray, T_right_base_vention: np.ndarray | None = None
+) -> np.ndarray:
+    """UR ``right_base`` points → vention_frame (hardware object overlay).
+
+    Do not use yaml UR FK for this: at rail=0.25 the mount is 280 mm below
+    ``T_right_base_vention``, which puts the stringer under the worktop.
+    """
+    return transform_points(_T_right(T_right_base_vention), points)
+
+
+def right_base_R_to_vention(
+    R_right_base: np.ndarray, T_right_base_vention: np.ndarray | None = None
+) -> np.ndarray:
+    """Rotate a ``right_base`` matrix into vention_frame."""
+    return _T_right(T_right_base_vention)[:3, :3] @ np.asarray(
+        R_right_base, dtype=float).reshape(3, 3)
+
+
 def apply_t_vention(T: np.ndarray, t_vention_m: np.ndarray) -> np.ndarray:
     out = np.asarray(T, dtype=float).reshape(4, 4).copy()
     out[:3, 3] = out[:3, 3] + np.asarray(t_vention_m, dtype=float).reshape(3)
