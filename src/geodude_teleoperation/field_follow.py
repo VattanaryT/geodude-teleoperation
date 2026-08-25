@@ -166,17 +166,21 @@ def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
 
 
 def field_tcp_to_ee(T_tcp, *, T_flange_hw, T_flange_viz, T_ee_hw):
-    """Map a field TCP pose in the object/viz world to the hardware EE matrix."""
-    from geodude_teleoperation.ee_viz import flange_world_from_tcp
+    """Map a field TCP pose in the object/viz world to the hardware EE matrix.
+
+    Same flange as the orange ghost (``ghost_flange_world``): mesh/flange +Z is
+    the field approach. Do not use ``flange_world_from_tcp`` — that composes the
+    pendant TCP rotvec and yanks hardware off the sim preview.
+    """
+    from geodude_teleoperation.ee_viz import ghost_flange_world
 
     T_tcp = np.asarray(T_tcp, dtype=float).reshape(4, 4)
-    T_flange_viz_tgt = flange_world_from_tcp(T_tcp)
-    offset = (
-        np.asarray(T_flange_viz, dtype=float).reshape(4, 4)[:3, 3]
-        - np.asarray(T_flange_hw, dtype=float).reshape(4, 4)[:3, 3])
-    T_flange_hw_tgt = np.array(T_flange_viz_tgt, copy=True)
-    T_flange_hw_tgt[:3, 3] = T_flange_viz_tgt[:3, 3] - offset
-    T_ee_from_flange = np.linalg.inv(
-        np.asarray(T_flange_hw, dtype=float).reshape(4, 4)) @ np.asarray(
-            T_ee_hw, dtype=float).reshape(4, 4)
+    T_flange_viz = np.asarray(T_flange_viz, dtype=float).reshape(4, 4)
+    T_flange_hw = np.asarray(T_flange_hw, dtype=float).reshape(4, 4)
+    offset = T_flange_viz[:3, 3] - T_flange_hw[:3, 3]
+    p_tcp_hw = T_tcp[:3, 3] - offset
+    T_flange_hw_tgt = ghost_flange_world(
+        T_flange_hw, T_tcp[:3, :3], p_tcp_hw, 1.0)
+    T_ee_from_flange = np.linalg.inv(T_flange_hw) @ np.asarray(
+        T_ee_hw, dtype=float).reshape(4, 4)
     return T_flange_hw_tgt @ T_ee_from_flange

@@ -3,8 +3,17 @@ import unittest
 import gafropy as ga
 import numpy as np
 
-from geodude_teleoperation.ee_viz import motor_from_matrix, orientation_error_rad
-from geodude_teleoperation.field_follow import FieldFollow, drive_field_follow
+from geodude_teleoperation.ee_viz import (
+    ghost_flange_world,
+    live_tcp_xyz_from_flange,
+    motor_from_matrix,
+    orientation_error_rad,
+)
+from geodude_teleoperation.field_follow import (
+    FieldFollow,
+    drive_field_follow,
+    field_tcp_to_ee,
+)
 
 
 def _motor_at(xyz, R=None):
@@ -165,6 +174,34 @@ class FieldFollowTest(unittest.TestCase):
         drive_field_follow(
             follow, ctrl, 0.1, _motor_at([0.0, 0.0, 1.0]), live_R=np.eye(3))
         self.assertEqual(len(vf.projects), n)
+
+
+class FieldTcpToEeTest(unittest.TestCase):
+    def test_hardware_ee_matches_ghost_flange_not_pendant_rotvec(self):
+        """Sim ``t`` uses ghost_flange_world (mesh +Z = field). Follow must too.
+
+        flange_world_from_tcp composes the pendant TCP rotvec (~120 deg) and
+        was yanking hardware off the orange ghost after Enter.
+        """
+        T_hw = np.eye(4)
+        T_hw[:3, 3] = [0.4, -0.2, 0.4]
+        T_viz = np.eye(4)
+        T_viz[:3, 3] = [0.4, -0.2, 0.91]
+        T_off = np.eye(4)
+        T_off[:3, 3] = [0.0, 0.0, 0.2]
+        T_ee = T_hw @ T_off
+        R_field = np.diag([1.0, -1.0, -1.0])
+        p_tcp_viz = live_tcp_xyz_from_flange(T_viz)
+        T_tcp = np.eye(4)
+        T_tcp[:3, :3] = R_field
+        T_tcp[:3, 3] = p_tcp_viz
+
+        got = field_tcp_to_ee(
+            T_tcp, T_flange_hw=T_hw, T_flange_viz=T_viz, T_ee_hw=T_ee)
+        T_flange_hw_goal = ghost_flange_world(
+            T_hw, R_field, live_tcp_xyz_from_flange(T_hw), 1.0)
+        np.testing.assert_allclose(got, T_flange_hw_goal @ T_off, atol=1e-9)
+        np.testing.assert_allclose(got[:3, :3], R_field, atol=1e-9)
 
 
 class HardwareFollowRoutingTest(unittest.TestCase):

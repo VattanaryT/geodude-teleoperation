@@ -43,7 +43,6 @@ from geodude_teleoperation.ee_viz import (
     add_ghost_chamfer_visual,
     add_right_chamfer_visual,
     chamfer_world_from_wrist3,
-    flange_world_from_tcp,
     ghost_flange_world,
     hide_gripper_visuals,
     live_tcp_xyz_from_flange,
@@ -858,8 +857,9 @@ def main():
                 if mode["active"] == "approach":
                     run_field_follow(T_live_flange, T_ee)
                     if follow.last_target is not None:
-                        update_ghost(flange_world_from_tcp(
-                            matrix_from_motor(follow.last_target)))
+                        T_tcp = matrix_from_motor(follow.last_target)
+                        update_ghost(ghost_flange_world(
+                            T_live_flange, T_tcp[:3, :3], T_tcp[:3, 3], 1.0))
                     return
                 probe = sim_probe["p"]
                 R_field = field_preview.update_approach_basis(
