@@ -42,7 +42,6 @@ from geodude_teleoperation import (
 from geodude_teleoperation.ee_viz import (
     add_ghost_chamfer_visual,
     add_right_chamfer_visual,
-    align_flange_world,
     chamfer_world_from_wrist3,
     ghost_flange_world,
     hide_gripper_visuals,
@@ -149,10 +148,16 @@ def apply_terminal_key(key, *, align, sim_teleop):
     return None
 
 
-def drive_startup_align(align, controller, now, T_flange, R_field, T_ee):
-    """Track a slerped flange target. Hold and freeze when the one-shot finishes."""
+def drive_startup_align(align, controller, now, T_flange, R_field, T_ee,
+                        T_flange_display=None):
+    """Track a slerped flange target. Hold and freeze when the one-shot finishes.
+
+    ``T_flange`` / ``T_ee`` must be in the controller world (hardware q, rail at
+    0). ``T_flange_display`` is the vention-overlaid flange the orange ghost uses.
+    """
     was_done = align.finished
-    cmd = align.step(now, T_flange, R_field, T_ee)
+    cmd = align.step(
+        now, T_flange, R_field, T_ee, T_flange_display=T_flange_display)
     if cmd.T_ee is not None:
         controller.get_objective().set_target(motor_from_matrix(cmd.T_ee))
         controller.set_input_active(True)
@@ -401,10 +406,17 @@ def main():
         position = interface.get_state().get_position()[joint_idx]
         return task_space.compute_ee_motor(position)
 
-    def snap_target_flange(T_flange):
-        """Field orientation at the live TCP, applied at the live flange xyz."""
-        R_field = vf.approach_basis_at(live_tcp_xyz_from_flange(T_flange))
-        return R_field, align_flange_world(T_flange, R_field, 1.0)
+    def chamfer_flange_from_q(q):
+        fk = interface.get_system().compute_forward_kinematics(np.asarray(q, dtype=float))
+        T_wrist = np.asarray(
+            fk.get_link_pose("right_ur5e/wrist_3_link").to_transformation_matrix())
+        return chamfer_world_from_wrist3(T_wrist)
+
+    def snap_target_flange(T_flange_viz):
+        """Field orientation at the live TCP, with the tip held (same as sim ``t``)."""
+        p_tcp = live_tcp_xyz_from_flange(T_flange_viz)
+        R_field = vf.approach_basis_at(p_tcp)
+        return R_field, ghost_flange_world(T_flange_viz, R_field, p_tcp, 1.0)
 
     def start_align_keys():
         if args.device == "keyboard":
@@ -455,8 +467,10 @@ def main():
                     flush=True,
                 )
         R_field, _ = snap_target_flange(T_flange)
+        T_flange_hw = chamfer_flange_from_q(interface.get_state().get_position())
         cmd = drive_startup_align(
-            align, approach_controller, time.monotonic(), T_flange, R_field, T_ee)
+            align, approach_controller, time.monotonic(), T_flange_hw, R_field, T_ee,
+            T_flange_display=T_flange)
         if cmd.phase != align_phase["name"]:
             align_phase["name"] = cmd.phase
             print(f"startup align: {cmd.phase}", flush=True)
@@ -684,7 +698,8 @@ def main():
             print(
                 f"ee viz: hid {n_hidden} gripper meshes; "
                 "gray chamfer = held hardware; orange ghost is the snap target "
-                "(field orientation at the live flange) until you press Enter. "
+                "(field orientation at the live TCP, same pose as after pressing t) "
+                "until you press Enter. "
                 "Hide /right_chamfer_ee_field_ghost in the scene tree if you do not want it.",
                 flush=True,
             )
@@ -762,20 +777,22 @@ def main():
                 if align is not None and not align.finished:
                     run_startup_align(T_live_flange, T_ee)
                     probe = sim_probe["p"]
-                    if sim_teleop["on"] and probe is not None:
+                    if not sim_teleop["on"]:
+                        T_frozen = align.desired_flange()
+                        if T_frozen is not None:
+                            if probe is not None:
+                                probe.set_xyz(live_tcp_xyz_from_flange(T_live_flange))
+                            update_ghost(T_frozen)
+                            return
+                        if probe is not None:
+                            probe.set_xyz(live_tcp_xyz_from_flange(T_live_flange))
+                    if probe is not None:
                         R_field = field_preview.update_approach_basis(
                             probe.xyz(), now=time.monotonic())
-                        p_tcp = probe.step(R_field)
-                        T_ghost = ghost_flange_world(
-                            T_live_flange, R_field, p_tcp, 1.0)
-                    else:
-                        p_live = live_tcp_xyz_from_flange(T_live_flange)
-                        if probe is not None:
-                            probe.set_xyz(p_live)
-                        T_ghost = align.desired_flange()
-                        if T_ghost is None:
-                            _, T_ghost = snap_target_flange(T_live_flange)
-                    update_ghost(T_ghost)
+                        p_tcp = (
+                            probe.step(R_field) if sim_teleop["on"] else probe.xyz())
+                        update_ghost(ghost_flange_world(
+                            T_live_flange, R_field, p_tcp, 1.0))
                     return
                 probe = sim_probe["p"]
                 R_field = field_preview.update_approach_basis(

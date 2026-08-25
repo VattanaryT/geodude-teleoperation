@@ -153,8 +153,7 @@ def ghost_flange_world(T_live_flange: np.ndarray, R_field: np.ndarray, p_tcp: np
     /field_z arrows (object +normal). Do not compose the pendant TCP rotvec
     — that swings the 3mf through the table.
 
-    Holding TCP parks the flange on the far side of the tip (a retract). Startup
-    align uses ``align_flange_world`` instead so the tip moves toward the work.
+    Startup ghost and Enter align use this pose (field at the live tip).
     """
     T_live = np.asarray(T_live_flange, dtype=float).reshape(4, 4)
     R = slerp_rotation(T_live[:3, :3], R_field, alpha)
@@ -196,11 +195,12 @@ class AlignTick:
 
 
 class StartupAlign:
-    """One-shot flange slerp to the field. Spring tracks a moving target; no project() snap.
+    """One-shot slerp to the field at the live TCP. Spring tracks a moving target.
 
     Wait until ``trigger()`` (``delay_s is None``) or ``delay_s`` seconds, then
     ramp ``duration_s``, then hold when the live flange is close to the field
-    or ``settle_s`` elapses. Ramp keeps live flange xyz so the tip approaches.
+    or ``settle_s`` elapses. Same pose as the orange ghost: keep live TCP xyz
+    and slerp flange rotation (``ghost_flange_world``).
     """
 
     def __init__(self, *, delay_s=3.0, duration_s=4.0, err_rad=0.05, settle_s=2.0):
@@ -211,6 +211,9 @@ class StartupAlign:
         self.phase = "idle"
         self._t0 = None
         self._T_flange0 = None
+        self._T_display0 = None
+        self._p_tcp0 = None
+        self._p_tcp_display0 = None
         self._R_field = None
         self._T_ee_from_flange = None
         self._goal_flange = None
@@ -231,11 +234,13 @@ class StartupAlign:
 
     def desired_flange(self):
         """Snap pose the orange ghost should show (alpha=1). None until wait ends."""
-        if self._T_flange0 is None or self._R_field is None:
+        T0 = self._T_display0 if self._T_display0 is not None else self._T_flange0
+        p_tcp = self._p_tcp_display0 if self._p_tcp_display0 is not None else self._p_tcp0
+        if T0 is None or self._R_field is None or p_tcp is None:
             return None
-        return align_flange_world(self._T_flange0, self._R_field, 1.0)
+        return ghost_flange_world(T0, self._R_field, p_tcp, 1.0)
 
-    def step(self, now, T_flange_live, R_field, T_ee_live):
+    def step(self, now, T_flange_live, R_field, T_ee_live, T_flange_display=None):
         now = float(now)
         T_flange_live = np.asarray(T_flange_live, dtype=float).reshape(4, 4)
         T_ee_live = np.asarray(T_ee_live, dtype=float).reshape(4, 4)
@@ -251,6 +256,11 @@ class StartupAlign:
             if not ready:
                 return AlignTick("wait")
             self._T_flange0 = T_flange_live.copy()
+            self._T_display0 = (
+                np.asarray(T_flange_display, dtype=float).reshape(4, 4).copy()
+                if T_flange_display is not None else T_flange_live.copy())
+            self._p_tcp0 = live_tcp_xyz_from_flange(self._T_flange0)
+            self._p_tcp_display0 = live_tcp_xyz_from_flange(self._T_display0)
             self._R_field = R_field.copy()
             self._T_ee_from_flange = np.linalg.inv(T_flange_live) @ T_ee_live
             self._t0 = now
@@ -258,8 +268,8 @@ class StartupAlign:
 
         if self.phase == "ramp":
             alpha = float(np.clip((now - self._t0) / self.duration_s, 0.0, 1.0))
-            T_flange = align_flange_world(
-                self._T_flange0, self._R_field, alpha)
+            T_flange = ghost_flange_world(
+                self._T_flange0, self._R_field, self._p_tcp0, alpha)
             T_ee = T_flange @ self._T_ee_from_flange
             if alpha >= 1.0:
                 self._goal_flange = T_flange

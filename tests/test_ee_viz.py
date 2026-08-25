@@ -199,18 +199,28 @@ class EeVizTest(unittest.TestCase):
         self.assertLess(err_mid, err_full - 0.1)
 
         end = align.step(3.0, T0, R_field, T_ee)
-        from geodude_teleoperation.ee_viz import align_flange_world
-        T_goal = align_flange_world(T0, R_field, 1.0)
+        from geodude_teleoperation.ee_viz import (
+            CHAMFER_TCP_FROM_FLANGE_XYZ,
+            ghost_flange_world,
+            live_tcp_xyz_from_flange,
+        )
+        p_tcp = live_tcp_xyz_from_flange(T0)
+        T_goal = ghost_flange_world(T0, R_field, p_tcp, 1.0)
         np.testing.assert_allclose(end.T_ee[:3, :3], T_goal[:3, :3], atol=1e-9)
         np.testing.assert_allclose(
-            end.T_ee[:3, 3], T0[:3, 3], atol=1e-9)
+            end.T_ee[:3, 3] + end.T_ee[:3, :3] @ CHAMFER_TCP_FROM_FLANGE_XYZ,
+            p_tcp, atol=1e-9)
 
         done = align.step(3.6, T_goal, R_field, T_goal)
         self.assertTrue(done.finished)
         self.assertFalse(done.input_active)
 
     def test_startup_align_waits_for_trigger_not_time(self):
-        from geodude_teleoperation.ee_viz import StartupAlign, align_flange_world
+        from geodude_teleoperation.ee_viz import (
+            StartupAlign,
+            ghost_flange_world,
+            live_tcp_xyz_from_flange,
+        )
 
         T0 = np.eye(4)
         T0[:3, 3] = [0.0, 0.0, 1.0]
@@ -225,10 +235,59 @@ class EeVizTest(unittest.TestCase):
         self.assertTrue(start.input_active)
         np.testing.assert_allclose(start.T_ee[:3, 3], T0[:3, 3], atol=1e-9)
         end = align.step(31.1, T0, R_field, T0)
+        p_tcp = live_tcp_xyz_from_flange(T0)
+        T_goal = ghost_flange_world(T0, R_field, p_tcp, 1.0)
+        np.testing.assert_allclose(end.T_ee, T_goal, atol=1e-9)
+        np.testing.assert_allclose(align.desired_flange(), T_goal, atol=1e-9)
+
+    def test_snap_ghost_matches_sim_teleop_tcp_held_field(self):
+        from geodude_teleoperation.ee_viz import (
+            CHAMFER_TCP_FROM_FLANGE_XYZ,
+            ghost_flange_world,
+            live_tcp_xyz_from_flange,
+        )
+
+        T = np.eye(4)
+        T[:3, 3] = [0.0, 0.0, 1.0]
+        R_into = np.diag([1.0, -1.0, -1.0])
+        p_tcp = live_tcp_xyz_from_flange(T)
+        ghost = ghost_flange_world(T, R_into, p_tcp, 1.0)
+        np.testing.assert_allclose(ghost[:3, :3], R_into, atol=1e-9)
         np.testing.assert_allclose(
-            end.T_ee, align_flange_world(T0, R_field, 1.0), atol=1e-9)
+            ghost[:3, 3] + ghost[:3, :3] @ CHAMFER_TCP_FROM_FLANGE_XYZ, p_tcp)
+        self.assertGreater(float(np.linalg.norm(ghost[:3, 3] - T[:3, 3])), 0.05)
+
+    def test_align_pivots_on_control_tcp_ghost_stays_on_display(self):
+        from geodude_teleoperation.ee_viz import (
+            CHAMFER_TCP_FROM_FLANGE_XYZ,
+            StartupAlign,
+            ghost_flange_world,
+            live_tcp_xyz_from_flange,
+        )
+
+        T_hw = np.eye(4)
+        T_hw[:3, 3] = [0.4, -0.2, 0.4]
+        T_viz = np.eye(4)
+        T_viz[:3, 3] = [0.4, -0.2, 0.91]
+        T_off = np.eye(4)
+        T_off[:3, 3] = [0.0, 0.0, 0.2]
+        T_ee = T_hw @ T_off
+        R_field = np.diag([1.0, -1.0, -1.0])
+        align = StartupAlign(delay_s=None, duration_s=1.0, err_rad=0.05, settle_s=0.1)
+        align.arm(0.0)
+        align.trigger()
+        start = align.step(0.0, T_hw, R_field, T_ee, T_flange_display=T_viz)
+        np.testing.assert_allclose(start.T_ee[:3, 3], T_ee[:3, 3], atol=1e-9)
+        end = align.step(1.0, T_hw, R_field, T_ee, T_flange_display=T_viz)
+        T_goal = ghost_flange_world(
+            T_hw, R_field, live_tcp_xyz_from_flange(T_hw), 1.0)
+        np.testing.assert_allclose(end.T_ee, T_goal @ T_off, atol=1e-9)
+        ghost = align.desired_flange()
+        p_viz = live_tcp_xyz_from_flange(T_viz)
+        np.testing.assert_allclose(ghost[:3, :3], R_field, atol=1e-9)
         np.testing.assert_allclose(
-            align.desired_flange(), align_flange_world(T0, R_field, 1.0), atol=1e-9)
+            ghost[:3, 3] + ghost[:3, :3] @ CHAMFER_TCP_FROM_FLANGE_XYZ,
+            p_viz, atol=1e-9)
 
     def test_trigger_before_arm_still_starts(self):
         from geodude_teleoperation.ee_viz import StartupAlign

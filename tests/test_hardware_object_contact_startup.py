@@ -51,15 +51,23 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         self.assertIsNone(args.align_delay)
         self.assertGreaterEqual(args.align_duration, 2.0)
 
-    def test_snap_ghost_is_align_target_at_live_flange(self):
-        from geodude_teleoperation.ee_viz import align_flange_world
+    def test_snap_ghost_is_tcp_held_field_pose(self):
+        from geodude_teleoperation.ee_viz import (
+            CHAMFER_TCP_FROM_FLANGE_XYZ,
+            ghost_flange_world,
+            live_tcp_xyz_from_flange,
+        )
 
         T0 = np.eye(4)
         T0[:3, 3] = [0.4, -0.2, 0.9]
         R_field = np.diag([1.0, -1.0, -1.0])
-        ghost = align_flange_world(T0, R_field, 1.0)
-        np.testing.assert_allclose(ghost[:3, 3], T0[:3, 3], atol=1e-9)
+        p_tcp = live_tcp_xyz_from_flange(T0)
+        ghost = ghost_flange_world(T0, R_field, p_tcp, 1.0)
         np.testing.assert_allclose(ghost[:3, :3], R_field, atol=1e-9)
+        np.testing.assert_allclose(
+            ghost[:3, 3] + ghost[:3, :3] @ CHAMFER_TCP_FROM_FLANGE_XYZ,
+            p_tcp, atol=1e-9)
+        self.assertFalse(np.allclose(ghost[:3, 3], T0[:3, 3]))
 
     def test_drive_startup_align_enables_spring_then_holds(self):
         from geodude_teleoperation.ee_viz import StartupAlign
