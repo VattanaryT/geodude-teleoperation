@@ -1,0 +1,189 @@
+import unittest
+
+import gafropy as ga
+import numpy as np
+
+from geodude_teleoperation.ee_viz import motor_from_matrix, orientation_error_rad
+from geodude_teleoperation.field_follow import FieldFollow, drive_field_follow
+
+
+def _motor_at(xyz, R=None):
+    T = np.eye(4)
+    if R is not None:
+        T[:3, :3] = np.asarray(R, dtype=float).reshape(3, 3)
+    T[:3, 3] = np.asarray(xyz, dtype=float).reshape(3)
+    return motor_from_matrix(T)
+
+
+class FakeVf:
+    def __init__(self):
+        self.projects = []
+        self._smoothing = 0.75
+
+    def project(self, motor):
+        self.projects.append(motor)
+        return motor
+
+
+class FakeObjective:
+    def __init__(self):
+        self.target = None
+
+    def set_target(self, motor):
+        self.target = motor
+
+
+class FakeCtrl:
+    def __init__(self):
+        self.active = False
+        self._obj = FakeObjective()
+
+    def get_objective(self):
+        return self._obj
+
+    def set_input_active(self, active):
+        self.active = bool(active)
+
+
+class FieldFollowTest(unittest.TestCase):
+    def test_idle_does_not_project(self):
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.set_idle()
+        tick = follow.tick(0.1, _motor_at([0.0, 0.0, 1.0]))
+        self.assertTrue(tick.idle)
+        self.assertIsNone(tick.target)
+        self.assertEqual(vf.projects, [])
+
+    def test_angular_is_ignored_linear_accumulates(self):
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        tick = follow.tick(0.1, _motor_at([0.0, 0.0, 1.0]))
+        self.assertFalse(tick.idle)
+        self.assertIsNotNone(tick.target)
+        self.assertEqual(len(vf.projects), 1)
+        T = np.asarray(tick.target.to_transformation_matrix())
+        np.testing.assert_allclose(T[:3, 3], [0.02, 0.0, 1.0], atol=1e-9)
+
+    def test_rate_limit_skips_second_project(self):
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=20.0)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        follow.tick(0.0, _motor_at([0.0, 0.0, 1.0]))
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        tick = follow.tick(0.01, _motor_at([0.0, 0.0, 1.0]))
+        self.assertIsNone(tick.target)
+        self.assertEqual(len(vf.projects), 1)
+        tick = follow.tick(0.06, _motor_at([0.0, 0.0, 1.0]))
+        self.assertIsNotNone(tick.target)
+        self.assertEqual(len(vf.projects), 2)
+
+    def test_idle_clears_pending_so_rest_does_not_nibble(self):
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.05, 0.0, 0.0]))
+        follow.set_idle()
+        follow.tick(0.1, _motor_at([0.0, 0.0, 1.0]))
+        self.assertEqual(vf.projects, [])
+        np.testing.assert_allclose(follow.xyz, [0.0, 0.0, 1.0])
+
+    def test_logs_project_wall_time_and_quaternion(self):
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        tick = follow.tick(0.1, _motor_at([0.0, 0.0, 1.0]))
+        self.assertIsNotNone(tick.project_ms)
+        self.assertGreaterEqual(tick.project_ms, 0.0)
+        self.assertEqual(len(tick.quat_wxyz), 4)
+        self.assertEqual(len(follow.log), 1)
+        self.assertIn("project_ms", follow.log[0])
+
+    def test_zeros_smoothing_after_first_project(self):
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0, zero_smoothing_after_first=True)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        follow.tick(0.0, _motor_at([0.0, 0.0, 1.0]))
+        self.assertEqual(vf._smoothing, 0.0)
+
+    def test_project_over_2ms_flags_rtde_overrun(self):
+        vf = FakeVf()
+
+        def slow_project(motor):
+            import time
+            time.sleep(0.003)
+            return motor
+
+        vf.project = slow_project
+        follow = FieldFollow(vf, hz=50.0)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        tick = follow.tick(0.0, _motor_at([0.0, 0.0, 1.0]))
+        self.assertTrue(tick.would_overrun_rtde)
+        self.assertGreater(tick.project_ms, 2.0)
+
+    def test_drive_idle_keeps_last_target_then_releases_when_close(self):
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        ctrl = FakeCtrl()
+        drive_field_follow(
+            follow, ctrl, 0.0, _motor_at([0.0, 0.0, 1.0]), live_R=np.eye(3))
+        self.assertTrue(ctrl.active)
+        self.assertIsNotNone(ctrl._obj.target)
+        held = ctrl._obj.target
+        follow.set_idle()
+        R_into = np.diag([1.0, -1.0, -1.0])
+        drive_field_follow(
+            follow, ctrl, 0.1, _motor_at([0.0, 0.0, 1.0], R_into),
+            live_R=R_into, err_rad=0.05)
+        self.assertTrue(ctrl.active)
+        self.assertIs(ctrl._obj.target, held)
+        drive_field_follow(
+            follow, ctrl, 0.2, _motor_at([0.0, 0.0, 1.0]),
+            live_R=np.eye(3), err_rad=0.05)
+        self.assertFalse(ctrl.active)
+        self.assertIs(ctrl._obj.target, held)
+
+    def test_drive_does_not_project_on_idle_settle(self):
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        ctrl = FakeCtrl()
+        drive_field_follow(follow, ctrl, 0.0, _motor_at([0.0, 0.0, 1.0]))
+        n = len(vf.projects)
+        follow.set_idle()
+        drive_field_follow(
+            follow, ctrl, 0.1, _motor_at([0.0, 0.0, 1.0]), live_R=np.eye(3))
+        self.assertEqual(len(vf.projects), n)
+
+
+class HardwareFollowRoutingTest(unittest.TestCase):
+    def test_example_does_not_attach_vf_to_admittance(self):
+        import ast
+        import pathlib
+
+        src = (
+            pathlib.Path(__file__).resolve().parents[1]
+            / "examples" / "hardware_object_contact_teleop.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("set_virtual_fixture", src)
+        self.assertIn("FieldFollow", src)
+        self.assertIn("drive_field_follow", src)
+        tree = ast.parse(src)
+        self.assertTrue(any(
+            isinstance(n, ast.FunctionDef) and n.name == "_make_approach_controller"
+            for n in tree.body))
+
+
+if __name__ == "__main__":
+    unittest.main()

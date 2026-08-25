@@ -51,6 +51,12 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         self.assertIsNone(args.align_delay)
         self.assertGreaterEqual(args.align_duration, 2.0)
 
+    def test_default_follow_hz_is_between_15_and_50(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args([])
+        self.assertGreaterEqual(args.follow_hz, 15.0)
+        self.assertLessEqual(args.follow_hz, 50.0)
+
     def test_snap_ghost_is_tcp_held_field_pose(self):
         from geodude_teleoperation.ee_viz import (
             CHAMFER_TCP_FROM_FLANGE_XYZ,

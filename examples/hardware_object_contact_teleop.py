@@ -43,12 +43,19 @@ from geodude_teleoperation.ee_viz import (
     add_ghost_chamfer_visual,
     add_right_chamfer_visual,
     chamfer_world_from_wrist3,
+    flange_world_from_tcp,
     ghost_flange_world,
     hide_gripper_visuals,
     live_tcp_xyz_from_flange,
+    matrix_from_motor,
     motor_from_matrix,
     StartupAlign,
     SimTcpProbe,
+)
+from geodude_teleoperation.field_follow import (
+    FieldFollow,
+    drive_field_follow,
+    field_tcp_to_ee,
 )
 from geodude_teleoperation.force_mode_contact import (
     ForceModeContactSession,
@@ -238,6 +245,10 @@ def build_arg_parser():
         "--no-startup-align", dest="startup_align", action="store_false",
         help="skip the one-shot field orientation align")
     parser.add_argument(
+        "--follow-hz", type=float, default=20.0,
+        help="after align, project() rate for stick field-follow (15–50 Hz). "
+             "Not the RTDE/speedJ rate.")
+    parser.add_argument(
         "--align-delay", type=float, default=None,
         help="seconds to wait after viser starts before the align slerp "
              "(default: wait for Enter; orange ghost shows the snap first)")
@@ -338,6 +349,8 @@ def main():
     key_direction = np.asarray(home_ee_motor.get_rotor().to_rotation_matrix())[:, 0]
     vf = OrientationField(object_surface, key_direction=key_direction)
     field_preview = FieldAlignPreview(vf)
+    follow = FieldFollow(vf, hz=args.follow_hz)
+    follow_log_t = {"t": float("-inf")}
 
     approach_controller = _make_approach_controller(
         interface, task_space, home_ee_motor)
@@ -418,6 +431,38 @@ def main():
         R_field = vf.approach_basis_at(p_tcp)
         return R_field, ghost_flange_world(T_flange_viz, R_field, p_tcp, 1.0)
 
+    def run_field_follow(T_flange_viz, T_ee):
+        if follow.xyz is None:
+            p_tcp = live_tcp_xyz_from_flange(T_flange_viz)
+            follow.seed(p_tcp, vf.approach_basis_at(p_tcp))
+        T_flange_hw = chamfer_flange_from_q(interface.get_state().get_position())
+        T_ee_m = np.asarray(T_ee, dtype=float).reshape(4, 4)
+
+        def map_target(motor):
+            return motor_from_matrix(field_tcp_to_ee(
+                matrix_from_motor(motor),
+                T_flange_hw=T_flange_hw,
+                T_flange_viz=T_flange_viz,
+                T_ee_hw=T_ee_m))
+
+        T_prop = np.eye(4)
+        T_prop[:3, 3] = follow.xyz
+        now = time.monotonic()
+        tick = drive_field_follow(
+            follow, approach_controller, now, motor_from_matrix(T_prop),
+            live_R=np.asarray(T_flange_viz, dtype=float)[:3, :3],
+            map_target=map_target)
+        if tick.project_ms is not None and (
+                tick.would_overrun_rtde or (now - follow_log_t["t"]) >= 1.0):
+            follow_log_t["t"] = now
+            print(
+                f"field follow: project={tick.project_ms:.2f}ms "
+                f"rtde_2ms_overrun={tick.would_overrun_rtde} "
+                "(project stays off the speedJ thread)",
+                flush=True,
+            )
+        return tick
+
     def start_align_keys():
         if args.device == "keyboard":
             return
@@ -476,6 +521,15 @@ def main():
             print(f"startup align: {cmd.phase}", flush=True)
             if cmd.finished and sim_probe["p"] is not None:
                 sim_probe["p"] = SimTcpProbe(live_tcp_xyz_from_flange(T_flange))
+            if cmd.finished:
+                p_tcp = live_tcp_xyz_from_flange(T_flange)
+                follow.seed(p_tcp, vf.approach_basis_at(p_tcp))
+                print(
+                    f"field follow: stick linear at {args.follow_hz:.0f} Hz → "
+                    "project() → pose spring. Angular ignored. Idle freezes the "
+                    "last field target (no project at rest).",
+                    flush=True,
+                )
         return cmd
 
     def rebind_after_gafropy_reopen(new_interface):
@@ -573,8 +627,15 @@ def main():
                 route_spacemouse_twist(
                     twist, sim_probe=sim_probe["p"], on_hardware=lambda _: None)
             return
+        if mode["active"] == "approach":
+            if is_idle_twist(twist):
+                follow.set_idle()
+            else:
+                follow.add_body_linear(
+                    np.asarray(twist.get_linear(), dtype=float).reshape(3))
+            return
         route_spacemouse_twist(
-            twist, sim_probe=sim_probe["p"], on_hardware=_hardware_twist)
+            twist, sim_probe=None, on_hardware=_hardware_twist)
 
     def on_button(index):
         # Handoff is rising-edge button only (SpaceMouseTeleop); twists never toggle mode.
@@ -639,7 +700,8 @@ def main():
             print(
                 "viser: orange ghost is the live-TCP snap preview. Press t to "
                 "SpaceMouse-teleop the ghost in sim; t again resets it to live TCP. "
-                "Enter aligns hardware. After align, stick moves the ghost; UR stays held.",
+                "Enter aligns hardware. After align, stick linear field-follows "
+                "at --follow-hz (project off the RTDE thread); angular ignored.",
                 flush=True,
             )
         else:
@@ -668,14 +730,13 @@ def main():
                 )
                 start_align_keys()
             while True:
+                q = q_with_vention()
+                T_flange = chamfer_flange_from_q(q)
+                T_ee = np.asarray(live_ee_motor().to_transformation_matrix())
                 if align is not None and not align.finished:
-                    q = q_with_vention()
-                    fk = interface.get_system().compute_forward_kinematics(q)
-                    T_wrist = np.asarray(
-                        fk.get_link_pose("right_ur5e/wrist_3_link").to_transformation_matrix())
-                    T_flange = chamfer_world_from_wrist3(T_wrist)
-                    T_ee = np.asarray(live_ee_motor().to_transformation_matrix())
                     run_startup_align(T_flange, T_ee)
+                elif mode["active"] == "approach":
+                    run_field_follow(T_flange, T_ee)
                 time.sleep(0.02)
         else:
             viz = gafropy_viz.Visualizer()
@@ -794,6 +855,12 @@ def main():
                         update_ghost(ghost_flange_world(
                             T_live_flange, R_field, p_tcp, 1.0))
                     return
+                if mode["active"] == "approach":
+                    run_field_follow(T_live_flange, T_ee)
+                    if follow.last_target is not None:
+                        update_ghost(flange_world_from_tcp(
+                            matrix_from_motor(follow.last_target)))
+                    return
                 probe = sim_probe["p"]
                 R_field = field_preview.update_approach_basis(
                     probe.xyz(), now=time.monotonic())
@@ -813,7 +880,7 @@ def main():
                 start_align_keys()
 
             viz.show(message=f"startup align on '{args.task_space}': t=sim ghost, "
-                     f"Enter=hardware slerp, then hold "
+                     f"Enter=hardware slerp, then field-follow at {args.follow_hz:.0f} Hz "
                      f"-- {backend_note}. viser at http://localhost:{viz.port} -- ctrl-c to quit.")
     except KeyboardInterrupt:
         pass
