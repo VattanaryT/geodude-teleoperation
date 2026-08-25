@@ -79,6 +79,22 @@ MODEL = str(ROOT / "assets" / "robots" / "geodude" / "geodude.yaml")
 DEFAULT_HARDWARE_CONFIG = str(ROOT / "assets" / "robots" / "geodude" / "geodude_hardware.yaml")
 
 DEFAULT_VENTION_HEIGHT = 0.51
+STICK_LINEAR_SCALE = 0.005
+STICK_ANGULAR_SCALE = 0.05
+
+
+def stick_is_idle(twist):
+    """Hands-off check using the same scales as SpaceMouseTeleop in this example.
+
+    ``is_idle_twist`` defaults are linear_scale=0.01. This example uses 0.005, so
+    a 30% Z lift is 0.0015 m/sample — idle under the default cap (0.002) and
+    not idle under the device cap (0.001). That made lift-up look dead.
+    """
+    return is_idle_twist(
+        twist,
+        linear_scale=STICK_LINEAR_SCALE,
+        angular_scale=STICK_ANGULAR_SCALE,
+    )
 
 
 def _dashboard_bring_up(ip: str) -> None:
@@ -125,7 +141,7 @@ def _make_approach_controller(interface, task_space, home_ee_motor):
 def route_spacemouse_twist(twist, *, sim_probe, on_hardware):
     """Viser probe consumes the stick; hardware only sees it when there is no probe."""
     if sim_probe is not None:
-        if is_idle_twist(twist):
+        if stick_is_idle(twist):
             sim_probe.clear_pending()
         else:
             sim_probe.add_body_linear(
@@ -451,6 +467,7 @@ def main():
         tick = drive_field_follow(
             follow, approach_controller, now, motor_from_matrix(T_prop),
             live_xyz=live_tcp_xyz_from_flange(T_flange_viz),
+            live_ee_xyz=T_ee_m[:3, 3],
             map_target=map_target)
         if tick.project_ms is not None and (
                 tick.would_overrun_rtde or (now - follow_log_t["t"]) >= 1.0):
@@ -598,7 +615,7 @@ def main():
 
     def _hardware_twist(twist):
         # Hands-off / rest bias: freeze — zero speedJ (approach) and clear speedL (contact).
-        if is_idle_twist(twist):
+        if stick_is_idle(twist):
             if mode["active"] == "approach":
                 approach_controller.set_input_active(False)
                 approach_controller.hold_live_pose()
@@ -628,7 +645,7 @@ def main():
                     twist, sim_probe=sim_probe["p"], on_hardware=lambda _: None)
             return
         if mode["active"] == "approach":
-            if is_idle_twist(twist):
+            if stick_is_idle(twist):
                 follow.set_idle()
             else:
                 follow.add_body_linear(
@@ -691,7 +708,7 @@ def main():
             step=0.0025) if args.device == "keyboard" else SpaceMouseTeleop(
                 # Slightly finer than default 0.01: with twist_linear_scale=1, full
                 # deflection ~= 0.5 m/s command rate (was ~1 m/s with 2x*0.01@50Hz).
-                linear_scale=0.005, angular_scale=0.05)
+                linear_scale=STICK_LINEAR_SCALE, angular_scale=STICK_ANGULAR_SCALE)
         if args.device == "keyboard":
             device.start(on_twist, on_button, on_key=on_align_key)
         else:
@@ -821,6 +838,12 @@ def main():
             )
 
             def update():
+                try:
+                    _update()
+                except Exception as exc:
+                    print(f"viser tick skipped: {exc}", flush=True)
+
+            def _update():
                 if handoff_busy["busy"] or (
                     mode["active"] == "contact"
                     and args.contact_backend == "force_mode"

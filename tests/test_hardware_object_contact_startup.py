@@ -33,6 +33,14 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         self.assertTrue(mod.is_idle_twist(rest_yaw))
         self.assertTrue(mod.is_idle_twist(rest_linear))
 
+    def test_gentle_stick_z_is_not_idle_at_device_scale(self):
+        """Lift is often ~30% deflection; default idle cap ate it as rest."""
+        mod = _load_example()
+        z = 0.3 * mod.STICK_LINEAR_SCALE
+        twist = ga.Twist.from_array(np.array([0.0, 0.0, 0.0, 0.0, 0.0, z]))
+        self.assertTrue(mod.is_idle_twist(twist))
+        self.assertFalse(mod.stick_is_idle(twist))
+
     def test_nonzero_twist_is_not_idle(self):
         mod = _load_example()
         twist = ga.Twist.from_array(np.array([0.0, 0.0, 0.0, 0.01, 0.0, 0.0]))

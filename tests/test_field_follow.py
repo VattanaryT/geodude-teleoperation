@@ -199,6 +199,45 @@ class FieldFollowTest(unittest.TestCase):
             follow, ctrl, 0.1, _motor_at([0.0, 0.0, 1.0]), live_R=np.eye(3))
         self.assertEqual(len(vf.projects), n)
 
+    def test_lead_is_capped_to_live_tcp(self):
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0, max_lead_m=0.02)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.05, 0.0, 0.0]))
+        tick = follow.tick(
+            0.0, _motor_at([0.0, 0.0, 1.0]),
+            live_xyz=np.array([0.0, 0.0, 1.0]))
+        self.assertIsNotNone(tick.target)
+        np.testing.assert_allclose(follow.xyz, [0.02, 0.0, 1.0], atol=1e-9)
+
+    def test_project_cannot_flip_tool_z_in_one_tick(self):
+        class FlipVf:
+            def __init__(self):
+                self._smoothing = 0.0
+
+            def project(self, motor):
+                T = np.asarray(motor.to_transformation_matrix(), dtype=float)
+                T[:3, :3] = np.diag([1.0, -1.0, -1.0])
+                return motor_from_matrix(T)
+
+        follow = FieldFollow(FlipVf(), hz=50.0, max_dR_rad=0.12)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        follow.tick(0.0, _motor_at([0.0, 0.0, 1.0]))
+        z = follow.last_target.to_transformation_matrix()[:3, 2]
+        self.assertGreater(float(z[2]), 0.9)
+
+    def test_drive_skips_huge_ee_jump(self):
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        ctrl = FakeCtrl()
+        drive_field_follow(
+            follow, ctrl, 0.0, _motor_at([0.0, 0.0, 1.0]),
+            live_ee_xyz=np.array([0.0, 0.0, 1.0]), max_ee_jump_m=0.005)
+        self.assertFalse(ctrl.active)
+
 
 class ProjectHelperProcessTest(unittest.TestCase):
     def test_helper_returns_projected_pose(self):

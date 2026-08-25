@@ -13,7 +13,11 @@ import time
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from geodude_teleoperation.ee_viz import motor_from_matrix
+from geodude_teleoperation.ee_viz import (
+    motor_from_matrix,
+    orientation_error_rad,
+    slerp_rotation,
+)
 
 RTDE_PERIOD_MS = 2.0
 _HELPER_READY = "ready"
@@ -45,13 +49,22 @@ def _motor_at(xyz, R):
     return motor_from_matrix(T)
 
 
+def _limit_rotation(R_prev, R_new, max_rad):
+    """Slerp toward ``R_new`` so one project() cannot flip tool Z (TCP-held flange jump)."""
+    max_rad = float(max_rad)
+    if max_rad <= 0.0:
+        return np.asarray(R_new, dtype=float).reshape(3, 3)
+    err = orientation_error_rad(R_prev, R_new)
+    if err <= max_rad + 1e-12:
+        return np.asarray(R_new, dtype=float).reshape(3, 3)
+    return slerp_rotation(R_prev, R_new, float(max_rad / err))
+
+
 def _project_once(vf, xyz, R):
     proposed = _motor_at(xyz, R)
     t0 = time.perf_counter()
     target = vf.project(proposed)
     project_ms = (time.perf_counter() - t0) * 1000.0
-    if hasattr(vf, "_smoothing"):
-        vf._smoothing = 0.0
     T = np.asarray(target.to_transformation_matrix(), dtype=float)
     return T[:3, 3].copy(), T[:3, :3].copy(), float(project_ms)
 
@@ -80,12 +93,15 @@ class FieldFollow:
     """Stick linear → xyz; ``vf.project()`` on a capped outer rate; freeze on idle."""
 
     def __init__(self, vf, *, hz=20.0, zero_smoothing_after_first=True,
-                 project_in_process=False, mesh=None):
+                 project_in_process=False, mesh=None, max_lead_m=0.02,
+                 max_dR_rad=0.12):
         hz = float(hz)
         if hz <= 0.0:
             raise ValueError(f"hz must be positive, got {hz}")
         self._vf = vf
         self._min_dt = 1.0 / hz
+        self._max_lead_m = float(max_lead_m)
+        self._max_dR_rad = float(max_dR_rad)
         self._zero_smoothing_after_first = bool(zero_smoothing_after_first)
         self._proc = None
         self._in_q = None
@@ -197,7 +213,16 @@ class FieldFollow:
             self._zero_smoothing_after_first = False
         return target, float(project_ms)
 
-    def tick(self, now, proposed_motor):
+    def _clamp_lead(self, live_xyz):
+        if live_xyz is None or self._xyz is None or self._max_lead_m <= 0.0:
+            return
+        live = np.asarray(live_xyz, dtype=float).reshape(3)
+        lead = self._xyz - live
+        dist = float(np.linalg.norm(lead))
+        if dist > self._max_lead_m:
+            self._xyz = live + lead * (self._max_lead_m / dist)
+
+    def tick(self, now, proposed_motor, live_xyz=None):
         now = float(now)
         if self._xyz is None:
             T = np.asarray(proposed_motor.to_transformation_matrix(), dtype=float)
@@ -212,10 +237,12 @@ class FieldFollow:
         if float(np.linalg.norm(delta)) < 1e-15:
             return FollowTick(idle=False)
         self._xyz = self._xyz + self._R @ delta
+        self._clamp_lead(live_xyz)
         target, project_ms = self._project(self._xyz, self._R)
         T = np.asarray(target.to_transformation_matrix(), dtype=float)
-        self._R = T[:3, :3].copy()
+        self._R = _limit_rotation(self._R, T[:3, :3], self._max_dR_rad)
         self._xyz = T[:3, 3].copy()
+        target = _motor_at(self._xyz, self._R)
         self.last_target = target
         quat = _quat_wxyz_from_motor(target)
         overrun = project_ms > RTDE_PERIOD_MS
@@ -232,18 +259,30 @@ class FieldFollow:
 
 
 def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
-                       err_rad=0.05, map_target=None, live_xyz=None):
+                       err_rad=0.05, map_target=None, live_xyz=None,
+                       live_ee_xyz=None, max_ee_jump_m=0.08):
     """Apply a follow tick to the pose spring.
 
     Idle stops the tracker immediately and rebases the carrot to ``live_xyz``
     so a far-ahead field target cannot keep speedJ running after hands-off.
     """
     del live_R, err_rad
-    tick = follow.tick(now, proposed_motor)
+    tick = follow.tick(now, proposed_motor, live_xyz=live_xyz)
     target = tick.target
     if target is not None and map_target is not None:
         target = map_target(target)
     if target is not None:
+        if live_ee_xyz is not None:
+            T = np.asarray(target.to_transformation_matrix(), dtype=float)
+            jump = float(np.linalg.norm(T[:3, 3] - np.asarray(live_ee_xyz, dtype=float).reshape(3)))
+            if jump > float(max_ee_jump_m):
+                controller.set_input_active(False)
+                print(
+                    f"field follow: skip set_target, EE jump {jump:.3f}m "
+                    f"(cap {float(max_ee_jump_m):.3f}m)",
+                    flush=True,
+                )
+                return tick
         controller.get_objective().set_target(target)
         controller.set_input_active(True)
         return tick
