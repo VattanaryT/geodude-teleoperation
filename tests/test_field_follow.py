@@ -1,4 +1,6 @@
 import unittest
+import threading
+import time
 
 import gafropy as ga
 import numpy as np
@@ -30,6 +32,20 @@ class FakeVf:
 
     def project(self, motor):
         self.projects.append(motor)
+        return motor
+
+
+class SlowBusyVf:
+    """CPU-bound project() so a same-process call holds the GIL."""
+
+    def __init__(self):
+        self._smoothing = 0.0
+
+    def project(self, motor):
+        t_end = time.perf_counter() + 0.04
+        x = 0.0
+        while time.perf_counter() < t_end:
+            x += 1.0
         return motor
 
 
@@ -184,6 +200,44 @@ class FieldFollowTest(unittest.TestCase):
         self.assertEqual(len(vf.projects), n)
 
 
+class ProjectHelperProcessTest(unittest.TestCase):
+    def test_helper_returns_projected_pose(self):
+        follow = FieldFollow(FakeVf(), hz=50.0, project_in_process=True)
+        try:
+            follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+            follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+            tick = follow.tick(0.0, _motor_at([0.0, 0.0, 1.0]))
+            self.assertIsNotNone(tick.target)
+            T = np.asarray(tick.target.to_transformation_matrix())
+            np.testing.assert_allclose(T[:3, 3], [0.01, 0.0, 1.0], atol=1e-9)
+        finally:
+            follow.close()
+
+    def test_helper_wait_lets_other_threads_run(self):
+        follow = FieldFollow(SlowBusyVf(), hz=50.0, project_in_process=True)
+        try:
+            follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+            follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+            n = {"c": 0}
+            stop = threading.Event()
+
+            def spin():
+                while not stop.is_set():
+                    n["c"] += 1
+
+            th = threading.Thread(target=spin)
+            th.start()
+            t0 = time.perf_counter()
+            follow.tick(0.0, _motor_at([0.0, 0.0, 1.0]))
+            elapsed = time.perf_counter() - t0
+            stop.set()
+            th.join()
+            self.assertGreater(elapsed, 0.03)
+            self.assertGreater(n["c"], 1000)
+        finally:
+            follow.close()
+
+
 class FieldTcpToEeTest(unittest.TestCase):
     def test_hardware_ee_matches_ghost_flange_not_pendant_rotvec(self):
         """Sim ``t`` uses ghost_flange_world (mesh +Z = field). Follow must too.
@@ -224,6 +278,7 @@ class HardwareFollowRoutingTest(unittest.TestCase):
         self.assertNotIn("set_virtual_fixture", src)
         self.assertIn("FieldFollow", src)
         self.assertIn("drive_field_follow", src)
+        self.assertIn("project_in_process=True", src)
         tree = ast.parse(src)
         self.assertTrue(any(
             isinstance(n, ast.FunctionDef) and n.name == "_make_approach_controller"

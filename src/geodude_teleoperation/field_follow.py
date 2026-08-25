@@ -1,10 +1,12 @@
 """Outer-loop field follow: accumulate stick linear, project() at 15–50 Hz.
 
-``compute_control_command`` stays a pose-spring tracker. ``project()`` is not
-called from ``update_command`` or the RTDE thread.
+``compute_control_command`` stays a pose-spring tracker. Hardware follow runs
+``project()`` in a helper process so the 500 Hz speedJ thread is not stalled
+by a ~7 ms query (parent waits on a queue, which releases the GIL).
 """
 from __future__ import annotations
 
+import multiprocessing as mp
 import threading
 import time
 
@@ -14,6 +16,7 @@ from scipy.spatial.transform import Rotation
 from geodude_teleoperation.ee_viz import motor_from_matrix
 
 RTDE_PERIOD_MS = 2.0
+_HELPER_READY = "ready"
 
 
 class FollowTick:
@@ -42,17 +45,54 @@ def _motor_at(xyz, R):
     return motor_from_matrix(T)
 
 
+def _project_once(vf, xyz, R):
+    proposed = _motor_at(xyz, R)
+    t0 = time.perf_counter()
+    target = vf.project(proposed)
+    project_ms = (time.perf_counter() - t0) * 1000.0
+    if hasattr(vf, "_smoothing"):
+        vf._smoothing = 0.0
+    T = np.asarray(target.to_transformation_matrix(), dtype=float)
+    return T[:3, 3].copy(), T[:3, :3].copy(), float(project_ms)
+
+
+def _project_helper_main(kind, payload, in_q, out_q):
+    """Child process: owns vf.project(). Parent waits on out_q (GIL released)."""
+    if kind == "vf":
+        vf = payload
+    else:
+        import trimesh
+        from geodude_teleoperation.virtual_fixture import OrientationField
+
+        vertices, faces, normals, kwargs = payload
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
+        vf = OrientationField(mesh, **(kwargs or {}))
+    out_q.put(_HELPER_READY)
+    while True:
+        msg = in_q.get()
+        if msg is None:
+            break
+        xyz, R = msg
+        out_q.put(_project_once(vf, xyz, R))
+
+
 class FieldFollow:
     """Stick linear → xyz; ``vf.project()`` on a capped outer rate; freeze on idle."""
 
-    def __init__(self, vf, *, hz=20.0, zero_smoothing_after_first=True):
+    def __init__(self, vf, *, hz=20.0, zero_smoothing_after_first=True,
+                 project_in_process=False, mesh=None):
         hz = float(hz)
         if hz <= 0.0:
             raise ValueError(f"hz must be positive, got {hz}")
         self._vf = vf
         self._min_dt = 1.0 / hz
         self._zero_smoothing_after_first = bool(zero_smoothing_after_first)
+        self._proc = None
+        self._in_q = None
+        self._out_q = None
         self._lock = threading.Lock()
+        if project_in_process:
+            self._start_helper(mesh)
         self._pending = np.zeros(3, dtype=float)
         self._idle = True
         self._xyz = None
@@ -100,6 +140,63 @@ class FieldFollow:
             self._pending[:] = 0.0
             return delta
 
+    def _start_helper(self, mesh):
+        ctx = mp.get_context("spawn")
+        self._in_q = ctx.Queue(maxsize=1)
+        self._out_q = ctx.Queue(maxsize=1)
+        if mesh is not None:
+            kind = "mesh"
+            payload = (
+                np.asarray(mesh.vertices, dtype=np.float64),
+                np.asarray(mesh.faces, dtype=np.int64),
+                np.asarray(mesh.vertex_normals, dtype=np.float64),
+                {},
+            )
+            print("field follow: starting project() helper process (rebuilds field)...",
+                  flush=True)
+        else:
+            kind = "vf"
+            payload = self._vf
+        self._proc = ctx.Process(
+            target=_project_helper_main,
+            args=(kind, payload, self._in_q, self._out_q),
+            daemon=True,
+        )
+        self._proc.start()
+        ready = self._out_q.get(timeout=180.0)
+        if ready != _HELPER_READY:
+            raise RuntimeError(f"project helper failed handshake: {ready!r}")
+        print("field follow: project() helper ready (speedJ will not wait on the query)",
+              flush=True)
+
+    def close(self):
+        if self._proc is None:
+            return
+        try:
+            self._in_q.put(None, timeout=1.0)
+        except Exception:
+            pass
+        self._proc.join(timeout=2.0)
+        if self._proc.is_alive():
+            self._proc.terminate()
+        self._proc = None
+
+    def _project(self, xyz, R):
+        if self._proc is not None:
+            self._in_q.put((
+                np.asarray(xyz, dtype=float).reshape(3).copy(),
+                np.asarray(R, dtype=float).reshape(3, 3).copy(),
+            ))
+            xyz_p, R_p, project_ms = self._out_q.get(timeout=2.0)
+            return _motor_at(xyz_p, R_p), float(project_ms)
+        t0 = time.perf_counter()
+        target = self._vf.project(_motor_at(xyz, R))
+        project_ms = (time.perf_counter() - t0) * 1000.0
+        if self._zero_smoothing_after_first and hasattr(self._vf, "_smoothing"):
+            self._vf._smoothing = 0.0
+            self._zero_smoothing_after_first = False
+        return target, float(project_ms)
+
     def tick(self, now, proposed_motor):
         now = float(now)
         if self._xyz is None:
@@ -115,13 +212,7 @@ class FieldFollow:
         if float(np.linalg.norm(delta)) < 1e-15:
             return FollowTick(idle=False)
         self._xyz = self._xyz + self._R @ delta
-        proposed = _motor_at(self._xyz, self._R)
-        t0 = time.perf_counter()
-        target = self._vf.project(proposed)
-        project_ms = (time.perf_counter() - t0) * 1000.0
-        if self._zero_smoothing_after_first:
-            self._vf._smoothing = 0.0
-            self._zero_smoothing_after_first = False
+        target, project_ms = self._project(self._xyz, self._R)
         T = np.asarray(target.to_transformation_matrix(), dtype=float)
         self._R = T[:3, :3].copy()
         self._xyz = T[:3, 3].copy()

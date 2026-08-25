@@ -348,7 +348,8 @@ def main():
     key_direction = np.asarray(home_ee_motor.get_rotor().to_rotation_matrix())[:, 0]
     vf = OrientationField(object_surface, key_direction=key_direction)
     field_preview = FieldAlignPreview(vf)
-    follow = FieldFollow(vf, hz=args.follow_hz)
+    follow = FieldFollow(
+        vf, hz=args.follow_hz, project_in_process=True, mesh=object_surface)
     follow_log_t = {"t": float("-inf")}
 
     approach_controller = _make_approach_controller(
@@ -455,9 +456,9 @@ def main():
                 tick.would_overrun_rtde or (now - follow_log_t["t"]) >= 1.0):
             follow_log_t["t"] = now
             print(
-                f"field follow: project={tick.project_ms:.2f}ms "
-                f"rtde_2ms_overrun={tick.would_overrun_rtde} "
-                "(project stays off the speedJ thread)",
+                f"field follow: project={tick.project_ms:.2f}ms helper=process "
+                f"query_gt_2ms={tick.would_overrun_rtde} "
+                "(parent waits on a queue; speedJ is not blocked by the query)",
                 flush=True,
             )
         return tick
@@ -887,6 +888,8 @@ def main():
     finally:
         if device is not None:
             device.stop()
+        if follow is not None:
+            follow.close()
         if force_session is not None and force_session.active:
             force_session.exit(settle_s=0.2)
         if contact_controller is not None:
