@@ -14,6 +14,7 @@ from geodude_teleoperation.field_follow import (
     FieldFollow,
     drive_field_follow,
     field_tcp_to_ee,
+    format_follow_lag,
 )
 
 
@@ -129,6 +130,17 @@ class FieldFollowTest(unittest.TestCase):
         self.assertEqual(len(follow.log), 1)
         self.assertIn("project_ms", follow.log[0])
 
+    def test_follow_lag_line_reports_tcp_and_rotation(self):
+        live = np.array([0.0, 0.0, 1.0])
+        cmd = np.array([0.010, 0.0, 1.0])
+        R_live = np.eye(3)
+        R_cmd = np.diag([1.0, -1.0, -1.0])
+        line = format_follow_lag(live, cmd, R_live, R_cmd, True, project_ms=7.1)
+        self.assertIn("tcp_err=10.0mm", line)
+        self.assertIn("R_err=180.0deg", line)
+        self.assertIn("spring=on", line)
+        self.assertIn("project=7.10ms", line)
+
     def test_zeros_smoothing_after_first_project(self):
         vf = FakeVf()
         follow = FieldFollow(vf, hz=50.0, zero_smoothing_after_first=True)
@@ -153,6 +165,82 @@ class FieldFollowTest(unittest.TestCase):
         self.assertTrue(tick.would_overrun_rtde)
         self.assertGreater(tick.project_ms, 2.0)
 
+    def test_pending_applies_even_if_idle_flag_set(self):
+        """Rest must not skip a queued stick step (16 mm freeze + dead stick)."""
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0, max_lead_m=0.02, max_step_m=0.0)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.004, 0.0, 0.0]))
+        follow.set_idle(clear_pending=False)
+        tick = follow.tick(
+            0.0, _motor_at([0.0, 0.0, 1.0]),
+            live_xyz=np.array([0.0, 0.0, 1.0]))
+        self.assertTrue(tick.target is not None)
+        np.testing.assert_allclose(follow.xyz, [0.004, 0.0, 1.0], atol=1e-9)
+
+    def test_rate_limit_with_pending_does_not_freeze(self):
+        """Viser ticks faster than --follow-hz; leftover 0 must not kill the stick."""
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.004, 0.0, 0.0]))
+        ctrl = FakeCtrl()
+        drive_field_follow(
+            follow, ctrl, 0.0, _motor_at([0.0, 0.0, 1.0]),
+            live_xyz=np.array([0.0, 0.0, 1.0]))
+        self.assertTrue(ctrl.active)
+        live = np.array(follow.xyz, copy=True)
+        follow.add_body_linear(np.array([0.004, 0.0, 0.0]))
+        drive_field_follow(
+            follow, ctrl, 0.001, _motor_at([0.0, 0.0, 1.0]),
+            live_xyz=live, stick_quiet=True)
+        self.assertGreater(follow.pending_m, 0.0)
+        self.assertTrue(ctrl.active)
+
+    def test_idle_with_tcp_leftover_keeps_spring_on(self):
+        """Hands-off still closes a small leftover (few mm), not a 3 cm yank."""
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0, max_lead_m=0.02)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.004, 0.0, 0.0]))
+        ctrl = FakeCtrl()
+        drive_field_follow(
+            follow, ctrl, 0.0, _motor_at([0.0, 0.0, 1.0]),
+            live_xyz=np.array([0.0, 0.0, 1.0]))
+        follow.set_idle()
+        drive_field_follow(
+            follow, ctrl, 0.1, _motor_at([0.0, 0.0, 1.0]),
+            live_xyz=np.array([0.0, 0.0, 1.0]))
+        self.assertTrue(ctrl.active)
+        self.assertAlmostEqual(float(follow.xyz[0]), 0.004, places=9)
+
+    def test_idle_leftover_beyond_lead_does_not_yank(self):
+        """A 3 cm leftover must not stay as a spring target (UR C153)."""
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0, max_lead_m=0.005)
+        follow.seed(np.array([0.03, 0.0, 1.0]), np.eye(3))
+        follow.last_target = _motor_at([0.03, 0.0, 1.0])
+        ctrl = FakeCtrl()
+        drive_field_follow(
+            follow, ctrl, 0.0, _motor_at([0.03, 0.0, 1.0]),
+            live_xyz=np.array([0.0, 0.0, 1.0]))
+        self.assertFalse(ctrl.active)
+        np.testing.assert_allclose(follow.xyz, [0.0, 0.0, 1.0], atol=1e-9)
+
+    def test_drain_cap_carries_remainder(self):
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0, max_lead_m=0.05, max_step_m=0.003)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.010, 0.0, 0.0]))
+        follow.tick(
+            0.0, _motor_at([0.0, 0.0, 1.0]),
+            live_xyz=np.array([0.0, 0.0, 1.0]))
+        np.testing.assert_allclose(follow.xyz, [0.003, 0.0, 1.0], atol=1e-9)
+        follow.tick(
+            0.1, _motor_at([0.0, 0.0, 1.0]),
+            live_xyz=np.array([0.0, 0.0, 1.0]))
+        np.testing.assert_allclose(follow.xyz, [0.003, 0.0, 1.0], atol=1e-9)
+
     def test_drive_idle_stops_even_if_orientation_lags(self):
         vf = FakeVf()
         follow = FieldFollow(vf, hz=50.0)
@@ -163,10 +251,11 @@ class FieldFollowTest(unittest.TestCase):
             follow, ctrl, 0.0, _motor_at([0.0, 0.0, 1.0]), live_R=np.eye(3))
         self.assertTrue(ctrl.active)
         follow.set_idle()
+        carrot = np.array(follow.xyz, copy=True)
         R_into = np.diag([1.0, -1.0, -1.0])
         drive_field_follow(
             follow, ctrl, 0.1, _motor_at([0.0, 0.0, 1.0], R_into),
-            live_R=R_into, live_xyz=np.array([0.0, 0.0, 1.0]))
+            live_R=R_into, live_xyz=carrot)
         self.assertFalse(ctrl.active)
 
     def test_idle_rebases_carrot_to_live_without_project(self):
@@ -179,11 +268,12 @@ class FieldFollowTest(unittest.TestCase):
         self.assertAlmostEqual(float(follow.xyz[0]), 0.05, places=9)
         n = len(vf.projects)
         follow.set_idle()
+        carrot = np.array(follow.xyz, copy=True)
         drive_field_follow(
             follow, ctrl, 0.1, _motor_at([0.0, 0.0, 1.0]),
-            live_xyz=np.array([0.01, 0.0, 1.0]))
+            live_xyz=carrot)
         self.assertEqual(len(vf.projects), n)
-        np.testing.assert_allclose(follow.xyz, [0.01, 0.0, 1.0], atol=1e-9)
+        np.testing.assert_allclose(follow.xyz, carrot, atol=1e-9)
         self.assertFalse(ctrl.active)
 
     def test_drive_does_not_project_on_idle_settle(self):
@@ -198,6 +288,27 @@ class FieldFollowTest(unittest.TestCase):
         drive_field_follow(
             follow, ctrl, 0.1, _motor_at([0.0, 0.0, 1.0]), live_R=np.eye(3))
         self.assertEqual(len(vf.projects), n)
+
+    def test_stick_step_is_from_live_tcp_not_accumulated_carrot(self):
+        """Like free teleop: target = live + R @ delta, so lag cannot compound."""
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        follow.tick(
+            0.0, _motor_at([0.0, 0.0, 1.0]),
+            live_xyz=np.array([0.0, 0.0, 1.0]))
+        np.testing.assert_allclose(follow.xyz, [0.01, 0.0, 1.0], atol=1e-9)
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        follow.tick(
+            0.1, _motor_at([0.0, 0.0, 1.0]),
+            live_xyz=np.array([0.0, 0.0, 1.0]))
+        np.testing.assert_allclose(follow.xyz, [0.01, 0.0, 1.0], atol=1e-9)
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        follow.tick(
+            0.2, _motor_at([0.0, 0.0, 1.0]),
+            live_xyz=np.array([0.005, 0.0, 1.0]))
+        np.testing.assert_allclose(follow.xyz, [0.015, 0.0, 1.0], atol=1e-9)
 
     def test_lead_is_capped_to_live_tcp(self):
         vf = FakeVf()
@@ -227,18 +338,30 @@ class FieldFollowTest(unittest.TestCase):
         z = follow.last_target.to_transformation_matrix()[:3, 2]
         self.assertGreater(float(z[2]), 0.9)
 
-    def test_drive_skips_huge_ee_jump(self):
+    def test_mapped_ee_lever_does_not_kill_tracker(self):
+        """Chamfer flange lever from field R vs live R can exceed 8 cm EE.
+
+        That skip used to freeze speedJ, so the stick could not recover.
+        """
         vf = FakeVf()
         follow = FieldFollow(vf, hz=50.0)
         follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
         follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
         ctrl = FakeCtrl()
+
+        def map_target(motor):
+            T = np.asarray(motor.to_transformation_matrix(), dtype=float)
+            T = T.copy()
+            T[:3, 3] = T[:3, 3] + np.array([0.20, 0.0, 0.0])
+            return motor_from_matrix(T)
+
         drive_field_follow(
             follow, ctrl, 0.0, _motor_at([0.0, 0.0, 1.0]),
-            live_ee_xyz=np.array([0.0, 0.0, 1.0]), max_ee_jump_m=0.005)
-        self.assertFalse(ctrl.active)
-        np.testing.assert_allclose(follow.xyz, [0.0, 0.0, 1.0], atol=1e-9)
-        self.assertTrue(follow.idle)
+            live_xyz=np.array([0.0, 0.0, 1.0]),
+            live_ee_xyz=np.array([0.0, 0.0, 1.0]),
+            map_target=map_target, max_ee_jump_m=0.08)
+        self.assertTrue(ctrl.active)
+        self.assertIsNotNone(ctrl._obj.target)
 
     def test_invalid_project_rotation_is_reverted(self):
         class BoomVf:

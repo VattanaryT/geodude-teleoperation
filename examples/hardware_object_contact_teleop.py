@@ -55,6 +55,7 @@ from geodude_teleoperation.field_follow import (
     FieldFollow,
     drive_field_follow,
     field_tcp_to_ee,
+    format_follow_lag,
 )
 from geodude_teleoperation.force_mode_contact import (
     ForceModeContactSession,
@@ -79,22 +80,30 @@ MODEL = str(ROOT / "assets" / "robots" / "geodude" / "geodude.yaml")
 DEFAULT_HARDWARE_CONFIG = str(ROOT / "assets" / "robots" / "geodude" / "geodude_hardware.yaml")
 
 DEFAULT_VENTION_HEIGHT = 0.51
-STICK_LINEAR_SCALE = 0.005
+STICK_LINEAR_SCALE = 0.0015
 STICK_ANGULAR_SCALE = 0.05
 
 
 def stick_is_idle(twist):
     """Hands-off check using the same scales as SpaceMouseTeleop in this example.
 
-    ``is_idle_twist`` defaults are linear_scale=0.01. This example uses 0.005, so
-    a 30% Z lift is 0.0015 m/sample — idle under the default cap (0.002) and
-    not idle under the device cap (0.001). That made lift-up look dead.
+    ``is_idle_twist`` defaults are linear_scale=0.01. Idle cap uses this
+    example's stick scale so a 30% Z lift is not treated as rest.
     """
     return is_idle_twist(
         twist,
         linear_scale=STICK_LINEAR_SCALE,
         angular_scale=STICK_ANGULAR_SCALE,
     )
+
+
+def stick_has_linear(twist):
+    """True if the device already passed its deadzone and sent a linear step.
+
+    Field-follow idle uses a 20% cap at this stick scale, which ate slow creep.
+    """
+    linear = np.asarray(twist.get_linear(), dtype=float).reshape(3)
+    return float(np.linalg.norm(linear)) > 1e-12
 
 
 def _dashboard_bring_up(ip: str) -> None:
@@ -280,6 +289,10 @@ def build_arg_parser():
     parser.add_argument(
         "--right-vention-height", type=float, default=None,
         help="override --vention-height for the right rail only")
+    parser.add_argument(
+        "--no-speedj-plot", dest="speedj_plot", action="store_false",
+        help="do not open the live speedJ qdot / qddot / Δt plot")
+    parser.set_defaults(speedj_plot=True)
     return parser
 
 
@@ -365,8 +378,13 @@ def main():
     vf = OrientationField(object_surface, key_direction=key_direction)
     field_preview = FieldAlignPreview(vf)
     follow = FieldFollow(
-        vf, hz=args.follow_hz, project_in_process=True, mesh=object_surface)
+        vf, hz=args.follow_hz, project_in_process=True, mesh=object_surface,
+        max_lead_m=0.005, max_step_m=0.004)
     follow_log_t = {"t": float("-inf")}
+    stick = {
+        "t": float("-inf"), "t_nz": float("-inf"),
+        "lin": np.zeros(3), "n": 0, "nz": 0,
+    }
 
     approach_controller = _make_approach_controller(
         interface, task_space, home_ee_motor)
@@ -421,6 +439,7 @@ def main():
     mode = {"active": "approach"}
     handoff_busy = {"busy": False}
     device = None
+    speedj_trace = None
     viz = None
     robot_viz = None
     eeviz = None
@@ -464,20 +483,48 @@ def main():
         T_prop = np.eye(4)
         T_prop[:3, 3] = follow.xyz
         now = time.monotonic()
+        lin_now = np.asarray(stick["lin"], dtype=float).reshape(3)
+        quiet = (
+            (now - float(stick["t_nz"])) > 0.25
+            and float(np.linalg.norm(lin_now)) <= 1e-12)
         tick = drive_field_follow(
             follow, approach_controller, now, motor_from_matrix(T_prop),
             live_xyz=live_tcp_xyz_from_flange(T_flange_viz),
             live_ee_xyz=T_ee_m[:3, 3],
-            map_target=map_target)
-        if tick.project_ms is not None and (
-                tick.would_overrun_rtde or (now - follow_log_t["t"]) >= 1.0):
+            map_target=map_target,
+            stick_quiet=quiet)
+        if not approach_controller._input_active:
+            approach_controller.hold_live_pose()
+        if (now - follow_log_t["t"]) >= 1.0:
             follow_log_t["t"] = now
+            p_live = live_tcp_xyz_from_flange(T_flange_viz)
+            p_cmd = follow.xyz if follow.xyz is not None else p_live
+            R_cmd = T_flange_viz[:3, :3]
+            if follow.last_target is not None:
+                T_cmd = matrix_from_motor(follow.last_target)
+                R_cmd = T_cmd[:3, :3]
+            lin = np.asarray(stick["lin"], dtype=float).reshape(3)
+            age_ms = (
+                1e9 if not np.isfinite(stick["t"])
+                else (now - float(stick["t"])) * 1000.0)
             print(
-                f"field follow: project={tick.project_ms:.2f}ms helper=process "
-                f"query_gt_2ms={tick.would_overrun_rtde} "
-                "(parent waits on a queue; speedJ is not blocked by the query)",
+                format_follow_lag(
+                    p_live, p_cmd, T_flange_viz[:3, :3], R_cmd,
+                    approach_controller._input_active,
+                    project_ms=tick.project_ms),
                 flush=True,
             )
+            print(
+                "spacemouse: "
+                f"|lin|={1000.0 * float(np.linalg.norm(lin)):.2f}mm "
+                f"lin=[{lin[0]:.5f},{lin[1]:.5f},{lin[2]:.5f}] "
+                f"n={int(stick['n'])} nz={int(stick['nz'])} "
+                f"age={age_ms:.0f}ms follow_idle={follow.idle} "
+                f"quiet={quiet} pending={1000.0 * follow.pending_m:.2f}mm",
+                flush=True,
+            )
+            stick["n"] = 0
+            stick["nz"] = 0
         return tick
 
     def start_align_keys():
@@ -542,9 +589,9 @@ def main():
                 p_tcp = live_tcp_xyz_from_flange(T_flange)
                 follow.seed(p_tcp, vf.approach_basis_at(p_tcp))
                 print(
-                    f"field follow: stick linear at {args.follow_hz:.0f} Hz → "
-                    "project() → pose spring. Angular ignored. Idle freezes the "
-                    "last field target (no project at rest).",
+                    f"field follow: live TCP + stick linear at {args.follow_hz:.0f} Hz → "
+                    "project() → pose spring. Angular ignored. Idle freezes "
+                    "(no project at rest).",
                     flush=True,
                 )
         return cmd
@@ -637,6 +684,15 @@ def main():
         approach_controller.update_command(twist)
 
     def on_twist(twist):
+        lin = np.asarray(twist.get_linear(), dtype=float).reshape(3)
+        now = time.monotonic()
+        stick["t"] = now
+        stick["lin"] = lin
+        stick["n"] = int(stick["n"]) + 1
+        approach_controller.set_stick_linear(lin)
+        if float(np.linalg.norm(lin)) > 1e-12:
+            stick["t_nz"] = now
+            stick["nz"] = int(stick["nz"]) + 1
         if handoff_busy["busy"]:
             return
         if align is not None and not align.finished:
@@ -645,11 +701,8 @@ def main():
                     twist, sim_probe=sim_probe["p"], on_hardware=lambda _: None)
             return
         if mode["active"] == "approach":
-            if stick_is_idle(twist):
-                follow.set_idle()
-            else:
-                follow.add_body_linear(
-                    np.asarray(twist.get_linear(), dtype=float).reshape(3))
+            if stick_has_linear(twist):
+                follow.add_body_linear(lin)
             return
         route_spacemouse_twist(
             twist, sim_probe=None, on_hardware=_hardware_twist)
@@ -699,16 +752,22 @@ def main():
             print("-> approach mode: holding live pose", flush=True)
 
     def start_control_and_device():
-        nonlocal device
+        nonlocal device, speedj_trace
         # Start frozen: no speedJ until a non-idle SpaceMouse reading arrives.
+        if args.speedj_plot and speedj_trace is None:
+            from geodude_teleoperation.speedj_plot import SpeedJTrace
+            speedj_trace = SpeedJTrace()
+            approach_controller.set_command_trace(speedj_trace.record)
+            speedj_trace.start()
         approach_controller.set_input_active(False)
         approach_controller.hold_live_pose()
         interface.control(approach_controller, blocking=False)
         device = KeyboardTeleop(
             step=0.0025) if args.device == "keyboard" else SpaceMouseTeleop(
-                # Slightly finer than default 0.01: with twist_linear_scale=1, full
-                # deflection ~= 0.5 m/s command rate (was ~1 m/s with 2x*0.01@50Hz).
-                linear_scale=STICK_LINEAR_SCALE, angular_scale=STICK_ANGULAR_SCALE)
+                # Slow enough that the 20 Hz field carrot stays inside the 2 cm
+                # lead and speedJ can catch it (full stick ~7.5 cm/s at 50 Hz).
+                linear_scale=STICK_LINEAR_SCALE, angular_scale=STICK_ANGULAR_SCALE,
+                deadzone=0.02)
         if args.device == "keyboard":
             device.start(on_twist, on_button, on_key=on_align_key)
         else:
@@ -723,7 +782,7 @@ def main():
             )
         else:
             print(
-                "free-space scale: SpaceMouse lin=0.005 ang=0.05, "
+                "free-space scale: SpaceMouse lin=0.0015 ang=0.05, "
                 "admittance K=2000 D=20 dt=0.001 max|qdot|=0.8, twist_linear_scale=1 "
                 "(no VF project in approach)",
                 flush=True,
@@ -911,6 +970,8 @@ def main():
     finally:
         if device is not None:
             device.stop()
+        if speedj_trace is not None:
+            speedj_trace.stop()
         if follow is not None:
             follow.close()
         if force_session is not None and force_session.active:

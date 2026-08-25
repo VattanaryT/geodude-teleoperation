@@ -71,38 +71,42 @@ class SpaceMouseTeleop:
             previous_buttons = None
 
             while self._running.is_set():
-                state = device.read()
-
-                # Drain any backlog: keep reading while the HID queue still has new reports
-                # waiting (state.t only advances inside pyspacemouse's _process(), i.e. only
-                # when read() actually consumed new data -- not just returned the cached
-                # state), so on_twist always acts on the freshest report rather than a
-                # queued-but-stale one. Without this, if the device emits reports faster than
-                # this loop polls, a backlog can build up and playback lags behind real-time --
-                # visible as the controlled object still moving for a while after the user
-                # releases the device. Bounded (not `while True`) so a device streaming faster
-                # than we can ever fully drain can't starve this loop of reaching on_twist/sleep.
-                for _ in range(64):
-                    previous_t = state.t
+                try:
                     state = device.read()
-                    if state.t == previous_t:
-                        break
 
-                axes = np.array([-state.x, state.y, -state.z, state.yaw, -state.roll, state.pitch])
-                axes = np.where(np.abs(axes) < self._deadzone, 0.0, axes)
+                    # Drain any backlog: keep reading while the HID queue still has new reports
+                    # waiting (state.t only advances inside pyspacemouse's _process(), i.e. only
+                    # when read() actually consumed new data -- not just returned the cached
+                    # state), so on_twist always acts on the freshest report rather than a
+                    # queued-but-stale one. Without this, if the device emits reports faster than
+                    # this loop polls, a backlog can build up and playback lags behind real-time --
+                    # visible as the controlled object still moving for a while after the user
+                    # releases the device. Bounded (not `while True`) so a device streaming faster
+                    # than we can ever fully drain can't starve this loop of reaching on_twist/sleep.
+                    for _ in range(64):
+                        previous_t = state.t
+                        state = device.read()
+                        if state.t == previous_t:
+                            break
 
-                linear = axes[:3] * self._linear_scale
-                angular = axes[3:] * self._angular_scale
-                # Twist blade order is [e12, e13, e23, e1i, e2i, e3i] = [angular, linear].
-                twist = gafropy.Twist.from_array(np.concatenate([angular, linear]))
-                self._on_twist(twist)
+                    axes = np.array([-state.x, state.y, -state.z, state.yaw, -state.roll, state.pitch])
+                    axes = np.where(np.abs(axes) < self._deadzone, 0.0, axes)
 
-                if self._on_button is not None:
-                    buttons = tuple(state.buttons)
-                    if previous_buttons is not None:
-                        for index, (prev, cur) in enumerate(zip(previous_buttons, buttons)):
-                            if cur and not prev:
-                                self._on_button(index)
-                    previous_buttons = buttons
+                    linear = axes[:3] * self._linear_scale
+                    angular = axes[3:] * self._angular_scale
+                    # Twist blade order is [e12, e13, e23, e1i, e2i, e3i] = [angular, linear].
+                    twist = gafropy.Twist.from_array(np.concatenate([angular, linear]))
+                    self._on_twist(twist)
 
-                time.sleep(self._period)
+                    if self._on_button is not None:
+                        buttons = tuple(state.buttons)
+                        if previous_buttons is not None:
+                            for index, (prev, cur) in enumerate(zip(previous_buttons, buttons)):
+                                if cur and not prev:
+                                    self._on_button(index)
+                        previous_buttons = buttons
+
+                    time.sleep(self._period)
+                except Exception as exc:
+                    print(f"spacemouse: read failed ({exc}); retrying", flush=True)
+                    time.sleep(self._period)

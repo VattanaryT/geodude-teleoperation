@@ -1,8 +1,10 @@
-"""Outer-loop field follow: accumulate stick linear, project() at 15–50 Hz.
+"""Outer-loop field follow: live TCP + stick step, then project() at 15–50 Hz.
 
-``compute_control_command`` stays a pose-spring tracker. Hardware follow runs
-``project()`` in a helper process so the 500 Hz speedJ thread is not stalled
-by a ~7 ms query (parent waits on a queue, which releases the GIL).
+Like free-space teleop, the carrot is a small increment from the live tip so
+lag cannot compound. ``compute_control_command`` stays a pose-spring tracker.
+Hardware follow runs ``project()`` in a helper process so the 500 Hz speedJ
+thread is not stalled by a ~7 ms query (parent waits on a queue, which
+releases the GIL).
 """
 from __future__ import annotations
 
@@ -85,6 +87,8 @@ def _project_once(vf, xyz, R):
 
 def _project_helper_main(kind, payload, in_q, out_q):
     """Child process: owns vf.project(). Parent waits on out_q (GIL released)."""
+    import signal
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     if kind == "vf":
         vf = payload
     else:
@@ -104,11 +108,11 @@ def _project_helper_main(kind, payload, in_q, out_q):
 
 
 class FieldFollow:
-    """Stick linear → xyz; ``vf.project()`` on a capped outer rate; freeze on idle."""
+    """Stick linear from live TCP; ``vf.project()`` on a capped outer rate; freeze on idle."""
 
     def __init__(self, vf, *, hz=20.0, zero_smoothing_after_first=True,
                  project_in_process=False, mesh=None, max_lead_m=0.02,
-                 max_dR_rad=0.12):
+                 max_dR_rad=0.12, max_step_m=0.0):
         hz = float(hz)
         if hz <= 0.0:
             raise ValueError(f"hz must be positive, got {hz}")
@@ -116,6 +120,7 @@ class FieldFollow:
         self._min_dt = 1.0 / hz
         self._max_lead_m = float(max_lead_m)
         self._max_dR_rad = float(max_dR_rad)
+        self._max_step_m = float(max_step_m)
         self._zero_smoothing_after_first = bool(zero_smoothing_after_first)
         self._proc = None
         self._in_q = None
@@ -142,6 +147,11 @@ class FieldFollow:
             return None
         return np.array(self._xyz, copy=True)
 
+    @property
+    def pending_m(self):
+        with self._lock:
+            return float(np.linalg.norm(self._pending))
+
     def seed(self, xyz, R=None):
         with self._lock:
             self._xyz = np.asarray(xyz, dtype=float).reshape(3).copy()
@@ -157,18 +167,34 @@ class FieldFollow:
             self._pending = self._pending + np.asarray(linear, dtype=float).reshape(3)
             self._idle = False
 
-    def set_idle(self, xyz=None):
+    def set_idle(self, xyz=None, *, clear_pending=True):
         with self._lock:
-            self._pending[:] = 0.0
+            if clear_pending:
+                self._pending[:] = 0.0
             self._idle = True
             if xyz is not None:
                 self._xyz = np.asarray(xyz, dtype=float).reshape(3).copy()
                 self.last_target = _motor_at(self._xyz, self._R)
 
+    def snap_tcp(self, xyz, R=None):
+        """Rebase the carrot to ``xyz`` without blocking the next stick tick."""
+        with self._lock:
+            self._xyz = np.asarray(xyz, dtype=float).reshape(3).copy()
+            if R is not None:
+                self._R = np.asarray(R, dtype=float).reshape(3, 3).copy()
+            self.last_target = _motor_at(self._xyz, self._R)
+            self._idle = False
+
     def _drain(self):
         with self._lock:
             delta = self._pending.copy()
-            self._pending[:] = 0.0
+            n = float(np.linalg.norm(delta))
+            cap = self._max_step_m
+            if cap > 0.0 and n > cap:
+                delta = delta * (cap / n)
+                self._pending = self._pending - delta
+            else:
+                self._pending[:] = 0.0
             return delta
 
     def _start_helper(self, mesh):
@@ -256,7 +282,11 @@ class FieldFollow:
             self._xyz = T[:3, 3].copy()
             self._R = T[:3, :3].copy()
         if self._idle:
-            return FollowTick(idle=True)
+            with self._lock:
+                pending_n = float(np.linalg.norm(self._pending))
+            if pending_n < 1e-15:
+                return FollowTick(idle=True)
+            self._idle = False
         if np.isfinite(self._last_t) and (now - self._last_t) < self._min_dt:
             return FollowTick(idle=False)
         delta = self._drain()
@@ -268,7 +298,10 @@ class FieldFollow:
             self._R.copy(),
             self.last_target,
         )
-        self._xyz = self._xyz + self._R @ delta
+        base = self._xyz
+        if live_xyz is not None and _is_finite_xyz(live_xyz):
+            base = np.asarray(live_xyz, dtype=float).reshape(3)
+        self._xyz = base + self._R @ delta
         self._clamp_lead(live_xyz)
         target, project_ms = self._project(self._xyz, self._R)
         T = np.asarray(target.to_transformation_matrix(), dtype=float)
@@ -303,15 +336,46 @@ class FieldFollow:
             idle=False, would_overrun_rtde=overrun)
 
 
+def format_follow_lag(live_tcp, cmd_tcp, R_live, R_cmd, spring_on, project_ms=None):
+    """One-line orange-vs-live lag for the hardware follow print."""
+    live = np.asarray(live_tcp, dtype=float).reshape(3)
+    cmd = np.asarray(cmd_tcp, dtype=float).reshape(3)
+    tcp_mm = float(np.linalg.norm(cmd - live) * 1000.0)
+    r_deg = float(orientation_error_rad(R_live, R_cmd) * 180.0 / np.pi)
+    spring = "on" if spring_on else "off"
+    line = (
+        f"field follow: tcp_err={tcp_mm:.1f}mm "
+        f"R_err={r_deg:.1f}deg spring={spring}")
+    if project_ms is not None:
+        line += f" project={float(project_ms):.2f}ms"
+    return line
+
+
+CATCHUP_TCP_M = 0.003
+
+
+def _leftover_tcp_m(follow, live_xyz):
+    if live_xyz is None:
+        return 0.0
+    live = np.asarray(live_xyz, dtype=float).reshape(3)
+    if follow.last_target is not None:
+        cmd = np.asarray(
+            follow.last_target.to_transformation_matrix(), dtype=float)[:3, 3]
+        return float(np.linalg.norm(cmd - live))
+    if follow.xyz is None:
+        return 0.0
+    return float(np.linalg.norm(np.asarray(follow.xyz, dtype=float).reshape(3) - live))
+
+
 def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
                        err_rad=0.05, map_target=None, live_xyz=None,
-                       live_ee_xyz=None, max_ee_jump_m=0.08):
+                       live_ee_xyz=None, max_ee_jump_m=0.08, stick_quiet=True):
     """Apply a follow tick to the pose spring.
 
-    Idle stops the tracker immediately and rebases the carrot to ``live_xyz``
-    so a far-ahead field target cannot keep speedJ running after hands-off.
+    Each stick tick is live TCP + body linear, then project. Idle with leftover
+    TCP error keeps the spring on so the arm can catch the last command.
     """
-    del live_R, err_rad
+    del live_R, err_rad, max_ee_jump_m
     tick = follow.tick(now, proposed_motor, live_xyz=live_xyz)
     target = tick.target
     if target is not None and map_target is not None:
@@ -319,15 +383,17 @@ def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
     if target is not None:
         if live_ee_xyz is not None:
             T = np.asarray(target.to_transformation_matrix(), dtype=float)
-            jump = float(np.linalg.norm(T[:3, 3] - np.asarray(live_ee_xyz, dtype=float).reshape(3)))
-            if jump > float(max_ee_jump_m) or not np.isfinite(jump):
+            jump = float(np.linalg.norm(
+                T[:3, 3] - np.asarray(live_ee_xyz, dtype=float).reshape(3)))
+            # Finite EE lag is the chamfer lever from field R vs live wrist.
+            # Skipping it froze speedJ and the stick could not recover.
+            if not np.isfinite(jump):
                 follow.revert_tick()
                 if live_xyz is not None:
                     follow.set_idle(live_xyz)
                 controller.set_input_active(False)
                 print(
-                    "\033[93mfield follow: skip set_target, EE jump "
-                    f"{jump:.3f}m (cap {float(max_ee_jump_m):.3f}m); "
+                    "\033[93mfield follow: skip set_target, non-finite EE jump; "
                     "follow state reverted. Lift off, then continue.\033[0m",
                     flush=True,
                 )
@@ -335,9 +401,31 @@ def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
         controller.get_objective().set_target(target)
         controller.set_input_active(True)
         return tick
-    if follow.idle:
+    leftover = _leftover_tcp_m(follow, live_xyz)
+    max_lead = float(getattr(follow, "_max_lead_m", 0.02))
+    pending_n = float(getattr(follow, "pending_m", 0.0))
+    if leftover > max(max_lead, CATCHUP_TCP_M) + 1e-12:
         if live_xyz is not None:
-            follow.set_idle(live_xyz)
+            R = follow._R
+            follow.snap_tcp(live_xyz, R)
+        if follow.last_target is not None:
+            frozen = follow.last_target
+            if map_target is not None:
+                frozen = map_target(frozen)
+            controller.get_objective().set_target(frozen)
+        controller.set_input_active(False)
+        return tick
+    if leftover > CATCHUP_TCP_M:
+        if follow.last_target is not None:
+            frozen = follow.last_target
+            if map_target is not None:
+                frozen = map_target(frozen)
+            controller.get_objective().set_target(frozen)
+        controller.set_input_active(True)
+        return tick
+    if stick_quiet and pending_n < 1e-15:
+        if live_xyz is not None:
+            follow.snap_tcp(live_xyz)
         if follow.last_target is not None:
             frozen = follow.last_target
             if map_target is not None:

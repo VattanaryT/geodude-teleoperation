@@ -156,6 +156,16 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         self._slide_twist = np.zeros(6)
         self._max_slide_mps = 0.015
         self._max_slide_radps = 0.12
+        self._command_trace = None
+        self._stick_linear = np.zeros(3)
+
+    def set_command_trace(self, fn):
+        """Optional callback(qdot, measured=, spring=, stick=) after each speedJ command."""
+        self._command_trace = fn
+
+    def set_stick_linear(self, linear):
+        """Latest SpaceMouse linear (m) for the command plot. Does not drive speedJ."""
+        self._stick_linear = np.asarray(linear, dtype=float).reshape(3).copy()
 
     def set_input_active(self, active: bool) -> None:
         self._input_active = bool(active)
@@ -198,6 +208,16 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         jacobian = np.asarray(task_space_state.get_jacobian())
         n_joints = int(jacobian.shape[1])
         vz = float(self._tool_z_velocity)
+        velocity = np.asarray(robot_state.get_velocity(), dtype=float).reshape(-1)
+        # robot_state here is the *control-group* slice (len 7 for one arm+vention),
+        # not the full bimanual q. get_joint_indices() are system-global and must not
+        # be used to index this vector (that crashed with index 15 on size 7).
+        if velocity.size == n_joints:
+            qdot_meas = velocity
+        elif velocity.size > n_joints:
+            qdot_meas = velocity[-n_joints:]
+        else:
+            qdot_meas = None
 
         if self._z_compliant:
             # DualLoop merge: stick ⊥n + ω as a capped Cartesian velocity, force owns Z.
@@ -209,21 +229,14 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         elif not self._input_active:
             qdot = np.zeros(n_joints)
         else:
+            if qdot_meas is None:
+                raise RuntimeError(
+                    f"robot_state velocity length {velocity.size} < task joints {n_joints}")
+            qdot_task = qdot_meas
             error = np.asarray(objective_state.get_error())
             error_derivative = np.asarray(objective_state.get_error_derivative())
             jacobian_derivative = np.asarray(
                 task_space_state.get_jacobian_derivative())
-            velocity = np.asarray(robot_state.get_velocity(), dtype=float).reshape(-1)
-            # robot_state here is the *control-group* slice (len 7 for one arm+vention),
-            # not the full bimanual q. get_joint_indices() are system-global and must not
-            # be used to index this vector (that crashed with index 15 on size 7).
-            if velocity.size == n_joints:
-                qdot_task = velocity
-            elif velocity.size > n_joints:
-                qdot_task = velocity[-n_joints:]
-            else:
-                raise RuntimeError(
-                    f"robot_state velocity length {velocity.size} < task joints {n_joints}")
 
             wrench_net = -self._stiffness @ error - self._damping @ error_derivative
             task_acceleration = np.linalg.solve(self._inertia, wrench_net)
@@ -245,6 +258,10 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         if speed > self._max_joint_velocity:
             qdot = qdot * (self._max_joint_velocity / speed)
 
+        if self._command_trace is not None:
+            self._command_trace(
+                qdot, measured=qdot_meas, spring=self._input_active,
+                stick=self._stick_linear)
         return qdot
 
     def set_virtual_fixture(self, vf):

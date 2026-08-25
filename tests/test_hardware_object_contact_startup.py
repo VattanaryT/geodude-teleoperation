@@ -41,6 +41,14 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         self.assertTrue(mod.is_idle_twist(twist))
         self.assertFalse(mod.stick_is_idle(twist))
 
+    def test_slow_creep_still_has_linear_for_follow(self):
+        """10% deflection is idle under the rest cap, but must still field-follow."""
+        mod = _load_example()
+        z = 0.1 * mod.STICK_LINEAR_SCALE
+        twist = ga.Twist.from_array(np.array([0.0, 0.0, 0.0, 0.0, 0.0, z]))
+        self.assertTrue(mod.stick_is_idle(twist))
+        self.assertTrue(mod.stick_has_linear(twist))
+
     def test_nonzero_twist_is_not_idle(self):
         mod = _load_example()
         twist = ga.Twist.from_array(np.array([0.0, 0.0, 0.0, 0.01, 0.0, 0.0]))
@@ -135,6 +143,13 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         mod = _load_example()
         args = mod.build_arg_parser().parse_args([])
         self.assertEqual(args.contact_backend, "speedj")
+
+    def test_default_speedj_plot_is_on(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args([])
+        self.assertTrue(args.speedj_plot)
+        args = mod.build_arg_parser().parse_args(["--no-speedj-plot"])
+        self.assertFalse(args.speedj_plot)
 
     def test_contact_pid_force_limit_covers_target(self):
         from geodude_teleoperation.controller import contact_pid_force_limit

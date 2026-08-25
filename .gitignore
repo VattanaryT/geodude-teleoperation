@@ -6,3 +6,6 @@ __pycache__/
 
 # Full laser scan backup (exceeds GitHub 100MB limit); keep local only
 assets/laser_profilometer/merged_full.ply
+
+# speedJ session dumps (png + npz)
+speedj_logs/
