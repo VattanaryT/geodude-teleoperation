@@ -11,11 +11,13 @@ from scipy.sparse import csc_matrix
 from scipy.sparse.linalg import spsolve
 
 
-def end_cap_source_sink(vertices, fraction=0.06, swap=False, flow="length"):
+def end_cap_source_sink(vertices, fraction=0.06, swap=False, flow="width"):
     """PCA end-cap (length) or long-side (width) source/sink bands.
 
-    Axis 0 ≈ length, 1 ≈ width, 2 ≈ thickness. ``flow='length'`` uses axis 0.
-    Lowest ``fraction`` of that projection is the sink band; highest is source.
+    Axis 0 ≈ length, 1 ≈ width, 2 ≈ thickness.
+    ``flow='length'`` bands the short end-caps (project onto axis 0).
+    ``flow='width'`` (default) bands the long sides (axis 1), so the
+    source/sink stripes run along the part's length.
     """
     if not (0.0 < float(fraction) < 0.5):
         raise ValueError(f"end-line-fraction must be in (0, 0.5), got {fraction}")
@@ -91,9 +93,13 @@ def _face_gradients(vertices, faces, u):
     return grad, area
 
 
-def length_tangents(mesh, fraction=0.06, swap=False, flow="length",
+def length_tangents(mesh, fraction=0.06, swap=False, flow="width",
                     diffusion_scalar=5000.0):
-    """Heat from the source end-cap; ∇u is the along-length tangent."""
+    """Heat from the source band; ∇u is the in-plane tangent.
+
+    Default ``flow='width'`` puts BCs on the long sides so they run along
+    the part; ∇u then crosses the width.
+    """
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
     faces = np.asarray(mesh.faces, dtype=np.int32)
     normals = np.asarray(mesh.vertex_normals, dtype=np.float64)

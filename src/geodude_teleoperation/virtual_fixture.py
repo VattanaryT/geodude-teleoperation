@@ -200,9 +200,11 @@ def boundary_sample_indices(n_vertices, num_boundary_samples=None,
 class OrientationField:
     """Ambient orientation field around a mesh's surface, via gafropy.RotorFieldDiffusion.
 
-    Surface frames follow the old stringer path: PCA end-cap heat (``flow=length``),
-    ``x = ∇u`` along the long axis, ``z`` = surface normal, ``y = z × x``. That
-    boundary rotor field is extended into ambient R^3 via RotorFieldDiffusion
+    Surface frames follow the old stringer path: PCA end-cap heat,
+    ``x = ∇u``, ``z`` = surface normal, ``y = z × x``. Default ``flow='width'``
+    puts source/sink on the long sides (stripes along the part).
+    ``flow='length'`` uses the short end-caps instead. That boundary rotor
+    field is extended into ambient R^3 via RotorFieldDiffusion
     (startup only; queries are deterministic Frechet means, not Walk-on-Spheres).
 
     Query cost is capped: reconstructed clouds default to
@@ -215,7 +217,7 @@ class OrientationField:
     def __init__(self, mesh, key_direction=None, source_vertex=None, t_surface=None,
                  t_spatial=None, num_boundary_samples=None, max_iterations=50,
                  smoothing=0.75, end_line_fraction=0.06, swap_end_lines=False,
-                 diffusion_scalar=5000.0):
+                 diffusion_scalar=5000.0, flow="width"):
         del key_direction, source_vertex, t_surface
         vertices = np.asarray(mesh.vertices, dtype=np.float64)
         normals = np.asarray(mesh.vertex_normals, dtype=np.float64)
@@ -224,7 +226,7 @@ class OrientationField:
 
         tangent, sink, source, _axis = length_tangents(
             mesh, fraction=end_line_fraction, swap=swap_end_lines,
-            diffusion_scalar=diffusion_scalar)
+            flow=flow, diffusion_scalar=diffusion_scalar)
         self.sink_points = vertices[sink]
         self.source_points = vertices[source]
 

@@ -24,12 +24,24 @@ class EndCapBandTest(unittest.TestCase):
             rng.uniform(-0.02, 0.02, 400),
             rng.uniform(-0.005, 0.005, 400),
         ])
-        sink, source, axis = end_cap_source_sink(pts, fraction=0.06)
+        sink, source, axis = end_cap_source_sink(pts, fraction=0.06, flow="length")
         self.assertGreater(abs(axis[0]), 0.9)
         self.assertGreater(len(sink), 0)
         self.assertGreater(len(source), 0)
         self.assertGreater(
             abs(float(pts[source, 0].mean()) - float(pts[sink, 0].mean())), 0.15)
+
+    def test_default_bands_run_along_the_long_edges(self):
+        rng = np.random.default_rng(1)
+        pts = np.column_stack([
+            rng.uniform(-0.2, 0.2, 800),
+            rng.uniform(-0.05, 0.05, 800),
+            rng.uniform(-0.005, 0.005, 800),
+        ])
+        sink, source, axis = end_cap_source_sink(pts)
+        self.assertGreater(abs(axis[1]), 0.9)
+        self.assertGreater(float(np.ptp(pts[source, 0])), 0.25)
+        self.assertGreater(float(np.ptp(pts[sink, 0])), 0.25)
 
     def test_swap_end_lines_flips_source_and_sink(self):
         pts = np.column_stack([
@@ -37,8 +49,8 @@ class EndCapBandTest(unittest.TestCase):
             np.zeros(50),
             np.zeros(50),
         ])
-        sink, source, _ = end_cap_source_sink(pts, fraction=0.1)
-        sink_s, source_s, _ = end_cap_source_sink(pts, fraction=0.1, swap=True)
+        sink, source, _ = end_cap_source_sink(pts, fraction=0.1, flow="length")
+        sink_s, source_s, _ = end_cap_source_sink(pts, fraction=0.1, swap=True, flow="length")
         np.testing.assert_array_equal(sink_s, source)
         np.testing.assert_array_equal(source_s, sink)
 
@@ -46,7 +58,7 @@ class EndCapBandTest(unittest.TestCase):
 class LengthTangentTest(unittest.TestCase):
     def test_box_tangents_run_along_length(self):
         mesh = _long_box()
-        tangent, sink, source, axis = length_tangents(mesh)
+        tangent, sink, source, axis = length_tangents(mesh, flow="length")
         self.assertGreater(abs(axis[0]), 0.9)
         self.assertGreater(len(sink), 0)
         self.assertGreater(len(source), 0)
@@ -68,7 +80,7 @@ class LengthTangentTest(unittest.TestCase):
 class OrientationFieldLengthTest(unittest.TestCase):
     def test_near_box_approach_x_follows_length(self):
         mesh = _long_box()
-        vf = OrientationField(mesh, key_direction=np.array([0.0, 1.0, 0.0]))
+        vf = OrientationField(mesh, key_direction=np.array([0.0, 1.0, 0.0]), flow="length")
         p = np.array([0.0, 0.0, 0.02])
         R = vf.approach_basis_at(p)
         self.assertGreater(abs(float(R[0, 0])), 0.7)
