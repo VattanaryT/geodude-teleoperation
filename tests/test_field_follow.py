@@ -9,6 +9,7 @@ from geodude_teleoperation.ee_viz import (
     ghost_flange_world,
     live_tcp_xyz_from_flange,
     motor_from_matrix,
+    orientation_error_rad,
 )
 from geodude_teleoperation.field_follow import (
     FieldFollow,
@@ -193,12 +194,38 @@ class FieldFollowTest(unittest.TestCase):
         follow.add_body_linear(np.array([0.004, 0.0, 0.0]))
         drive_field_follow(
             follow, ctrl, 0.001, _motor_at([0.0, 0.0, 1.0]),
-            live_xyz=live, stick_quiet=True)
+            live_xyz=live, stick_quiet=False)
         self.assertGreater(follow.pending_m, 0.0)
         self.assertTrue(ctrl.active)
 
-    def test_idle_with_tcp_leftover_keeps_spring_on(self):
-        """Hands-off still closes a small leftover (few mm), not a 3 cm yank."""
+    def test_quiet_clears_pending_and_freezes(self):
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.004, 0.0, 0.0]))
+        ctrl = FakeCtrl()
+        drive_field_follow(
+            follow, ctrl, 0.0, _motor_at([0.0, 0.0, 1.0]),
+            live_xyz=np.array([0.0, 0.0, 1.0]))
+        follow.add_body_linear(np.array([0.004, 0.0, 0.0]))
+        drive_field_follow(
+            follow, ctrl, 0.001, _motor_at([0.0, 0.0, 1.0]),
+            live_xyz=np.array([0.0, 0.0, 1.0]), stick_quiet=True)
+        self.assertEqual(follow.pending_m, 0.0)
+        self.assertFalse(ctrl.active)
+
+    def test_live_stick_enables_spring_without_last_target(self):
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        ctrl = FakeCtrl()
+        drive_field_follow(
+            follow, ctrl, 0.0, _motor_at([0.0, 0.0, 1.0]),
+            live_xyz=np.array([0.0, 0.0, 1.0]), stick_quiet=False)
+        self.assertTrue(ctrl.active)
+
+    def test_quiet_freezes_even_with_tcp_leftover(self):
+        """Hands-off must not keep speedJ on for a few mm leftover (retract)."""
         vf = FakeVf()
         follow = FieldFollow(vf, hz=50.0, max_lead_m=0.02)
         follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
@@ -211,6 +238,35 @@ class FieldFollowTest(unittest.TestCase):
         drive_field_follow(
             follow, ctrl, 0.1, _motor_at([0.0, 0.0, 1.0]),
             live_xyz=np.array([0.0, 0.0, 1.0]))
+        self.assertFalse(ctrl.active)
+        np.testing.assert_allclose(follow.xyz, [0.0, 0.0, 1.0], atol=1e-9)
+
+    def test_live_leftover_hold_uses_live_R_not_field_R(self):
+        vf = FakeVf()
+        R_field = np.diag([1.0, -1.0, -1.0])
+        follow = FieldFollow(vf, hz=50.0, max_lead_m=0.02)
+        follow.seed(np.array([0.004, 0.0, 1.0]), R_field)
+        follow.last_target = _motor_at([0.004, 0.0, 1.0], R_field)
+        ctrl = FakeCtrl()
+        drive_field_follow(
+            follow, ctrl, 0.0, _motor_at([0.0, 0.0, 1.0]),
+            live_xyz=np.array([0.0, 0.0, 1.0]), live_R=np.eye(3),
+            stick_quiet=False)
+        self.assertTrue(ctrl.active)
+        np.testing.assert_allclose(follow._R, np.eye(3), atol=1e-9)
+
+    def test_live_stick_keeps_spring_on_small_leftover(self):
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0, max_lead_m=0.02)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.004, 0.0, 0.0]))
+        ctrl = FakeCtrl()
+        drive_field_follow(
+            follow, ctrl, 0.0, _motor_at([0.0, 0.0, 1.0]),
+            live_xyz=np.array([0.0, 0.0, 1.0]))
+        drive_field_follow(
+            follow, ctrl, 0.1, _motor_at([0.0, 0.0, 1.0]),
+            live_xyz=np.array([0.0, 0.0, 1.0]), stick_quiet=False)
         self.assertTrue(ctrl.active)
         self.assertAlmostEqual(float(follow.xyz[0]), 0.004, places=9)
 
@@ -225,6 +281,18 @@ class FieldFollowTest(unittest.TestCase):
             follow, ctrl, 0.0, _motor_at([0.03, 0.0, 1.0]),
             live_xyz=np.array([0.0, 0.0, 1.0]))
         self.assertFalse(ctrl.active)
+        np.testing.assert_allclose(follow.xyz, [0.0, 0.0, 1.0], atol=1e-9)
+
+    def test_leftover_beyond_lead_keeps_spring_if_stick_live(self):
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0, max_lead_m=0.005)
+        follow.seed(np.array([0.03, 0.0, 1.0]), np.eye(3))
+        follow.last_target = _motor_at([0.03, 0.0, 1.0])
+        ctrl = FakeCtrl()
+        drive_field_follow(
+            follow, ctrl, 0.0, _motor_at([0.03, 0.0, 1.0]),
+            live_xyz=np.array([0.0, 0.0, 1.0]), stick_quiet=False)
+        self.assertTrue(ctrl.active)
         np.testing.assert_allclose(follow.xyz, [0.0, 0.0, 1.0], atol=1e-9)
 
     def test_drain_cap_carries_remainder(self):
@@ -337,6 +405,51 @@ class FieldFollowTest(unittest.TestCase):
         follow.tick(0.0, _motor_at([0.0, 0.0, 1.0]))
         z = follow.last_target.to_transformation_matrix()[:3, 2]
         self.assertGreater(float(z[2]), 0.9)
+        err = orientation_error_rad(np.eye(3), follow._R)
+        self.assertGreater(err, 0.05)
+        self.assertLessEqual(err, 0.12 + 1e-9)
+        np.testing.assert_allclose(follow.xyz, [0.01, 0.0, 1.0], atol=1e-9)
+
+    def test_field_R_is_slerped_xyz_stays_stick(self):
+        from scipy.spatial.transform import Rotation
+
+        R_field = Rotation.from_rotvec([0.2, 0.0, 0.0]).as_matrix()
+
+        class TiltVf:
+            def project(self, motor):
+                T = np.asarray(motor.to_transformation_matrix(), dtype=float)
+                T[:3, :3] = R_field
+                T[:3, 3] = [9.0, 9.0, 9.0]
+                return motor_from_matrix(T)
+
+        follow = FieldFollow(TiltVf(), hz=50.0, max_dR_rad=0.02)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        follow.tick(0.0, _motor_at([0.0, 0.0, 1.0]))
+        self.assertAlmostEqual(
+            orientation_error_rad(np.eye(3), follow._R), 0.02, places=6)
+        np.testing.assert_allclose(follow.xyz, [0.01, 0.0, 1.0], atol=1e-9)
+
+    def test_field_R_slerps_from_live_not_ahead_carrot(self):
+        """Carrot R ahead of the wrist must not become the spring error (TCP lever)."""
+        from scipy.spatial.transform import Rotation
+
+        R_ahead = Rotation.from_rotvec([0.2, 0.0, 0.0]).as_matrix()
+
+        class TiltVf:
+            def project(self, motor):
+                T = np.asarray(motor.to_transformation_matrix(), dtype=float)
+                T[:3, :3] = R_ahead
+                return motor_from_matrix(T)
+
+        follow = FieldFollow(TiltVf(), hz=50.0, max_dR_rad=0.02)
+        follow.seed(np.array([0.0, 0.0, 1.0]), R_ahead)
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        follow.tick(
+            0.0, _motor_at([0.0, 0.0, 1.0]),
+            live_xyz=np.array([0.0, 0.0, 1.0]), live_R=np.eye(3))
+        self.assertAlmostEqual(
+            orientation_error_rad(np.eye(3), follow._R), 0.02, places=6)
 
     def test_mapped_ee_lever_does_not_kill_tracker(self):
         """Chamfer flange lever from field R vs live R can exceed 8 cm EE.
@@ -457,6 +570,12 @@ class HardwareFollowRoutingTest(unittest.TestCase):
         self.assertIn("FieldFollow", src)
         self.assertIn("drive_field_follow", src)
         self.assertIn("project_in_process=True", src)
+        self.assertIn("max_dR_rad=0.02", src)
+        self.assertIn("max_qddot=5.0", src)
+        self.assertNotIn("set_orientation_compliant", src)
+        self.assertIn("live_R=", src)
+        self.assertIn("pending_contact", src)
+        self.assertIn("spacemouse: button", src)
         tree = ast.parse(src)
         self.assertTrue(any(
             isinstance(n, ast.FunctionDef) and n.name == "_make_approach_controller"

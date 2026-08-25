@@ -35,6 +35,20 @@ def is_idle_twist(twist, linear_scale=0.01, angular_scale=0.1, deadzone=0.05,
     )
 
 
+def rising_button_indices(previous, buttons):
+    """Rising edges in ``buttons``. ``previous is None`` → no fire (held at start).
+
+    Call on every HID report, including backlog drain. Waiting until after drain
+    drops a click that is pressed and released in the queued reports.
+    """
+    cur = tuple(buttons)
+    if previous is None:
+        return cur, ()
+    prev = tuple(previous)
+    n = min(len(prev), len(cur))
+    return cur, tuple(i for i in range(n) if cur[i] and not prev[i])
+
+
 class SpaceMouseTeleop:
     def __init__(self, linear_scale=0.01, angular_scale=0.1, deadzone=0.05, frequency=50.0):
         self._linear_scale = linear_scale
@@ -73,6 +87,10 @@ class SpaceMouseTeleop:
             while self._running.is_set():
                 try:
                     state = device.read()
+                    pressed = []
+                    previous_buttons, edges = rising_button_indices(
+                        previous_buttons, state.buttons)
+                    pressed.extend(edges)
 
                     # Drain any backlog: keep reading while the HID queue still has new reports
                     # waiting (state.t only advances inside pyspacemouse's _process(), i.e. only
@@ -83,11 +101,15 @@ class SpaceMouseTeleop:
                     # visible as the controlled object still moving for a while after the user
                     # releases the device. Bounded (not `while True`) so a device streaming faster
                     # than we can ever fully drain can't starve this loop of reaching on_twist/sleep.
+                    # Button edges are taken per report so a short click in the backlog is not lost.
                     for _ in range(64):
                         previous_t = state.t
                         state = device.read()
                         if state.t == previous_t:
                             break
+                        previous_buttons, edges = rising_button_indices(
+                            previous_buttons, state.buttons)
+                        pressed.extend(edges)
 
                     axes = np.array([-state.x, state.y, -state.z, state.yaw, -state.roll, state.pitch])
                     axes = np.where(np.abs(axes) < self._deadzone, 0.0, axes)
@@ -99,12 +121,8 @@ class SpaceMouseTeleop:
                     self._on_twist(twist)
 
                     if self._on_button is not None:
-                        buttons = tuple(state.buttons)
-                        if previous_buttons is not None:
-                            for index, (prev, cur) in enumerate(zip(previous_buttons, buttons)):
-                                if cur and not prev:
-                                    self._on_button(index)
-                        previous_buttons = buttons
+                        for index in pressed:
+                            self._on_button(index)
 
                     time.sleep(self._period)
                 except Exception as exc:

@@ -95,6 +95,25 @@ class SpeedJTraceTest(unittest.TestCase):
             data = np.load(npz)
             np.testing.assert_allclose(data["stick"][1], [0.00119, 0.0, 0.0])
 
+    def test_write_session_trims_racy_length_mismatch(self):
+        t = np.linspace(0.0, 1.0, 5)
+        qdot = np.zeros((5, 2))
+        qddot = np.zeros((5, 2))
+        dt = np.full(6, 0.002)
+        spring = np.zeros(7)
+        stick = np.zeros((6, 3))
+        stick[-1, 1] = 0.001
+        with tempfile.TemporaryDirectory() as tmp:
+            png = pathlib.Path(tmp) / "speedj.png"
+            npz = pathlib.Path(tmp) / "speedj.npz"
+            write_speedj_session(
+                png, t=t, qdot=qdot, qddot=qddot, dt=dt, spring=spring,
+                stick=stick, path_npz=npz)
+            self.assertTrue(png.is_file())
+            data = np.load(npz)
+            self.assertEqual(data["t"].shape[0], 5)
+            self.assertEqual(data["stick"].shape[0], 5)
+
     def test_trace_save_session_uses_recorded_samples(self):
         with tempfile.TemporaryDirectory() as tmp:
             png = pathlib.Path(tmp) / "sess.png"

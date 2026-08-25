@@ -167,6 +167,18 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         ctrl.set_z_compliant(False)
         self.assertEqual(ctrl._stiffness[5, 5], 2000.0)
 
+    def test_pose_spring_ori_compliant_zeros_angular_k(self):
+        from geodude_teleoperation.controller import AdmittanceTeleoperationController
+
+        ctrl = AdmittanceTeleoperationController(stiffness=np.diag([2000.0] * 6))
+        ctrl.set_orientation_compliant(True)
+        self.assertEqual(ctrl._stiffness[0, 0], 0.0)
+        self.assertEqual(ctrl._stiffness[1, 1], 0.0)
+        self.assertEqual(ctrl._stiffness[2, 2], 0.0)
+        self.assertEqual(ctrl._stiffness[3, 3], 2000.0)
+        ctrl.set_orientation_compliant(False)
+        self.assertEqual(ctrl._stiffness[0, 0], 2000.0)
+
     def test_contact_slide_is_capped_xy_velocity_not_pose_spring(self):
         from geodude_teleoperation.controller import AdmittanceTeleoperationController
 

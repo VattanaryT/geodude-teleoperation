@@ -140,6 +140,7 @@ def _make_approach_controller(interface, task_space, home_ee_motor):
         dt=0.001,
         max_joint_velocity=0.8,
         twist_linear_scale=1.0,
+        max_qddot=5.0,
     )
     approach.set_task_space(task_space)
     approach.set_interface(interface)
@@ -379,7 +380,7 @@ def main():
     field_preview = FieldAlignPreview(vf)
     follow = FieldFollow(
         vf, hz=args.follow_hz, project_in_process=True, mesh=object_surface,
-        max_lead_m=0.005, max_step_m=0.004)
+        max_lead_m=0.005, max_step_m=0.004, max_dR_rad=0.02)
     follow_log_t = {"t": float("-inf")}
     stick = {
         "t": float("-inf"), "t_nz": float("-inf"),
@@ -438,6 +439,7 @@ def main():
 
     mode = {"active": "approach"}
     handoff_busy = {"busy": False}
+    pending_contact = {"on": False}
     device = None
     speedj_trace = None
     viz = None
@@ -484,12 +486,11 @@ def main():
         T_prop[:3, 3] = follow.xyz
         now = time.monotonic()
         lin_now = np.asarray(stick["lin"], dtype=float).reshape(3)
-        quiet = (
-            (now - float(stick["t_nz"])) > 0.25
-            and float(np.linalg.norm(lin_now)) <= 1e-12)
+        quiet = float(np.linalg.norm(lin_now)) <= 1e-12
         tick = drive_field_follow(
             follow, approach_controller, now, motor_from_matrix(T_prop),
             live_xyz=live_tcp_xyz_from_flange(T_flange_viz),
+            live_R=T_flange_viz[:3, :3],
             live_ee_xyz=T_ee_m[:3, 3],
             map_target=map_target,
             stick_quiet=quiet)
@@ -590,10 +591,13 @@ def main():
                 follow.seed(p_tcp, vf.approach_basis_at(p_tcp))
                 print(
                     f"field follow: live TCP + stick linear at {args.follow_hz:.0f} Hz → "
-                    "project() → pose spring. Angular ignored. Idle freezes "
-                    "(no project at rest).",
+                    "slerped field R from live (xyz from stick). Quiet stick freezes.",
                     flush=True,
                 )
+                if pending_contact["on"]:
+                    pending_contact["on"] = False
+                    print("startup align done: applying queued contact button", flush=True)
+                    toggle_contact_mode()
         return cmd
 
     def rebind_after_gafropy_reopen(new_interface):
@@ -707,12 +711,8 @@ def main():
         route_spacemouse_twist(
             twist, sim_probe=None, on_hardware=_hardware_twist)
 
-    def on_button(index):
-        # Handoff is rising-edge button only (SpaceMouseTeleop); twists never toggle mode.
-        if index != args.mode_button or handoff_busy["busy"]:
-            return
-        if align is not None and not align.finished:
-            print("startup align running; ignoring mode button", flush=True)
+    def toggle_contact_mode():
+        if handoff_busy["busy"]:
             return
         if args.contact_backend == "force_mode":
             if mode["active"] == "approach":
@@ -720,8 +720,6 @@ def main():
             else:
                 enter_approach_from_force_mode()
             return
-
-        # --- speedj backend (legacy / hidden) ---
         assert contact_controller is not None
         if mode["active"] == "approach":
             if measured_fz_fn is None:
@@ -742,14 +740,29 @@ def main():
                 f"APPROACH 5mm/s, sit 2s, PID to {args.target_force:.1f}N",
                 flush=True,
             )
-        else:
-            exit_speedj_contact(
-                mode=mode,
-                contact_controller=contact_controller,
-                approach_controller=approach_controller,
-                interface=interface,
+            return
+        exit_speedj_contact(
+            mode=mode,
+            contact_controller=contact_controller,
+            approach_controller=approach_controller,
+            interface=interface,
+        )
+        print("-> approach mode: holding live pose", flush=True)
+
+    def on_button(index):
+        # Handoff is rising-edge button only (SpaceMouseTeleop); twists never toggle mode.
+        print(f"spacemouse: button {index}", flush=True)
+        if index != args.mode_button:
+            return
+        if align is not None and not align.finished:
+            pending_contact["on"] = not pending_contact["on"]
+            queued = "queued" if pending_contact["on"] else "cancelled"
+            print(
+                f"startup align running: contact {queued} for when align finishes",
+                flush=True,
             )
-            print("-> approach mode: holding live pose", flush=True)
+            return
+        toggle_contact_mode()
 
     def start_control_and_device():
         nonlocal device, speedj_trace

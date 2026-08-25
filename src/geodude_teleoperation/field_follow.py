@@ -275,7 +275,7 @@ class FieldFollow:
         self._pending[:] = 0.0
         self._idle = True
 
-    def tick(self, now, proposed_motor, live_xyz=None):
+    def tick(self, now, proposed_motor, live_xyz=None, live_R=None):
         now = float(now)
         if self._xyz is None:
             T = np.asarray(proposed_motor.to_transformation_matrix(), dtype=float)
@@ -301,25 +301,35 @@ class FieldFollow:
         base = self._xyz
         if live_xyz is not None and _is_finite_xyz(live_xyz):
             base = np.asarray(live_xyz, dtype=float).reshape(3)
-        self._xyz = base + self._R @ delta
+        # Stick in the live tool frame. Slerp field R from live R so the carrot
+        # cannot run ahead and dump leftover wrist error into TCP (chamfer lever).
+        R_from = self._undo[1]
+        if live_R is not None:
+            R_live = np.asarray(live_R, dtype=float).reshape(3, 3)
+            if _is_rotation(R_live):
+                R_from = R_live
+        self._xyz = base + R_from @ delta
         self._clamp_lead(live_xyz)
-        target, project_ms = self._project(self._xyz, self._R)
+        stick_xyz = self._xyz.copy()
+        target, project_ms = self._project(stick_xyz, R_from)
         T = np.asarray(target.to_transformation_matrix(), dtype=float)
         R_raw = T[:3, :3]
-        xyz_new = T[:3, 3].copy()
+        xyz_proj = T[:3, 3].copy()
         live_ok = live_xyz is None or (
             _is_finite_xyz(live_xyz)
             and float(np.linalg.norm(
-                xyz_new - np.asarray(live_xyz, dtype=float).reshape(3))) < 0.5)
-        if not (_is_finite_xyz(xyz_new) and _is_rotation(R_raw) and live_ok):
+                stick_xyz - np.asarray(live_xyz, dtype=float).reshape(3))) < 0.5)
+        if not (
+                _is_finite_xyz(stick_xyz) and _is_finite_xyz(xyz_proj)
+                and _is_rotation(R_raw) and live_ok):
             self.revert_tick()
             return FollowTick(idle=True)
-        R_new = _limit_rotation(self._undo[1], R_raw, self._max_dR_rad)
+        R_new = _limit_rotation(R_from, R_raw, self._max_dR_rad)
         if not _is_rotation(R_new):
             self.revert_tick()
             return FollowTick(idle=True)
         self._R = R_new
-        self._xyz = xyz_new
+        self._xyz = stick_xyz
         target = _motor_at(self._xyz, self._R)
         self.last_target = target
         quat = _quat_wxyz_from_motor(target)
@@ -367,16 +377,26 @@ def _leftover_tcp_m(follow, live_xyz):
     return float(np.linalg.norm(np.asarray(follow.xyz, dtype=float).reshape(3) - live))
 
 
+def _rotation_or_none(R):
+    if R is None:
+        return None
+    Rm = np.asarray(R, dtype=float).reshape(3, 3)
+    return Rm if _is_rotation(Rm) else None
+
+
 def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
                        err_rad=0.05, map_target=None, live_xyz=None,
                        live_ee_xyz=None, max_ee_jump_m=0.08, stick_quiet=True):
     """Apply a follow tick to the pose spring.
 
-    Each stick tick is live TCP + body linear, then project. Idle with leftover
-    TCP error keeps the spring on so the arm can catch the last command.
+    Stick tick: live TCP + body linear, field R slerped from live R.
+    Quiet stick freezes (clears pending) so leftover R cannot keep pushing.
+    Stick-live leftover snaps xyz; commanded R is live so the wrist cannot run ahead.
     """
-    del live_R, err_rad, max_ee_jump_m
-    tick = follow.tick(now, proposed_motor, live_xyz=live_xyz)
+    del err_rad, max_ee_jump_m
+    R_live = _rotation_or_none(live_R)
+    tick = follow.tick(
+        now, proposed_motor, live_xyz=live_xyz, live_R=R_live)
     target = tick.target
     if target is not None and map_target is not None:
         target = map_target(target)
@@ -403,38 +423,51 @@ def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
         return tick
     leftover = _leftover_tcp_m(follow, live_xyz)
     max_lead = float(getattr(follow, "_max_lead_m", 0.02))
-    pending_n = float(getattr(follow, "pending_m", 0.0))
+    if stick_quiet:
+        if R_live is not None:
+            follow._R = R_live
+        if live_xyz is not None:
+            follow.set_idle(live_xyz, clear_pending=True)
+        else:
+            follow.set_idle(clear_pending=True)
+        if follow.last_target is not None:
+            frozen = follow.last_target
+            if map_target is not None:
+                frozen = map_target(frozen)
+            controller.get_objective().set_target(frozen)
+        controller.set_input_active(False)
+        return tick
+    R_hold = R_live if R_live is not None else follow._R
     if leftover > max(max_lead, CATCHUP_TCP_M) + 1e-12:
         if live_xyz is not None:
-            R = follow._R
-            follow.snap_tcp(live_xyz, R)
+            follow.snap_tcp(live_xyz, R_hold)
         if follow.last_target is not None:
             frozen = follow.last_target
             if map_target is not None:
                 frozen = map_target(frozen)
             controller.get_objective().set_target(frozen)
-        controller.set_input_active(False)
+        controller.set_input_active(True)
         return tick
     if leftover > CATCHUP_TCP_M:
+        if follow.xyz is not None:
+            follow.last_target = _motor_at(follow.xyz, R_hold)
+            follow._R = np.array(R_hold, copy=True)
         if follow.last_target is not None:
             frozen = follow.last_target
             if map_target is not None:
                 frozen = map_target(frozen)
             controller.get_objective().set_target(frozen)
         controller.set_input_active(True)
-        return tick
-    if stick_quiet and pending_n < 1e-15:
-        if live_xyz is not None:
-            follow.snap_tcp(live_xyz)
-        if follow.last_target is not None:
-            frozen = follow.last_target
-            if map_target is not None:
-                frozen = map_target(frozen)
-            controller.get_objective().set_target(frozen)
-        controller.set_input_active(False)
         return tick
     if follow.last_target is not None:
-        controller.set_input_active(True)
+        if follow.xyz is not None:
+            follow.last_target = _motor_at(follow.xyz, R_hold)
+            follow._R = np.array(R_hold, copy=True)
+        frozen = follow.last_target
+        if map_target is not None:
+            frozen = map_target(frozen)
+        controller.get_objective().set_target(frozen)
+    controller.set_input_active(True)
     return tick
 
 

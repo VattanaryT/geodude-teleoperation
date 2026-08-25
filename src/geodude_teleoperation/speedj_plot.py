@@ -81,12 +81,20 @@ def write_speedj_session(path_png, *, t, qdot, qddot, dt, spring,
     qddot = np.asarray(qddot, dtype=float)
     dt = np.asarray(dt, dtype=float).reshape(-1)
     spring = np.asarray(spring, dtype=float).reshape(-1)
+    n = min(t.size, qdot.shape[0], qddot.shape[0], dt.size, spring.size)
     if measured is not None:
         measured = np.asarray(measured, dtype=float)
+        n = min(n, measured.shape[0])
     if stick is not None:
         stick = np.asarray(stick, dtype=float)
         if stick.ndim == 1:
             stick = stick.reshape(-1, 1)
+        n = min(n, stick.shape[0])
+    t, qdot, qddot, dt, spring = t[:n], qdot[:n], qddot[:n], dt[:n], spring[:n]
+    if measured is not None:
+        measured = measured[:n]
+    if stick is not None:
+        stick = stick[:n]
     if path_npz is not None:
         payload = dict(t=t, qdot=qdot, qddot=qddot, dt=dt, spring=spring)
         if measured is not None:
@@ -270,10 +278,11 @@ class SpeedJTrace:
         if not self._session:
             print("speedj plot: no samples to save", flush=True)
             return None
-        n = int(self._session[0].qdot.shape[0])
+        samples = list(self._session)
+        n = int(samples[0].qdot.shape[0])
         measured_rows = []
         has_meas = False
-        for s in self._session:
+        for s in samples:
             if s.measured is None:
                 measured_rows.append(np.full(n, np.nan))
             else:
@@ -281,13 +290,13 @@ class SpeedJTrace:
                 measured_rows.append(np.asarray(s.measured, dtype=float).reshape(-1))
         write_speedj_session(
             path_png,
-            t=np.array([s.t for s in self._session], dtype=float),
-            qdot=np.vstack([s.qdot for s in self._session]),
-            qddot=np.vstack([s.qddot for s in self._session]),
-            dt=np.array([s.dt for s in self._session], dtype=float),
-            spring=np.array([1.0 if s.spring else 0.0 for s in self._session]),
+            t=np.array([s.t for s in samples], dtype=float),
+            qdot=np.vstack([s.qdot for s in samples]),
+            qddot=np.vstack([s.qddot for s in samples]),
+            dt=np.array([s.dt for s in samples], dtype=float),
+            spring=np.array([1.0 if s.spring else 0.0 for s in samples]),
             measured=(np.vstack(measured_rows) if has_meas else None),
-            stick=np.vstack([s.stick for s in self._session]),
+            stick=np.vstack([s.stick for s in samples]),
             path_npz=path_npz,
         )
         if path_npz.is_file():
