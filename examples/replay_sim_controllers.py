@@ -1,17 +1,24 @@
-"""Check 6: closed-loop MuJoCo replay through speedJ + DualLoop (not hardware).
+"""Check 6 / Test 1: closed-loop MuJoCo replay through speedJ + DualLoop.
 
-Same geodude.yaml mesh placement as hardware_object_contact_teleop: object in
-vention via ``T_right_base_vention`` (not yaml UR FK), chamfer on flange.
-The gafro plant is yaml ``right_ee``. DualLoop Fz is bag playback, not MuJoCo
-contact. Default boots the right UR at bag start joints so cyan sits on orange
-at t=0. In contact, DualLoop owns tool-Z: score XY, not 3D TCP.
-``--follow-path`` skips DualLoop and keeps press (``a_n``) so cyan can track
-orange through contact; that does not sign off the force loop.
+Never copies bag ``q`` into DualLoop. SpeedJ/DualLoop take a Cartesian target;
+bag joints are only the start pose (and, for Test 1, the FK source of TCP).
+
+Check 6 (default): Test 2 shape. Contact XY is CGA ``a_local`` sandwiched into
+the flange. That is the policy path.
+
+``--bag-tcp``: Test 1. Command recorded TCP poses. Contact XY is bag TCP
+Δp/Δt in the flange, not ``a_local``. If this walks off, Test 2 cannot succeed.
+
+MuJoCo pose-spring is not the UR. This check does not talk to hardware.
+
+In contact DualLoop owns tool-Z: score XY, not 3D TCP. ``--follow-path`` skips
+DualLoop and keeps ``set_target`` through contact.
 
   PYTHONPATH=src python examples/local_frame_checks.py 6
+  PYTHONPATH=src python examples/local_frame_checks.py 7
 
   PYTHONPATH=src python examples/replay_sim_controllers.py --headless --frames 40
-  PYTHONPATH=src python examples/replay_sim_controllers.py --follow-path --headless --frames 40
+  PYTHONPATH=src python examples/replay_sim_controllers.py --bag-tcp --headless --frames 40
 """
 from __future__ import annotations
 
@@ -34,6 +41,7 @@ from geodude_teleoperation.sim_replay import (
     TrackingRow,
     absolute_error_mm,
     apply_mode_edge,
+    bag_tcp_flange_velocity,
     body_twist_for_plant,
     enter_speedj_contact,
     exit_speedj_contact,
@@ -49,19 +57,19 @@ from geodude_teleoperation.ee_viz import (
     chamfer_tcp_world_from_wrist3,
     chamfer_world_from_wrist3,
     hide_gripper_visuals,
+    motor_aligned_to,
+    motor_from_matrix,
 )
 from geodude_teleoperation.laser_frames import (
-    DEFAULT_T_RIGHT,
-    load_SE3,
     right_base_R_to_vention,
     right_base_points_to_vention,
 )
 from geodude_teleoperation.tcp_kinematics import (
     MODEL,
+    bag_tcp_to_yaml_ee_world,
     poses_in_right_base,
     write_geodude_model_with_right_ur6,
 )
-from geodude_teleoperation.vention import apply_vention_heights, vention_q_for_base_z
 from geodude_teleoperation.viser_view import (
     AXIS_RGB,
     axis_arrows,
@@ -103,6 +111,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--bag", type=Path, default=_DEFAULT_BAG)
     p.add_argument("--cam", type=Path, default=None)
     p.add_argument("--port", type=int, default=8080)
+    p.add_argument(
+        "--bag-tcp", action="store_true",
+        help="Test 1: recorded TCP through speedJ+DualLoop; contact XY from bag Δp, not a_local",
+    )
     p.add_argument(
         "--follow-path", action="store_true",
         help="keep a_n / never DualLoop; score 3D TCP (does not sign off force loop)",
@@ -157,20 +169,35 @@ def main() -> None:
     R_flange = Rotation.from_quat(np.asarray(ep.poses[: n + 1, 3:7], dtype=float)).as_matrix()
     raw = np.asarray(ep.in_contact[:n], dtype=bool)
     fn = None if ep.f_n is None else np.asarray(ep.f_n, dtype=float).reshape(-1)[:n]
-    sandwich_contact = path_follow_contact(raw, follow_path=args.follow_path)
-    _, v_body, _, _, _ = sandwich_local_actions(
-        R_field=ep.R_field, R_ee=R_flange, a_local=ep.a_local,
-        in_contact=sandwich_contact, timestamps=t, f_n=fn, lost_s=0.0)
     n_run = n if args.frames <= 0 else min(n, int(args.frames))
     bag_xyz = np.asarray(ep.action_xyz[: n_run + 1], dtype=float)
+    if args.bag_tcp:
+        v_raw = bag_tcp_flange_velocity(
+            bag_xyz, R_flange[: len(bag_xyz)], dt_s)
+        v_stick = np.zeros((n_run, 3), dtype=float)
+        n_v = min(n_run, len(v_raw))
+        v_stick[:n_v] = v_raw[:n_v]
+    else:
+        sandwich_contact = path_follow_contact(raw, follow_path=args.follow_path)
+        _, v_stick, _, _, _ = sandwich_local_actions(
+            R_field=ep.R_field, R_ee=R_flange, a_local=ep.a_local,
+            in_contact=sandwich_contact, timestamps=t, f_n=fn, lost_s=0.0)
 
-    replay_kind = "path" if args.follow_path else "controllers"
+    check_n = 7 if args.bag_tcp else 6
+    replay_kind = "bag-tcp" if args.bag_tcp else ("path" if args.follow_path else "controllers")
     print(
-        f"check 6  episode={ep.meta.get('episode')}  {ep.hz} Hz  "
+        f"check {check_n}  episode={ep.meta.get('episode')}  {ep.hz} Hz  "
         f"frames={n_run}/{n}  plant=yaml right_ee  replay={replay_kind}  "
-        f"error=chamfer vs bag (absolute)",
+        f"error=chamfer vs bag (absolute)  target=bag TCP pose-spring",
         flush=True,
     )
+    if args.bag_tcp:
+        print(
+            "test 1: recorded TCP through speedJ+DualLoop. "
+            "Contact XY = bag Δp/Δt in flange (not a_local). "
+            "Joints only set the start pose. Not hardware.",
+            flush=True,
+        )
     print(score_legend(follow_path=args.follow_path), flush=True)
     print(
         "mode=raw in_contact  Fd=|f_n| at enter  "
@@ -223,6 +250,15 @@ def main() -> None:
     approach.set_interface(interface)
     approach.set_objective(ga.control.SingleArmMotorControlObjective(home))
     approach._max_slide_mps = 0.08
+    _speedj = approach.compute_control_command
+
+    def _speedj_lock_rail(robot_state, objective_state, task_space_state):
+        qdot = np.asarray(
+            _speedj(robot_state, objective_state, task_space_state), dtype=float).copy()
+        qdot[0] = 0.0
+        return qdot
+
+    approach.compute_control_command = _speedj_lock_rail
 
     fz_state = {"i": 0, "contact": False, "fn": 0.0}
 
@@ -233,7 +269,6 @@ def main() -> None:
     mode = {"active": "path" if args.follow_path else "approach"}
     rows: list[TrackingRow] = []
     bag0 = bag_xyz[0]
-    approach_target = {"m": None}
     view = {"draw": None}
 
     def live_ee_motor():
@@ -243,14 +278,6 @@ def main() -> None:
     def live_frames():
         q = np.asarray(interface.get_state().get_position(), dtype=float)
         return q, poses_in_right_base(system, q)
-
-    T_right = load_SE3(DEFAULT_T_RIGHT)
-    q_rail = vention_q_for_base_z(float(T_right[2, 3]))
-
-    def q_for_viz(q=None):
-        q = np.asarray(
-            interface.get_state().get_position() if q is None else q, dtype=float)
-        return apply_vention_heights(system, q, q_rail, q_rail)
 
     def on_enter():
         i = fz_state["i"]
@@ -274,21 +301,17 @@ def main() -> None:
             apply_mode_edge(
                 mode, bool(raw[i]), on_enter=on_enter, on_exit=on_exit)
         _q, frames = live_frames()
-        disp = body_twist_for_plant(
-            v_body[i], dt_s=dt_s, contact=False,
-            R_flange=R_flange[i], R_plant=frames["yaml_ee"][:3, :3])
-        if approach_target["m"] is None:
-            approach_target["m"] = live_ee_motor()
-        w, v = disp[:3], disp[3:]
-        approach_target["m"] = approach_target["m"].multiply(
-            ga.Motor.exp(w[0], w[1], w[2], v[0], v[1], v[2]))
+        pose_i = ep.poses[min(i, len(ep.poses) - 1)]
+        m_des = motor_aligned_to(
+            motor_from_matrix(bag_tcp_to_yaml_ee_world(system, _q, pose_i)),
+            live_ee_motor())
         if mode["active"] == "contact":
             vel = body_twist_for_plant(
-                v_body[i], dt_s=dt_s, contact=True,
+                v_stick[i], dt_s=dt_s, contact=True,
                 R_flange=R_flange[i], R_plant=frames["yaml_ee"][:3, :3])
             approach.update_command(ga.Twist.from_array(vel))
         else:
-            approach.get_objective().set_target(approach_target["m"])
+            approach.get_objective().set_target(m_des)
             approach.set_input_active(True)
         xy, z, err = absolute_error_mm(
             live_xyz=frames["chamfer"][:3, 3], bag_xyz=bag_xyz[i])
@@ -348,10 +371,6 @@ def main() -> None:
             print(flush=True)
             print(format_tracking_table(rows), flush=True)
 
-    interface.control(approach, blocking=False)
-    approach.hold_live_pose()
-    # Zero qdot lets MuJoCo gravity dump the arm while viser loads the wrist cam.
-    approach.set_input_active(True)
     _q0, fr0 = live_frames()
     start_mm = float(np.linalg.norm(fr0["chamfer"][:3, 3] - bag0) * 1e3)
     start_note = (
@@ -360,15 +379,19 @@ def main() -> None:
     )
     print(
         f"sim chamfer vs bag TCP at t=0: {start_mm:.1f} mm ({start_note}). "
-        f"Viser object uses T_right_base_vention (hardware overlay); "
-        f"rails drawn at {q_rail:.2f} m so the UR mount matches that frame.",
+        f"Each tick tracks bag TCP on the pose-spring (live Motor hemisphere). "
+        f"Stringer is T_right overlay; rails stay at yaml 0.25 m.",
         flush=True,
     )
+
+    def start_plant() -> None:
+        interface.control(approach, blocking=False)
+        approach.hold_live_pose()
+        approach.set_input_active(True)
 
     def _build_wrist_view():
         n_pose = len(ep.poses)
         actual = np.asarray(ep.poses[:, :3], dtype=float)
-        replay_xyz = integrate_desired_xyz(ep.action_xyz[0], ep.R_field, ep.a_local)
         mode_flags = np.zeros(n_pose, dtype=bool)
         mode_flags[: min(n_pose, len(raw))] = raw[:n_pose]
         if cam_pre is None:
@@ -380,17 +403,20 @@ def main() -> None:
             cam_t, jpegs = cam_pre
         stamps = np.asarray(ep.timestamps, dtype=float)
         idx = nearest_indices(stamps, cam_t)
-        q0 = q_for_viz()
+        q0 = np.asarray(interface.get_state().get_position(), dtype=float)
         cloud = load_points(args.ply) if args.ply.is_file() else None
         cloud_w = None if cloud is None else right_base_points_to_vention(cloud)
         actual_w = right_base_points_to_vention(actual)
-        replay_w = right_base_points_to_vention(replay_xyz)
+        replay_w = None
+        if not args.bag_tcp:
+            replay_xyz = integrate_desired_xyz(ep.action_xyz[0], ep.R_field, ep.a_local)
+            replay_w = right_base_points_to_vention(replay_xyz)
         if cloud is None:
             print(f"stringer ply missing: {args.ply}", flush=True)
         else:
             print(
                 f"stringer {args.ply.name} in vention via T_right_base_vention "
-                f"(worktop overlay, not yaml FK)",
+                f"(worktop overlay, yaml rail 0.25 m, not 0.50 m)",
                 flush=True,
             )
 
@@ -407,25 +433,26 @@ def main() -> None:
         if cloud_w is not None:
             viz.scene.add_point_cloud(
                 "/object", points=cloud_w, colors=(200, 200, 200), point_size=0.002)
-        viz.scene.add_line_segments(
-            "/replay", points=polyline_segments(replay_w),
-            colors=contact_segment_colors(mode_flags, n_pose - 1),
-            thickness=0.0025,
-        )
+        if replay_w is not None:
+            viz.scene.add_line_segments(
+                "/replay", points=polyline_segments(replay_w),
+                colors=contact_segment_colors(mode_flags, n_pose - 1),
+                thickness=0.0025,
+            )
         viz.scene.add_line_segments(
             "/actual", points=polyline_segments(actual_w),
             colors=(255, 170, 40), thickness=0.0015,
         )
         first = annotate_wrist_frame(
             decode_jpeg(jpegs[int(idx[0])]), mode="free", t_s=0.0, f_n=None)
-        caption = server.gui.add_markdown("## check 6")
+        caption = server.gui.add_markdown(f"## check {check_n}")
         img = server.gui.add_image(first, label="wrist_cam_0", format="jpeg")
 
         def draw(i: int, live_xyz: np.ndarray, live_R: np.ndarray, _err: float,
                  q=None) -> None:
             del live_R
             i = int(np.clip(i, 0, n_pose - 1))
-            qv = q_for_viz(q)
+            qv = q0 if q is None else np.asarray(q, dtype=float)
             robot_viz.update(qv)
             update_chamfer(qv)
             fk = system.compute_forward_kinematics(qv)
@@ -462,17 +489,20 @@ def main() -> None:
 
         print(
             f"viser http://localhost:{args.port}  "
-            f"T_right overlay  rails={q_rail:.2f}m  orange=bag  cyan=sim TCP",
+            f"T_right overlay  rails=0.25m  orange=bag  cyan=sim TCP",
             flush=True,
         )
         return draw
 
     try:
         if args.headless:
+            start_plant()
             run_clock()
         else:
             view["draw"] = _build_wrist_view()
-            worker = threading.Thread(target=run_clock, daemon=True, name="check6-clock")
+            start_plant()
+            worker = threading.Thread(
+                target=run_clock, daemon=True, name=f"check{check_n}-clock")
             worker.start()
             try:
                 while worker.is_alive():

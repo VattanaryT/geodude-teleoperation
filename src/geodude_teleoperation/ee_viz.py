@@ -73,6 +73,15 @@ def motor_from_matrix(T: np.ndarray):
     return ga.Motor.from_matrix(np.asarray(T, dtype=float).reshape(4, 4))
 
 
+def motor_aligned_to(desired, reference):
+    """``M`` and ``-M`` are the same pose; gafro error treats them as 360° apart."""
+    d = np.asarray(desired.to_array(), dtype=float).reshape(-1)
+    r = np.asarray(reference.to_array(), dtype=float).reshape(-1)
+    if float(np.dot(d, r)) < 0.0:
+        return desired.negate()
+    return desired
+
+
 def chamfer_tcp_motor(system, q):
     """Chamfer pendant TCP in the gafropy world (vention-overlaid q)."""
     fk = system.compute_forward_kinematics(np.asarray(q, dtype=float))
@@ -285,11 +294,16 @@ def seat_mesh_on_xy_origin(vertices: np.ndarray) -> np.ndarray:
 
 
 def prepare_chamfer_vertices_m(vertices_mm: np.ndarray) -> np.ndarray:
-    """Scale mm→m, seat the CAD z=0 mount on the flange, then yaw about +z."""
+    """Scale mm→m, seat the CAD z=0 mount on the flange, yaw, stretch to TCP."""
     v = seat_mesh_on_xy_origin(
         np.asarray(vertices_mm, dtype=float) * CHAMFER_MESH_SCALE)
     if CHAMFER_MESH_RZ_DEG:
         v = Rotation.from_euler("z", CHAMFER_MESH_RZ_DEG, degrees=True).apply(v)
+    zmax = float(v[:, 2].max())
+    tcp_z = float(CHAMFER_TCP_FROM_FLANGE_XYZ[2])
+    if zmax > 1e-9 and abs(zmax - tcp_z) > 1e-6:
+        v = v.copy()
+        v[:, 2] *= tcp_z / zmax
     return v
 
 

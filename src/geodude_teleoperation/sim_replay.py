@@ -1,9 +1,12 @@
-"""Clock a local-frame demo through the speedJ + DualLoop plants.
+"""Clock a demo through the speedJ + DualLoop plants.
 
 The pose-spring ``update_command`` treats stick linear as a body-frame pose
 step (meters per callback). DualLoop contact treats the same linear as a
-body-frame velocity (m/s). This module converts flange-body sandwich
-velocity into the plant EE body and applies that distinction.
+body-frame velocity (m/s). This module converts flange-body velocity into
+the plant EE body and applies that distinction.
+
+Test 1 (``--bag-tcp``): stick is recorded TCP Δp/Δt in the flange.
+Test 2 (check 6): stick is CGA ``a_local`` sandwiched into the flange.
 
 Default replay uses DualLoop in contact: score **XY** (and force), not 3D TCP.
 ``--follow-path`` keeps ``a_n`` and never enters DualLoop: score 3D ``err_mm``.
@@ -50,6 +53,148 @@ def body_twist_for_plant(
     twist = np.zeros(6, dtype=float)
     twist[3:] = body
     return twist
+
+
+def bag_tcp_flange_velocity(
+    bag_xyz: np.ndarray, R_flange: np.ndarray, dt_s: float
+) -> np.ndarray:
+    """Recorded TCP Δp/Δt in flange body (m/s). Not local-frame ``a_t*``."""
+    p = np.asarray(bag_xyz, dtype=float).reshape(-1, 3)
+    R = np.asarray(R_flange, dtype=float).reshape(-1, 3, 3)
+    if p.shape[0] < 2:
+        return np.zeros((0, 3), dtype=float)
+    n = min(p.shape[0] - 1, R.shape[0])
+    dp = np.diff(p[: n + 1], axis=0) / float(dt_s)
+    return np.einsum("nji,nj->ni", R[:n], dp)
+
+
+DEFAULT_REPLAY_SPEED = 0.2
+MAX_START_GAP_MM = 25.0
+DEFAULT_CMD_HZ = 10.0
+
+
+def start_gap_mm(live_xyz: np.ndarray, bag_xyz: np.ndarray) -> float:
+    """3D distance (mm) from live TCP to bag start."""
+    return float(
+        np.linalg.norm(
+            np.asarray(live_xyz, dtype=float).reshape(3)
+            - np.asarray(bag_xyz, dtype=float).reshape(3)
+        )
+        * 1e3
+    )
+
+
+def refuse_start_gap(gap_mm: float, limit_mm: float = MAX_START_GAP_MM) -> None:
+    """Raise if the live TCP is too far from bag start to begin replay."""
+    gap = float(gap_mm)
+    limit = float(limit_mm)
+    if gap > limit:
+        raise RuntimeError(
+            f"live TCP is {gap:.1f} mm from bag start (limit {limit:.1f} mm). "
+            "Jog closer, then rerun."
+        )
+
+
+def ramp_duration_s(
+    gap_m: float, *, speed_mps: float = 0.02, min_s: float = 2.0
+) -> float:
+    """Wall time to crawl ``gap_m`` at ``speed_mps``. Never faster than ``min_s``."""
+    s = float(speed_mps)
+    if s <= 0.0:
+        raise ValueError("speed_mps must be > 0")
+    return max(float(min_s), abs(float(gap_m)) / s)
+
+
+def blend_pose_matrix(T0: np.ndarray, T1: np.ndarray, alpha: float) -> np.ndarray:
+    """Lerp XYZ + slerp rotation. ``alpha=0`` is ``T0``."""
+    from scipy.spatial.transform import Rotation, Slerp
+
+    A = np.asarray(T0, dtype=float).reshape(4, 4)
+    B = np.asarray(T1, dtype=float).reshape(4, 4)
+    a = float(np.clip(alpha, 0.0, 1.0))
+    out = np.eye(4)
+    key = Rotation.concatenate([
+        Rotation.from_matrix(A[:3, :3]),
+        Rotation.from_matrix(B[:3, :3]),
+    ])
+    out[:3, :3] = Slerp([0.0, 1.0], key)(a).as_matrix()
+    out[:3, 3] = (1.0 - a) * A[:3, 3] + a * B[:3, 3]
+    return out
+
+
+def slow_replay_clock(
+    t: np.ndarray, speed: float, cmd_hz: float = DEFAULT_CMD_HZ
+) -> tuple[np.ndarray, np.ndarray]:
+    """Stretch demo time by ``1/speed``. Returns ``(t_wall, t_src)``.
+
+    ``t_src`` is the original-timeline sample for each wall-clock command.
+    ``speed=0.2`` makes a 1 s demo take 5 s. ``cmd_hz`` keeps a dense
+    Cartesian stream so the spring does not jump a 10 Hz waypoint at once.
+    """
+    s = float(speed)
+    if s <= 0.0:
+        raise ValueError("speed must be > 0")
+    hz = float(cmd_hz)
+    if hz <= 0.0:
+        raise ValueError("cmd_hz must be > 0")
+    t0 = np.asarray(t, dtype=float).reshape(-1)
+    t0 = t0 - t0[0]
+    duration = float(t0[-1]) / s if t0.size else 0.0
+    n = max(2, int(round(duration * hz)) + 1)
+    t_wall = np.linspace(0.0, duration, n)
+    return t_wall, t_wall * s
+
+
+def interpolate_tcp_xyzw(
+    poses: np.ndarray, t_src: np.ndarray, t_query: np.ndarray
+) -> np.ndarray:
+    """Lerp XYZ + slerp quat. ``poses`` is ``(N, 7)`` xyz + xyzw."""
+    from scipy.spatial.transform import Rotation, Slerp
+
+    poses = np.asarray(poses, dtype=float).reshape(-1, 7)
+    t_src = np.asarray(t_src, dtype=float).reshape(-1)
+    t_src = t_src - t_src[0]
+    t_query = np.clip(np.asarray(t_query, dtype=float).reshape(-1), t_src[0], t_src[-1])
+    out = np.empty((t_query.size, 7), dtype=float)
+    for k in range(3):
+        out[:, k] = np.interp(t_query, t_src, poses[:, k])
+    slerp = Slerp(t_src, Rotation.from_quat(poses[:, 3:7]))
+    out[:, 3:7] = slerp(t_query).as_quat()
+    return out
+
+
+def task_twist_from_error(
+    error: np.ndarray,
+    kp: float,
+    *,
+    z_velocity: float | None = None,
+    feedforward: np.ndarray | None = None,
+) -> np.ndarray:
+    """Map gafro pose error to a body twist. ``z_velocity`` replaces body-Z (DualLoop)."""
+    twist = -float(kp) * np.asarray(error, dtype=float).reshape(6)
+    if feedforward is not None:
+        ff = np.asarray(feedforward, dtype=float).reshape(6)
+        if z_velocity is None:
+            return twist + ff
+        out = twist.copy()
+        out[:5] = out[:5] + ff[:5]
+        out[5] = float(z_velocity)
+        return out
+    if z_velocity is not None:
+        twist = twist.copy()
+        twist[5] = float(z_velocity)
+    return twist
+
+
+def damped_least_squares_qdot(
+    jacobian: np.ndarray, twist: np.ndarray, *, damping: float = 1e-6
+) -> np.ndarray:
+    """``qdot = (JᵀJ + λI)⁻¹ Jᵀ twist``. Locks no joints; caller zeros the rail."""
+    J = np.asarray(jacobian, dtype=float)
+    t = np.asarray(twist, dtype=float).reshape(J.shape[0])
+    n = int(J.shape[1])
+    j_inv = np.linalg.inv(J.T @ J + float(damping) * np.eye(n)) @ J.T
+    return j_inv @ t
 
 
 def apply_mode_edge(

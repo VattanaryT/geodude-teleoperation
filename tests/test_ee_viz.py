@@ -49,11 +49,12 @@ class EeVizTest(unittest.TestCase):
         self.assertAlmostEqual(float(v[:, 2].min()), 0.0, places=6)
         lo, hi = v.min(axis=0), v.max(axis=0)
         np.testing.assert_allclose(0.5 * (lo[:2] + hi[:2]), [0.0, 0.0], atol=1e-6)
-        # Mount on z=0: tool length is the long axis (~120 mm), not a 75 mm side face.
+        # Mount on z=0; CAD length is scaled to the pendant TCP (144 mm).
         z_ext = float(hi[2] - lo[2])
         xy_ext = hi[:2] - lo[:2]
-        self.assertGreater(z_ext, 0.11)
-        self.assertLess(z_ext, 0.13)
+        self.assertAlmostEqual(float(hi[2]), 0.14422, delta=0.002)
+        self.assertGreater(z_ext, 0.13)
+        self.assertLess(z_ext, 0.16)
         self.assertTrue(np.all(xy_ext < 0.09))
 
     def test_chamfer_tcp_is_pendant_offset_not_robotiq_length(self):
@@ -242,6 +243,30 @@ class EeVizTest(unittest.TestCase):
             v = ee_viz.prepare_chamfer_vertices_m(verts)
         finally:
             ee_viz.CHAMFER_MESH_RZ_DEG = old
-        # 90° about z: seated (x, y) → (−y, x); z unchanged.
-        np.testing.assert_allclose(v[:, 2], [0.0, 0.12], atol=1e-12)
+        # 90° about z: seated (x, y) → (−y, x); z scaled to pendant TCP.
+        np.testing.assert_allclose(v[:, 2], [0.0, 0.14422], atol=1e-12)
         np.testing.assert_allclose(v[0, :2], [0.04, -0.04], atol=1e-12)
+
+
+class MotorHemisphereTest(unittest.TestCase):
+    def test_negated_motor_is_flipped_back_to_reference(self):
+        from geodude_teleoperation.ee_viz import motor_aligned_to
+
+        class _M:
+            def __init__(self, arr):
+                self._arr = np.asarray(arr, dtype=float)
+                self.negated = False
+
+            def to_array(self):
+                return self._arr
+
+            def negate(self):
+                out = _M(-self._arr)
+                out.negated = True
+                return out
+
+        ref = _M([1.0, 0.0, 0.0, 0.0])
+        same = motor_aligned_to(_M([0.8, 0.0, 0.0, 0.0]), ref)
+        self.assertFalse(same.negated)
+        flipped = motor_aligned_to(_M([-0.8, 0.0, 0.0, 0.0]), ref)
+        self.assertTrue(flipped.negated)

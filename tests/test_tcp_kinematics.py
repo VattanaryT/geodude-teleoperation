@@ -107,6 +107,40 @@ class TcpKinematicsFixtureTest(unittest.TestCase):
         err_mm = np.linalg.norm(frames["chamfer"][:3, 3] - self.tcp[0, :3]) * 1e3
         self.assertLess(err_mm, 3.0)
 
+    def test_match_t_right_mount_puts_chamfer_on_worktop_stringer(self):
+        """Rail stays 0.25 m. Lifting the yaml origin (not the carriage) meets T_right."""
+        import tempfile
+
+        import gafropy as ga
+
+        from geodude_teleoperation.ee_viz import chamfer_tcp_world_from_wrist3
+        from geodude_teleoperation.laser_frames import right_base_points_to_vention
+        from geodude_teleoperation.vention import (
+            DEFAULT_VENTION_HEIGHT,
+            apply_vention_heights,
+        )
+
+        dest = Path(tempfile.mkdtemp()) / "geodude.yaml"
+        write_geodude_model_with_right_ur6(
+            self.q_ur6[0], dest, src=MODEL, match_t_right_mount=True)
+        system = ga.SystemSerialization.load(str(dest))
+        q0 = np.asarray(system.get_default_configuration(), dtype=float)
+        q = apply_vention_heights(
+            system,
+            apply_right_ur6(system, q0, wrap_ur6_to_pm_pi(self.q_ur6[0])),
+            DEFAULT_VENTION_HEIGHT,
+            DEFAULT_VENTION_HEIGHT,
+        )
+        fk = system.compute_forward_kinematics(q)
+        T_wrist = np.asarray(
+            fk.get_link_pose("right_ur5e/wrist_3_link").to_transformation_matrix())
+        chamfer_w = chamfer_tcp_world_from_wrist3(T_wrist)[:3, 3]
+        overlay = right_base_points_to_vention(self.tcp[0, :3])[0]
+        err_mm = float(np.linalg.norm(chamfer_w - overlay) * 1e3)
+        self.assertLess(err_mm, 25.0, msg=f"chamfer world vs T_right overlay {err_mm:.1f} mm")
+        self.assertGreater(float(chamfer_w[2]), 0.735)
+        self.assertLess(float(chamfer_w[2]), 0.955)
+
 
 class YamlEeVsChamferTest(unittest.TestCase):
     def test_yaml_ee_is_not_the_bag_tcp(self):
@@ -119,3 +153,49 @@ class YamlEeVsChamferTest(unittest.TestCase):
             frames["yaml_ee"][:3, 3] - frames["chamfer"][:3, 3]) * 1e3
         self.assertGreater(gap_mm, 50.0)
         self.assertLess(gap_mm, 80.0)
+
+
+class BagTcpToYamlEeTest(unittest.TestCase):
+    def test_bag_tcp_rebuilds_yaml_ee_at_recorded_q(self):
+        import gafropy as ga
+
+        from geodude_teleoperation.tcp_kinematics import (
+            RIGHT_EE,
+            apply_right_ur6,
+            bag_tcp_to_yaml_ee_world,
+            rotation_error_deg,
+            wrap_ur6_to_pm_pi,
+        )
+
+        system = ga.SystemSerialization.load(str(MODEL))
+        data = np.load(_FIXTURE)
+        q0 = np.asarray(system.get_default_configuration(), dtype=float)
+        q = apply_right_ur6(system, q0, wrap_ur6_to_pm_pi(data["q_ur6"][0]))
+        T_des = bag_tcp_to_yaml_ee_world(system, q, data["tcp_pose_xyzw"][0])
+        fk = system.compute_forward_kinematics(q)
+        T_ee = np.asarray(
+            fk.get_link_pose(RIGHT_EE).to_transformation_matrix(), dtype=float)
+        err_mm = np.linalg.norm(T_des[:3, 3] - T_ee[:3, 3]) * 1e3
+        self.assertLess(err_mm, 3.0)
+        self.assertLess(rotation_error_deg(T_des[:3, :3], T_ee[:3, :3]), 1.0)
+
+
+class RightUr6NameLookupTest(unittest.TestCase):
+    def test_ur6_lookup_is_by_name_not_array_order(self):
+        from geodude_teleoperation.tcp_kinematics import (
+            UR6_ORDER,
+            right_ur6_from_names_positions,
+        )
+
+        q = np.arange(6, dtype=float)
+        np.testing.assert_allclose(right_ur6_from_names_positions(UR6_ORDER, q), q)
+        order = [0, 1, 3, 5, 4, 2]
+        names = [UR6_ORDER[i] for i in order]
+        pos = [q[i] for i in order]
+        np.testing.assert_allclose(right_ur6_from_names_positions(names, pos), q)
+
+    def test_missing_joint_name_raises(self):
+        from geodude_teleoperation.tcp_kinematics import right_ur6_from_names_positions
+
+        with self.assertRaises(KeyError):
+            right_ur6_from_names_positions(["right_shoulder_pan_joint"], [0.0])

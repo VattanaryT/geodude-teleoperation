@@ -68,6 +68,22 @@ class VentionOverlayTest(unittest.TestCase):
         self.assertAlmostEqual(vention_q_for_base_z(1.65), 0.5)
         self.assertAlmostEqual(vention_q_for_base_z(1.12 + 0.25), 0.25)
 
+    def test_calibrated_origin_is_mount_minus_hardware_rail(self):
+        from geodude_teleoperation.vention import (
+            DEFAULT_VENTION_HEIGHT,
+            calibrated_vention_origin_z,
+            replace_vention_prismatic_origin_z,
+        )
+
+        self.assertAlmostEqual(calibrated_vention_origin_z(1.65), 1.40)
+        src = (
+            "          z: 1.12\n"
+            "          z: 1.12\n"
+        )
+        out = replace_vention_prismatic_origin_z(src, calibrated_vention_origin_z(1.65))
+        self.assertEqual(out.count("          z: 1.40"), 2)
+        self.assertNotIn("z: 1.12", out)
+
 
 if __name__ == "__main__":
     unittest.main()

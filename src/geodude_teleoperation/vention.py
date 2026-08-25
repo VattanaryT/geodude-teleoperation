@@ -30,6 +30,21 @@ def vention_q_for_base_z(z_vention: float) -> float:
         float(z_vention) - VENTION_PRISMATIC_ORIGIN_Z, 0.0, VENTION_Q_MAX))
 
 
+def calibrated_vention_origin_z(z_mount: float) -> float:
+    """Yaml prismatic origin so hardware rail q meets a calibrated mount z."""
+    return float(z_mount) - DEFAULT_VENTION_HEIGHT
+
+
+def replace_vention_prismatic_origin_z(yaml_text: str, origin_z: float) -> str:
+    """Rewrite both left/right ``z: 1.12`` prismatic origins. Raises if the count is not 2."""
+    old = f"          z: {VENTION_PRISMATIC_ORIGIN_Z}"
+    n = yaml_text.count(old)
+    if n != 2:
+        raise ValueError(
+            f"expected 2 vention origin lines {old!r}, found {n}")
+    return yaml_text.replace(old, f"          z: {float(origin_z):.2f}")
+
+
 def vention_dof_indices(system) -> dict[str, int]:
     """Actuated-DoF indices of the two vention prismatic joints."""
     return {

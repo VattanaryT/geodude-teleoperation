@@ -6,6 +6,7 @@ from scipy.spatial.transform import Rotation
 from geodude_teleoperation.sim_replay import (
     absolute_error_mm,
     apply_mode_edge,
+    bag_tcp_flange_velocity,
     body_twist_for_plant,
     format_tracking_table,
     path_follow_contact,
@@ -38,6 +39,58 @@ class PlantTwistTest(unittest.TestCase):
             v_flange, dt_s=0.1, contact=True,
             R_flange=np.eye(3), R_plant=R_plant)
         np.testing.assert_allclose(tw[3:], [0.0, -0.10, 0.0], atol=1e-12)
+
+
+class BagTcpFlangeVelocityTest(unittest.TestCase):
+    def test_identity_flange_is_world_delta_over_dt(self):
+        xyz = np.array([[0.0, 0.0, 0.0], [0.10, 0.0, 0.0], [0.10, 0.20, 0.0]])
+        R = np.stack([np.eye(3), np.eye(3), np.eye(3)])
+        v = bag_tcp_flange_velocity(xyz, R, dt_s=0.1)
+        np.testing.assert_allclose(v, [[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]])
+
+    def test_yawed_flange_does_not_use_field_frame(self):
+        xyz = np.array([[0.0, 0.0, 0.0], [0.10, 0.0, 0.0]])
+        R_flange = np.array([[[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]])
+        v = bag_tcp_flange_velocity(xyz, R_flange, dt_s=0.1)
+        np.testing.assert_allclose(v, [[0.0, -1.0, 0.0]])
+
+
+class VelocityIkTest(unittest.TestCase):
+    def test_error_maps_to_negative_task_velocity(self):
+        from geodude_teleoperation.sim_replay import task_twist_from_error
+
+        err = np.array([0.0, 0.0, 0.0, 0.02, 0.0, 0.0])
+        tw = task_twist_from_error(err, kp=10.0)
+        np.testing.assert_allclose(tw[3:], [-0.20, 0.0, 0.0])
+        np.testing.assert_allclose(tw[:3], 0.0)
+
+    def test_contact_replaces_body_z_with_dualloop(self):
+        from geodude_teleoperation.sim_replay import task_twist_from_error
+
+        err = np.array([0.1, 0.0, 0.0, 0.02, 0.01, 0.05])
+        tw = task_twist_from_error(err, kp=10.0, z_velocity=-0.004)
+        np.testing.assert_allclose(tw[5], -0.004)
+        np.testing.assert_allclose(tw[3], -0.20)
+        np.testing.assert_allclose(tw[0], -1.0)
+
+    def test_feedforward_adds_on_xy_dualloop_keeps_z(self):
+        from geodude_teleoperation.sim_replay import task_twist_from_error
+
+        err = np.zeros(6)
+        ff = np.array([0.0, 0.0, 0.0, 0.05, 0.0, 0.02])
+        tw = task_twist_from_error(err, kp=10.0, z_velocity=-0.004, feedforward=ff)
+        np.testing.assert_allclose(tw[3], 0.05)
+        np.testing.assert_allclose(tw[5], -0.004)
+
+    def test_damped_qdot_tracks_six_task_rows(self):
+        from geodude_teleoperation.sim_replay import damped_least_squares_qdot
+
+        J = np.eye(6, 7)
+        twist = np.array([0.0, 0.0, 0.0, 0.1, 0.0, 0.0])
+        qdot = damped_least_squares_qdot(J, twist)
+        self.assertEqual(qdot.shape, (7,))
+        self.assertAlmostEqual(float(qdot[3]), 0.1, places=6)
+        self.assertAlmostEqual(float(qdot[0]), 0.0, places=6)
 
 
 class ModeEdgeTest(unittest.TestCase):
@@ -120,6 +173,64 @@ class TrackingErrorTest(unittest.TestCase):
         self.assertEqual(replay_mode_label(True, follow_path=False), "contact")
         self.assertIn("path", score_legend(follow_path=True))
         self.assertIn("err_mm", score_legend(follow_path=True))
+
+
+class SlowReplayTest(unittest.TestCase):
+    def test_start_gap_refuses_when_far(self):
+        from geodude_teleoperation.sim_replay import (
+            refuse_start_gap,
+            start_gap_mm,
+        )
+
+        gap = start_gap_mm(np.array([0.0, 0.0, 0.0]), np.array([0.030, 0.0, 0.0]))
+        self.assertAlmostEqual(gap, 30.0)
+        with self.assertRaises(RuntimeError):
+            refuse_start_gap(gap, limit_mm=25.0)
+        refuse_start_gap(10.0, limit_mm=25.0)
+
+    def test_ramp_duration_is_distance_over_speed(self):
+        from geodude_teleoperation.sim_replay import ramp_duration_s
+
+        self.assertAlmostEqual(ramp_duration_s(0.10, speed_mps=0.02), 5.0)
+        self.assertAlmostEqual(ramp_duration_s(0.01, speed_mps=0.02, min_s=2.0), 2.0)
+
+    def test_blend_pose_midpoint_is_halfway(self):
+        from geodude_teleoperation.sim_replay import blend_pose_matrix
+
+        T0 = np.eye(4)
+        T1 = np.eye(4)
+        T1[:3, 3] = [0.10, 0.0, 0.0]
+        T = blend_pose_matrix(T0, T1, 0.5)
+        np.testing.assert_allclose(T[:3, 3], [0.05, 0.0, 0.0])
+        np.testing.assert_allclose(blend_pose_matrix(T0, T1, 0.0)[:3, 3], T0[:3, 3])
+        np.testing.assert_allclose(blend_pose_matrix(T0, T1, 1.0)[:3, 3], T1[:3, 3])
+
+    def test_slow_clock_is_five_times_longer_at_speed_0_2(self):
+        from geodude_teleoperation.sim_replay import slow_replay_clock
+
+        t = np.array([0.0, 0.1, 0.2])
+        t_wall, t_src = slow_replay_clock(t, speed=0.2, cmd_hz=10.0)
+        self.assertAlmostEqual(float(t_wall[-1]), 1.0)
+        np.testing.assert_allclose(t_src, t_wall * 0.2)
+        self.assertGreaterEqual(len(t_wall), 10)
+
+    def test_interpolated_path_moves_at_scaled_speed(self):
+        from geodude_teleoperation.sim_replay import (
+            interpolate_tcp_xyzw,
+            slow_replay_clock,
+        )
+
+        t = np.array([0.0, 0.1, 0.2])
+        poses = np.zeros((3, 7))
+        poses[:, 6] = 1.0
+        poses[:, 0] = [0.0, 0.015, 0.030]
+        t_wall, t_src = slow_replay_clock(t, speed=0.2, cmd_hz=10.0)
+        out = interpolate_tcp_xyzw(poses, t, t_src)
+        self.assertAlmostEqual(float(out[0, 0]), 0.0, places=6)
+        self.assertAlmostEqual(float(out[-1, 0]), 0.030, places=6)
+        dt = float(np.diff(t_wall).mean())
+        v = np.diff(out[:, 0]) / dt
+        self.assertAlmostEqual(float(np.mean(v)), 0.030, places=3)
 
 
 class BagForceAsUrTest(unittest.TestCase):

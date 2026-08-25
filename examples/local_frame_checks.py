@@ -53,11 +53,25 @@ CHECKS = (
     ),
     (
         6,
-        "mujoco closed-loop speedJ + DualLoop (not hardware)",
+        "mujoco closed-loop speedJ + DualLoop, local-action XY (test 2; not hardware)",
         [
             "python", "examples/replay_sim_controllers.py",
             "--npz", str(_ACTUAL),
         ],
+    ),
+    (
+        7,
+        "test 1: recorded bag TCP through speedJ + DualLoop (not a_local, not hardware)",
+        [
+            "python", "examples/replay_sim_controllers.py",
+            "--bag-tcp",
+            "--npz", str(_ACTUAL),
+        ],
+    ),
+    (
+        8,
+        "test 1 hardware bag TCP (viser preview; --live on the UR)",
+        ["python", "examples/replay_hardware_bag_tcp.py"],
     ),
 )
 

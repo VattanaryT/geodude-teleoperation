@@ -25,6 +25,39 @@ def _adaptive_linear_scale(distance, min_factor, max_factor, offset=0.01, scale_
     return min(max_factor, max(min_factor, factor))
 
 
+def slew_qdot(prev, desired, dt, max_qddot, max_dt=0.004):
+    """Limit |Δq̇| / dt so idle-zero and target jumps cannot command an accel spike."""
+    desired = np.asarray(desired, dtype=float).reshape(-1).copy()
+    if prev is None:
+        return desired
+    prev = np.asarray(prev, dtype=float).reshape(-1)
+    if prev.shape != desired.shape:
+        return desired
+    dt = min(max(float(dt), 0.0), float(max_dt))
+    max_step = float(max_qddot) * dt
+    if max_step <= 0.0:
+        return prev.copy()
+    delta = desired - prev
+    n = float(np.linalg.norm(delta))
+    if n <= max_step:
+        return desired
+    return prev + delta * (max_step / n)
+
+
+def lowpass_qdot(prev, desired, dt, tau=0.03, max_dt=0.004):
+    """Smooth the pre-slew command so a flipping wrist desire cannot bang-bang at max_qddot."""
+    desired = np.asarray(desired, dtype=float).reshape(-1).copy()
+    if prev is None:
+        return desired
+    prev = np.asarray(prev, dtype=float).reshape(-1)
+    if prev.shape != desired.shape:
+        return desired
+    tau = max(float(tau), 1e-6)
+    dt = min(max(float(dt), 0.0), float(max_dt))
+    alpha = min(1.0, dt / tau)
+    return prev + alpha * (desired - prev)
+
+
 def contact_pid_force_limit(target_force, *, headroom=5.0):
     """PID output clip. Must be >= |Fd| or the host loop cannot reach the target."""
     return abs(float(target_force)) + abs(float(headroom))
@@ -131,7 +164,8 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
 
     def __init__(self, inertia=None, damping=None, stiffness=None, dt=0.001,
                  max_joint_velocity=1.0, min_twist_scaling_factor=1.0,
-                 max_twist_scaling_factor=10.0, twist_linear_scale=2.0):
+                 max_twist_scaling_factor=10.0, twist_linear_scale=2.0,
+                 max_qddot=5.0):
         super().__init__()
         self._inertia = np.diag([1.0] * 6) if inertia is None else inertia
         self._damping = np.diag([20.0] * 6) if damping is None else damping
@@ -156,6 +190,20 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         self._slide_twist = np.zeros(6)
         self._max_slide_mps = 0.015
         self._max_slide_radps = 0.12
+        self._command_trace = None
+        self._stick_linear = np.zeros(3)
+        self._max_qddot = float(max_qddot)
+        self._qdot_cmd = None
+        self._qdot_des = None
+        self._qdot_cmd_t = None
+
+    def set_command_trace(self, fn):
+        """Optional callback(qdot, measured=, spring=, stick=) after each speedJ command."""
+        self._command_trace = fn
+
+    def set_stick_linear(self, linear):
+        """Latest SpaceMouse linear (m) for the command plot. Does not drive speedJ."""
+        self._stick_linear = np.asarray(linear, dtype=float).reshape(3).copy()
 
     def set_input_active(self, active: bool) -> None:
         self._input_active = bool(active)
@@ -198,6 +246,16 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         jacobian = np.asarray(task_space_state.get_jacobian())
         n_joints = int(jacobian.shape[1])
         vz = float(self._tool_z_velocity)
+        velocity = np.asarray(robot_state.get_velocity(), dtype=float).reshape(-1)
+        # robot_state here is the *control-group* slice (len 7 for one arm+vention),
+        # not the full bimanual q. get_joint_indices() are system-global and must not
+        # be used to index this vector (that crashed with index 15 on size 7).
+        if velocity.size == n_joints:
+            qdot_meas = velocity
+        elif velocity.size > n_joints:
+            qdot_meas = velocity[-n_joints:]
+        else:
+            qdot_meas = None
 
         if self._z_compliant:
             # DualLoop merge: stick ⊥n + ω as a capped Cartesian velocity, force owns Z.
@@ -209,21 +267,14 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         elif not self._input_active:
             qdot = np.zeros(n_joints)
         else:
+            if qdot_meas is None:
+                raise RuntimeError(
+                    f"robot_state velocity length {velocity.size} < task joints {n_joints}")
+            qdot_task = qdot_meas
             error = np.asarray(objective_state.get_error())
             error_derivative = np.asarray(objective_state.get_error_derivative())
             jacobian_derivative = np.asarray(
                 task_space_state.get_jacobian_derivative())
-            velocity = np.asarray(robot_state.get_velocity(), dtype=float).reshape(-1)
-            # robot_state here is the *control-group* slice (len 7 for one arm+vention),
-            # not the full bimanual q. get_joint_indices() are system-global and must not
-            # be used to index this vector (that crashed with index 15 on size 7).
-            if velocity.size == n_joints:
-                qdot_task = velocity
-            elif velocity.size > n_joints:
-                qdot_task = velocity[-n_joints:]
-            else:
-                raise RuntimeError(
-                    f"robot_state velocity length {velocity.size} < task joints {n_joints}")
 
             wrench_net = -self._stiffness @ error - self._damping @ error_derivative
             task_acceleration = np.linalg.solve(self._inertia, wrench_net)
@@ -245,6 +296,18 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         if speed > self._max_joint_velocity:
             qdot = qdot * (self._max_joint_velocity / speed)
 
+        now = time.perf_counter()
+        dt_slew = self._dt if self._qdot_cmd_t is None else now - self._qdot_cmd_t
+        self._qdot_des = lowpass_qdot(self._qdot_des, qdot, dt_slew)
+        qdot = slew_qdot(
+            self._qdot_cmd, self._qdot_des, dt_slew, self._max_qddot)
+        self._qdot_cmd = np.asarray(qdot, dtype=float).reshape(-1).copy()
+        self._qdot_cmd_t = now
+
+        if self._command_trace is not None:
+            self._command_trace(
+                qdot, measured=qdot_meas, spring=self._input_active,
+                stick=self._stick_linear)
         return qdot
 
     def set_virtual_fixture(self, vf):

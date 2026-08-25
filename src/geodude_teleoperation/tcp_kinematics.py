@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from geodude_teleoperation.ee_viz import (
+    chamfer_tcp_from_flange,
     chamfer_tcp_world_from_wrist3,
     flange_from_wrist3,
 )
@@ -40,6 +41,15 @@ UR6_ORDER = (
     "right_wrist_2_joint",
     "right_wrist_3_joint",
 )
+
+
+def right_ur6_from_names_positions(names, positions) -> np.ndarray:
+    """Bag ``JointState`` → UR6 in ``UR6_ORDER``. Looks up by name; array order is not stable."""
+    by_name = dict(zip(list(names), np.asarray(positions, dtype=float).reshape(-1)))
+    missing = [n for n in UR6_ORDER if n not in by_name]
+    if missing:
+        raise KeyError(f"joint_states missing {missing}")
+    return np.array([by_name[n] for n in UR6_ORDER], dtype=float)
 
 
 def _link_T(fk, name: str) -> np.ndarray:
@@ -108,6 +118,36 @@ def right_base_points_to_world(
     return pts @ R.T + T_base[:3, 3]
 
 
+def right_base_T_to_world(system, q_full: np.ndarray, T_rb: np.ndarray) -> np.ndarray:
+    """UR ``right_base`` pose → gafro world (same frame as yaml meshes)."""
+    fk = system.compute_forward_kinematics(np.asarray(q_full, dtype=float))
+    T_base = _link_T(fk, RIGHT_BASE)
+    T_rb = np.asarray(T_rb, dtype=float).reshape(4, 4)
+    R = T_base[:3, :3] @ GAFRO_BASE_TO_RIGHT_BASE
+    out = np.eye(4)
+    out[:3, :3] = R @ T_rb[:3, :3]
+    out[:3, 3] = T_base[:3, 3] + R @ T_rb[:3, 3]
+    return out
+
+
+def bag_tcp_to_yaml_ee_world(system, q_full: np.ndarray, tcp_xyzw: np.ndarray) -> np.ndarray:
+    """Bag chamfer pos + flange quat (right_base) → yaml ``right_ee`` in gafro world.
+
+    The pose-spring tracks this Motor, not an integrated twist, so UR5e IK
+    follows the recorded TCP instead of holding t=0 orientation while translating.
+    """
+    from scipy.spatial.transform import Rotation
+
+    pose = np.asarray(tcp_xyzw, dtype=float).reshape(7)
+    R_fl = Rotation.from_quat(pose[3:]).as_matrix()
+    T_fl_rb = np.eye(4)
+    T_fl_rb[:3, :3] = R_fl
+    T_fl_rb[:3, 3] = pose[:3] - R_fl @ chamfer_tcp_from_flange()[:3, 3]
+    frames = poses_in_right_base(system, q_full)
+    T_ee_from_fl = np.linalg.inv(frames["flange"]) @ frames["yaml_ee"]
+    return right_base_T_to_world(system, q_full, T_fl_rb @ T_ee_from_fl)
+
+
 def right_base_R_to_world(system, q_full: np.ndarray, R_rb: np.ndarray) -> np.ndarray:
     fk = system.compute_forward_kinematics(np.asarray(q_full, dtype=float))
     T_base = _link_T(fk, RIGHT_BASE)
@@ -139,12 +179,17 @@ def write_geodude_model_with_right_ur6(
     dest: Path,
     *,
     src: Path = MODEL,
+    match_t_right_mount: bool = True,
 ) -> Path:
     """Copy ``src`` with ready/home right-UR6 set to ``q_ur6`` wrapped to (−π, π].
 
     MuJoCo boots from those keyframes. ``go_to_joint_position`` deadlocks the
     Python GIL against the integrate thread, so the start pose has to be in
     the model file.
+
+    ``match_t_right_mount`` rewrites both prismatic origins so rail q=0.25
+    puts the UR mount at ``T_right_base_vention`` (z=1.65). Do not slide the
+    carriage to 0.50 m — that parks it at the top of the column.
     """
     src = Path(src)
     dest = Path(dest)
@@ -167,6 +212,16 @@ def write_geodude_model_with_right_ur6(
     if n < 2:
         raise ValueError(f"expected ready+home right UR6 blocks, found {n} in {src}")
     text = text.replace(old_block, _yaml_joint_block(wrap_ur6_to_pm_pi(q_ur6)))
+    if match_t_right_mount:
+        from geodude_teleoperation.laser_frames import DEFAULT_T_RIGHT, load_SE3
+        from geodude_teleoperation.vention import (
+            calibrated_vention_origin_z,
+            replace_vention_prismatic_origin_z,
+        )
+
+        z_mount = float(load_SE3(DEFAULT_T_RIGHT)[2, 3])
+        text = replace_vention_prismatic_origin_z(
+            text, calibrated_vention_origin_z(z_mount))
     if dest.parent.resolve() != src.parent.resolve():
         mesh = (src.parent / "assets").resolve()
         text = text.replace("meshdir: assets", f"meshdir: {mesh}", 1)
