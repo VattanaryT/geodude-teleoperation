@@ -51,6 +51,18 @@ class OverlayTest(unittest.TestCase):
         self.assertGreater(int(out.max()), 30)
         self.assertEqual(overlay_caption("contact", 2.6, 34.1), "contact  t=2.60s  fn=34.1N")
 
+    def test_annotate_bar_scales_with_frame_width(self):
+        small = annotate_wrist_frame(
+            np.zeros((80, 160, 3), dtype=np.uint8), mode="free", t_s=0.0, f_n=0.0)
+        wide = annotate_wrist_frame(
+            np.zeros((480, 848, 3), dtype=np.uint8), mode="free", t_s=0.0, f_n=0.0)
+        def bar_h(img):
+            # first row that is not the green/red bar
+            col = img[:, 0]
+            painted = np.any(col != 0, axis=1)
+            return int(np.argmax(~painted)) if (~painted).any() else img.shape[0]
+        self.assertGreater(bar_h(wide), bar_h(small) + 20)
+
 
 @unittest.skipUnless(_BAG.exists() and _NPZ.exists(), "bimanual_0 bag/npz not mounted")
 class BagWristCamTest(unittest.TestCase):

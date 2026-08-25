@@ -23,6 +23,7 @@ from geodude_teleoperation.local_frames_npz import (
     replay_arrays,
 )
 from geodude_teleoperation.mesh_fixture import load_points
+from geodude_teleoperation.viser_view import apply_stringer_view
 
 _DATA = Path("/mnt/data/boeing/local_frames_data/08_16_half_stringer_local_frames")
 _DEFAULT_NPZ = _DATA / "bags_08_16_half_stringer_bimanual_0_cga.npz"
@@ -76,6 +77,7 @@ def main() -> None:
     print("Open the viser URL. Slider/play steps the field frame + plot playhead.")
 
     server = viser.ViserServer(port=args.port)
+    apply_stringer_view(server, cloud if cloud is not None else actual)
     if cloud is not None:
         server.scene.add_point_cloud(
             "/object", points=cloud, colors=(180, 180, 185), point_size=0.002)

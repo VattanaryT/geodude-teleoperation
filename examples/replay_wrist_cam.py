@@ -20,14 +20,13 @@ from geodude_teleoperation.local_frames_npz import (
     load_cga_episode,
 )
 from geodude_teleoperation.mesh_fixture import load_points
-from geodude_teleoperation.mode_segments import sandwich_local_actions
+from geodude_teleoperation.viser_view import apply_stringer_view
 from geodude_teleoperation.wrist_cam import (
     WRIST_CAM_TOPIC,
     annotate_wrist_frame,
     decode_jpeg,
     load_wrist_cam,
     nearest_indices,
-    overlay_caption,
 )
 
 _DATA = Path("/mnt/data/boeing/local_frames_data/08_16_half_stringer_local_frames")
@@ -63,6 +62,28 @@ def _axis_arrows(origin: np.ndarray, R: np.ndarray, length: float) -> np.ndarray
     return np.stack([np.stack([o, o + length * R[:, ax]]) for ax in range(3)])
 
 
+def _mode_name(in_contact: bool) -> str:
+    return "contact" if in_contact else "free"
+
+
+_ARROW_KEYTRAP_HTML = """\
+<iframe style="width:0;height:0;border:0;position:absolute" srcdoc="<!doctype html><script>
+(function () {
+  parent.document.addEventListener('keydown', function (e) {
+    if (e.code !== 'ArrowLeft' && e.code !== 'ArrowRight') return;
+    e.stopPropagation();
+    e.preventDefault();
+    var want = e.code === 'ArrowLeft' ? 'prev' : 'next';
+    var btns = parent.document.querySelectorAll('button');
+    for (var i = 0; i < btns.length; i++) {
+      if ((btns[i].innerText || '').trim() === want) { btns[i].click(); break; }
+    }
+  }, true);
+})();
+</script>"></iframe>
+"""
+
+
 def resolve_wrist_source(cam: Path | None, bag: Path) -> Path:
     if cam is not None:
         return cam
@@ -79,7 +100,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--bag", type=Path, default=_DEFAULT_BAG)
     p.add_argument("--cam", type=Path, default=None,
                    help="wrist-cam NPZ cache; default is sidecar or --bag")
-    p.add_argument("--lost-s", type=float, default=1.0)
     p.add_argument("--port", type=int, default=8080)
     return p
 
@@ -93,20 +113,10 @@ def main() -> None:
     t_rel = t - t[0]
     actual = np.asarray(ep.poses[:, :3], dtype=float)
     R_flange = Rotation.from_quat(np.asarray(ep.poses[:, 3:7], dtype=float)).as_matrix()
-    contact, _, _, _, _ = sandwich_local_actions(
-        R_field=ep.R_field,
-        R_ee=R_flange,
-        a_local=ep.a_local,
-        in_contact=ep.in_contact,
-        timestamps=t,
-        f_n=ep.f_n,
-        lost_s=args.lost_s,
-    )
-    # sticky flags are action-length; last pose keeps the last mode
+    # Visual mode is raw training in_contact (|f_n|>=5 N), not DualLoop sticky.
     mode_flags = np.zeros(n, dtype=bool)
-    mode_flags[: len(contact)] = contact
-    if len(contact) < n:
-        mode_flags[-1] = contact[-1]
+    raw = np.asarray(ep.in_contact, dtype=bool).reshape(-1)
+    mode_flags[: min(n, len(raw))] = raw[:n]
     replay_xyz = integrate_desired_xyz(ep.action_xyz[0], ep.R_field, ep.a_local)
     f_n = None if ep.f_n is None else np.asarray(ep.f_n, dtype=float)
 
@@ -117,13 +127,18 @@ def main() -> None:
     lag = np.abs(t - cam_t[idx])
     print(
         f"episode {ep.meta.get('episode')}  N={n}  {ep.hz} Hz  "
-        f"cam={len(jpegs)}  max |t_npz-t_cam|={float(lag.max()) * 1e3:.0f} ms"
+        f"cam={len(jpegs)}  max |t_npz-t_cam|={float(lag.max()) * 1e3:.0f} ms  "
+        f"contact={float(mode_flags.mean()):.0%} (raw in_contact, |fn|>=5N)"
     )
-    print("Open viser. Slider is synced wrist JPEG + flange (bag) vs field axes.")
-    print("Contact should show the chamfer on the stringer. Flange Z vs field n.")
+    print("Check 5 mode is the force label, not DualLoop sticky (that is check 4).")
+    print("Stringer pose does not change the label. Arrows = prev/next step, not orbit.")
 
     cloud = load_points(args.ply) if args.ply.is_file() else None
     server = viser.ViserServer(port=args.port)
+    server.gui.configure_theme(control_width="large")
+    server.gui.main_panel.dock_right()
+    server.gui.main_panel.set_width(560)
+    apply_stringer_view(server, cloud if cloud is not None else actual)
     if cloud is not None:
         server.scene.add_point_cloud(
             "/object", points=cloud, colors=(180, 180, 185), point_size=0.002)
@@ -138,28 +153,35 @@ def main() -> None:
     )
     server.scene.add_frame("/axes", axes_length=0.08, axes_radius=0.003)
 
+    def _fn_at(i: int) -> float | None:
+        if f_n is None:
+            return None
+        return float(f_n[min(i, len(f_n) - 1)])
+
     first = annotate_wrist_frame(
         decode_jpeg(jpegs[int(idx[0])]),
-        mode="contact" if mode_flags[0] else "approach",
+        mode=_mode_name(bool(mode_flags[0])),
         t_s=float(t_rel[0]),
-        f_n=None if f_n is None else float(f_n[0]),
+        f_n=_fn_at(0),
     )
+    caption = server.gui.add_markdown(
+        f"## {_mode_name(bool(mode_flags[0]))}  t={t_rel[0]:.2f}s  "
+        f"fn={_fn_at(0) if _fn_at(0) is not None else 'n/a'}")
     img = server.gui.add_image(first, label="wrist_cam_0", format="jpeg")
-    caption = server.gui.add_markdown(overlay_caption(
-        "contact" if mode_flags[0] else "approach", float(t_rel[0]),
-        None if f_n is None else float(f_n[0])))
+    server.gui.add_html(_ARROW_KEYTRAP_HTML)
 
     def draw_step(i: int) -> None:
         i = int(np.clip(i, 0, n - 1))
         p = actual[i]
         R_f = ep.R_field[min(i, len(ep.R_field) - 1)]
         R_b = R_flange[i]
-        mode = "contact" if mode_flags[i] else "approach"
-        fn = None if f_n is None else float(f_n[min(i, len(f_n) - 1)])
+        mode = _mode_name(bool(mode_flags[i]))
+        fn = _fn_at(i)
         rgb = annotate_wrist_frame(
             decode_jpeg(jpegs[int(idx[i])]), mode=mode, t_s=float(t_rel[i]), f_n=fn)
         img.image = rgb
-        caption.content = overlay_caption(mode, float(t_rel[i]), fn)
+        fn_txt = f"{fn:.1f}N" if fn is not None else "n/a"
+        caption.content = f"## {mode}  t={t_rel[i]:.2f}s  fn={fn_txt}"
         server.scene.add_frame(
             "/flange",
             wxyz=_wxyz_from_R(R_b),
@@ -175,7 +197,17 @@ def main() -> None:
             "/tcp", radius=0.006, color=(255, 170, 40), position=p)
 
     slider = server.gui.add_slider("step", min=0, max=n - 1, step=1, initial_value=0)
+    with server.gui.add_folder("step keys"):
+        prev_btn = server.gui.add_button("prev")
+        next_btn = server.gui.add_button("next")
     playing = server.gui.add_checkbox("play", initial_value=False)
+
+    def _nudge(delta: int) -> None:
+        slider.value = int(np.clip(int(slider.value) + delta, 0, n - 1))
+        draw_step(int(slider.value))
+
+    prev_btn.on_click(lambda _: _nudge(-1))
+    next_btn.on_click(lambda _: _nudge(+1))
     draw_step(0)
     slider.on_update(lambda _: draw_step(int(slider.value)))
 

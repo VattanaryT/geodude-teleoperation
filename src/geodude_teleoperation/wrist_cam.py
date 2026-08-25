@@ -31,18 +31,22 @@ def annotate_wrist_frame(
     """Copy RGB frame and burn in mode / time / f_n. Does not modify ``rgb``."""
     import cv2
 
-    out = np.ascontiguousarray(rgb)
-    bgr = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
+    bgr = cv2.cvtColor(np.ascontiguousarray(rgb), cv2.COLOR_RGB2BGR)
+    h, w = bgr.shape[:2]
+    scale = max(1.2, w / 400.0)
+    bar_h = int(round(40 * scale))
+    font = 0.65 * scale
+    thick = max(2, int(round(2 * scale)))
     bar = (40, 60, 220) if mode == "contact" else (60, 180, 80)
-    cv2.rectangle(bgr, (0, 0), (bgr.shape[1], 36), bar, -1)
+    cv2.rectangle(bgr, (0, 0), (w, bar_h), bar, -1)
     cv2.putText(
         bgr,
         overlay_caption(mode, t_s, f_n),
-        (8, 26),
+        (int(10 * scale), int(bar_h * 0.72)),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
+        font,
         (255, 255, 255),
-        2,
+        thick,
         cv2.LINE_AA,
     )
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
