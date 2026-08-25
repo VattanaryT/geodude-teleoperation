@@ -20,6 +20,8 @@ def sticky_contact(
     contact for ``round(lost_s / dt)`` free samples, then drop.
     """
     raw = np.asarray(raw, dtype=bool).reshape(-1)
+    if float(lost_s) <= 0.0:
+        return raw.copy()
     n_hold = max(1, int(round(float(lost_s) / float(dt_s))))
     out = np.zeros(len(raw), dtype=bool)
     in_contact = False

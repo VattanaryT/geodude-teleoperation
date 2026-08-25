@@ -47,6 +47,7 @@ from geodude_teleoperation.ee_viz import (
     StartupAlign,
     SimTcpProbe,
 )
+from geodude_teleoperation.sim_replay import enter_speedj_contact, exit_speedj_contact
 from geodude_teleoperation.force_mode_contact import (
     ForceModeContactSession,
     reopen_gafropy,
@@ -137,30 +138,6 @@ def drive_startup_align(align, controller, now, T_flange, R_field, T_ee):
         controller.set_input_active(False)
         controller.hold_live_pose()
     return cmd
-
-
-def enter_speedj_contact(*, mode, contact_controller, approach_controller, interface=None):
-    """Keep the pose-spring speedJ plant. Overlay DualLoop Z. Do not swap to line admittance."""
-    del interface  # caller may pass it; we must not interface.control(contact)
-    mode["active"] = "contact"
-    approach_controller.hold_live_pose()
-    approach_controller.set_input_active(False)
-    approach_controller.set_tool_z_velocity(0.0)
-    approach_controller.set_z_compliant(True)
-    contact_controller.set_on_vz(approach_controller.set_tool_z_velocity)
-    contact_controller.start()
-
-
-def exit_speedj_contact(*, mode, contact_controller, approach_controller, interface=None):
-    """Drop Z overlay and freeze on the same pose-spring plant."""
-    del interface
-    contact_controller.stop()
-    contact_controller.set_on_vz(None)
-    approach_controller.set_tool_z_velocity(0.0)
-    approach_controller.set_z_compliant(False)
-    approach_controller.hold_live_pose()
-    approach_controller.set_input_active(False)
-    mode["active"] = "approach"
 
 
 def build_arg_parser():

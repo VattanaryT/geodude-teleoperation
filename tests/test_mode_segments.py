@@ -31,6 +31,11 @@ class StickyContactTest(unittest.TestCase):
         out = sticky_contact(raw, dt_s=0.1, lost_s=1.0)
         np.testing.assert_array_equal(out.astype(int), [0, 0, 1, 1])
 
+    def test_lost_s_zero_is_raw(self):
+        raw = np.array([0, 1, 0, 0, 1], dtype=bool)
+        out = sticky_contact(raw, dt_s=0.1, lost_s=0.0)
+        np.testing.assert_array_equal(out.astype(int), raw.astype(int))
+
 
 class BodyLinearTest(unittest.TestCase):
     def test_field_step_in_aligned_ee_is_body_velocity(self):

@@ -51,6 +51,14 @@ CHECKS = (
             "--npz", str(_ACTUAL),
         ],
     ),
+    (
+        6,
+        "mujoco closed-loop speedJ + DualLoop (not hardware)",
+        [
+            "python", "examples/replay_sim_controllers.py",
+            "--npz", str(_ACTUAL),
+        ],
+    ),
 )
 
 
