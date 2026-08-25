@@ -11,7 +11,7 @@ import time
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from geodude_teleoperation.ee_viz import motor_from_matrix, orientation_error_rad
+from geodude_teleoperation.ee_viz import motor_from_matrix
 
 RTDE_PERIOD_MS = 2.0
 
@@ -86,10 +86,13 @@ class FieldFollow:
             self._pending = self._pending + np.asarray(linear, dtype=float).reshape(3)
             self._idle = False
 
-    def set_idle(self):
+    def set_idle(self, xyz=None):
         with self._lock:
             self._pending[:] = 0.0
             self._idle = True
+            if xyz is not None:
+                self._xyz = np.asarray(xyz, dtype=float).reshape(3).copy()
+                self.last_target = _motor_at(self._xyz, self._R)
 
     def _drain(self):
         with self._lock:
@@ -138,8 +141,13 @@ class FieldFollow:
 
 
 def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
-                       err_rad=0.05, map_target=None):
-    """Apply a follow tick to the pose spring. Idle freezes the last field target."""
+                       err_rad=0.05, map_target=None, live_xyz=None):
+    """Apply a follow tick to the pose spring.
+
+    Idle stops the tracker immediately and rebases the carrot to ``live_xyz``
+    so a far-ahead field target cannot keep speedJ running after hands-off.
+    """
+    del live_R, err_rad
     tick = follow.tick(now, proposed_motor)
     target = tick.target
     if target is not None and map_target is not None:
@@ -149,16 +157,14 @@ def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
         controller.set_input_active(True)
         return tick
     if follow.idle:
-        if follow.last_target is None:
-            controller.set_input_active(False)
-            return tick
-        if live_R is not None:
-            T = np.asarray(
-                follow.last_target.to_transformation_matrix(), dtype=float)
-            err = orientation_error_rad(live_R, T[:3, :3])
-            controller.set_input_active(err > float(err_rad))
-        else:
-            controller.set_input_active(True)
+        if live_xyz is not None:
+            follow.set_idle(live_xyz)
+        if follow.last_target is not None:
+            frozen = follow.last_target
+            if map_target is not None:
+                frozen = map_target(frozen)
+            controller.get_objective().set_target(frozen)
+        controller.set_input_active(False)
         return tick
     if follow.last_target is not None:
         controller.set_input_active(True)

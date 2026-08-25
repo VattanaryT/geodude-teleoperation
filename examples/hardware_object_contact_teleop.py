@@ -449,7 +449,7 @@ def main():
         now = time.monotonic()
         tick = drive_field_follow(
             follow, approach_controller, now, motor_from_matrix(T_prop),
-            live_R=np.asarray(T_flange_viz, dtype=float)[:3, :3],
+            live_xyz=live_tcp_xyz_from_flange(T_flange_viz),
             map_target=map_target)
         if tick.project_ms is not None and (
                 tick.would_overrun_rtde or (now - follow_log_t["t"]) >= 1.0):

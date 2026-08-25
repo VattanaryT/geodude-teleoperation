@@ -7,7 +7,6 @@ from geodude_teleoperation.ee_viz import (
     ghost_flange_world,
     live_tcp_xyz_from_flange,
     motor_from_matrix,
-    orientation_error_rad,
 )
 from geodude_teleoperation.field_follow import (
     FieldFollow,
@@ -138,7 +137,7 @@ class FieldFollowTest(unittest.TestCase):
         self.assertTrue(tick.would_overrun_rtde)
         self.assertGreater(tick.project_ms, 2.0)
 
-    def test_drive_idle_keeps_last_target_then_releases_when_close(self):
+    def test_drive_idle_stops_even_if_orientation_lags(self):
         vf = FakeVf()
         follow = FieldFollow(vf, hz=50.0)
         follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
@@ -147,20 +146,29 @@ class FieldFollowTest(unittest.TestCase):
         drive_field_follow(
             follow, ctrl, 0.0, _motor_at([0.0, 0.0, 1.0]), live_R=np.eye(3))
         self.assertTrue(ctrl.active)
-        self.assertIsNotNone(ctrl._obj.target)
-        held = ctrl._obj.target
         follow.set_idle()
         R_into = np.diag([1.0, -1.0, -1.0])
         drive_field_follow(
             follow, ctrl, 0.1, _motor_at([0.0, 0.0, 1.0], R_into),
-            live_R=R_into, err_rad=0.05)
-        self.assertTrue(ctrl.active)
-        self.assertIs(ctrl._obj.target, held)
-        drive_field_follow(
-            follow, ctrl, 0.2, _motor_at([0.0, 0.0, 1.0]),
-            live_R=np.eye(3), err_rad=0.05)
+            live_R=R_into, live_xyz=np.array([0.0, 0.0, 1.0]))
         self.assertFalse(ctrl.active)
-        self.assertIs(ctrl._obj.target, held)
+
+    def test_idle_rebases_carrot_to_live_without_project(self):
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.05, 0.0, 0.0]))
+        ctrl = FakeCtrl()
+        drive_field_follow(follow, ctrl, 0.0, _motor_at([0.0, 0.0, 1.0]))
+        self.assertAlmostEqual(float(follow.xyz[0]), 0.05, places=9)
+        n = len(vf.projects)
+        follow.set_idle()
+        drive_field_follow(
+            follow, ctrl, 0.1, _motor_at([0.0, 0.0, 1.0]),
+            live_xyz=np.array([0.01, 0.0, 1.0]))
+        self.assertEqual(len(vf.projects), n)
+        np.testing.assert_allclose(follow.xyz, [0.01, 0.0, 1.0], atol=1e-9)
+        self.assertFalse(ctrl.active)
 
     def test_drive_does_not_project_on_idle_settle(self):
         vf = FakeVf()
