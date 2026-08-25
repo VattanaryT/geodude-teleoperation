@@ -1,9 +1,11 @@
-"""Offline 3D + plot replay of one CGA local-frame episode (right_base).
+"""Check 2: offline 3D + plot replay of one CGA local-frame episode (right_base).
 
-No robot, no controllers. Ghost TCP is integrated from a_local through R_field
-(desired path). Actual TCP is the bag pose overlay.
+Not sim and not the robot. Catalog of rerunnable checks:
 
-  PYTHONPATH=src python examples/replay_local_frames.py
+  PYTHONPATH=src python examples/local_frame_checks.py
+
+  PYTHONPATH=src python examples/replay_local_frames.py \\
+    --npz /mnt/data/boeing/local_frames_data/08_16_half_stringer_local_frames/bags_08_16_half_stringer_bimanual_0_cga_actual.npz
 """
 from __future__ import annotations
 
