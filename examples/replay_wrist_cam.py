@@ -20,7 +20,14 @@ from geodude_teleoperation.local_frames_npz import (
     load_cga_episode,
 )
 from geodude_teleoperation.mesh_fixture import load_points
-from geodude_teleoperation.viser_view import apply_stringer_view
+from geodude_teleoperation.viser_view import (
+    AXIS_RGB,
+    apply_stringer_view,
+    axis_arrows,
+    contact_segment_colors,
+    polyline_segments,
+    wxyz_from_R,
+)
 from geodude_teleoperation.wrist_cam import (
     WRIST_CAM_TOPIC,
     annotate_wrist_frame,
@@ -35,31 +42,6 @@ _DEFAULT_TRAIN = _DATA / "training" / "bags_08_16_half_stringer_bimanual_0.npz"
 _DEFAULT_PLY = _DATA / "merged_rightbase.ply"
 _DEFAULT_BAG = Path("/mnt/data/boeing/data/bags_08_16_half_stringer/bimanual_0")
 _DEFAULT_CAM = _DATA / "bags_08_16_half_stringer_bimanual_0_wrist_cam.npz"
-
-_AXIS_RGB = np.array([[255, 40, 40], [40, 200, 40], [40, 80, 255]], dtype=np.uint8)
-
-
-def _polyline_segments(xyz: np.ndarray) -> np.ndarray:
-    return np.stack([xyz[:-1], xyz[1:]], axis=1)
-
-
-def _wxyz_from_R(R: np.ndarray) -> np.ndarray:
-    q_xyzw = Rotation.from_matrix(R).as_quat()
-    return np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]])
-
-
-def _contact_segment_colors(in_contact: np.ndarray, n_seg: int) -> np.ndarray:
-    flags = np.asarray(in_contact[:n_seg], dtype=bool)
-    colors = np.zeros((n_seg, 2, 3), dtype=np.uint8)
-    colors[:, :, :] = (80, 180, 90)
-    colors[flags] = (220, 60, 50)
-    return colors
-
-
-def _axis_arrows(origin: np.ndarray, R: np.ndarray, length: float) -> np.ndarray:
-    o = np.asarray(origin, dtype=float).reshape(3)
-    R = np.asarray(R, dtype=float).reshape(3, 3)
-    return np.stack([np.stack([o, o + length * R[:, ax]]) for ax in range(3)])
 
 
 def _mode_name(in_contact: bool) -> str:
@@ -143,12 +125,12 @@ def main() -> None:
         server.scene.add_point_cloud(
             "/object", points=cloud, colors=(180, 180, 185), point_size=0.002)
     server.scene.add_line_segments(
-        "/replay", points=_polyline_segments(replay_xyz),
-        colors=_contact_segment_colors(mode_flags, n - 1),
+        "/replay", points=polyline_segments(replay_xyz),
+        colors=contact_segment_colors(mode_flags, n - 1),
         thickness=0.0025,
     )
     server.scene.add_line_segments(
-        "/actual", points=_polyline_segments(actual),
+        "/actual", points=polyline_segments(actual),
         colors=(255, 170, 40), thickness=0.0015,
     )
     server.scene.add_frame("/axes", axes_length=0.08, axes_radius=0.003)
@@ -184,13 +166,13 @@ def main() -> None:
         caption.content = f"## {mode}  t={t_rel[i]:.2f}s  fn={fn_txt}"
         server.scene.add_frame(
             "/flange",
-            wxyz=_wxyz_from_R(R_b),
+            wxyz=wxyz_from_R(R_b),
             position=p,
             axes_length=0.05,
             axes_radius=0.0025,
         )
         server.scene.add_arrows(
-            "/R_field", points=_axis_arrows(p, R_f, 0.06), colors=_AXIS_RGB,
+            "/R_field", points=axis_arrows(p, R_f, 0.06), colors=AXIS_RGB,
             shaft_radius=0.0015, head_radius=0.0035, head_length=0.008,
         )
         server.scene.add_icosphere(

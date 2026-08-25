@@ -4,10 +4,15 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from geodude_teleoperation.sim_replay import (
+    absolute_error_mm,
     apply_mode_edge,
     body_twist_for_plant,
     format_tracking_table,
+    path_follow_contact,
     relative_error_mm,
+    replay_mode_label,
+    score_legend,
+    summarize_tracking,
     ur_reaction_fz,
 )
 
@@ -70,6 +75,15 @@ class TrackingErrorTest(unittest.TestCase):
         self.assertAlmostEqual(z, 0.0)
         self.assertAlmostEqual(n, 0.0)
 
+    def test_absolute_error_is_live_minus_bag(self):
+        xy, z, n = absolute_error_mm(
+            live_xyz=np.array([1.01, 2.0, 3.05]),
+            bag_xyz=np.array([1.0, 2.0, 3.0]),
+        )
+        self.assertAlmostEqual(xy, 10.0)
+        self.assertAlmostEqual(z, 50.0)
+        self.assertAlmostEqual(n, float(np.hypot(10.0, 50.0)))
+
     def test_table_lists_mode_and_errors(self):
         from geodude_teleoperation.sim_replay import TrackingRow
 
@@ -81,6 +95,31 @@ class TrackingErrorTest(unittest.TestCase):
         self.assertIn("approach", text)
         self.assertIn("contact", text)
         self.assertIn("40.00", text)
+
+    def test_controller_score_is_contact_xy_not_3d(self):
+        from geodude_teleoperation.sim_replay import TrackingRow
+
+        rows = [
+            TrackingRow(0, 0.0, "approach", 1.0, 0.5, 1.1, 0.2, 0.0),
+            TrackingRow(1, 0.1, "contact", 2.0, 40.0, 40.1, 40.0, 0.005),
+            TrackingRow(2, 0.2, "contact", 4.0, 40.0, 40.2, 40.0, 0.005),
+        ]
+        text = summarize_tracking(rows)
+        legend = score_legend(follow_path=False)
+        self.assertIn("mean_xy", text)
+        self.assertIn("XY", legend)
+        self.assertIn("DualLoop", legend)
+        self.assertNotIn("3D", legend)
+
+    def test_path_follow_keeps_press_and_skips_dualloop(self):
+        raw = np.array([False, True, True, False])
+        np.testing.assert_array_equal(path_follow_contact(raw, follow_path=True), False)
+        np.testing.assert_array_equal(path_follow_contact(raw, follow_path=False), raw)
+        self.assertEqual(replay_mode_label(True, follow_path=True), "path")
+        self.assertEqual(replay_mode_label(False, follow_path=True), "path")
+        self.assertEqual(replay_mode_label(True, follow_path=False), "contact")
+        self.assertIn("path", score_legend(follow_path=True))
+        self.assertIn("err_mm", score_legend(follow_path=True))
 
 
 class BagForceAsUrTest(unittest.TestCase):

@@ -10,6 +10,33 @@ the camera looks down onto the stringer the same way the tool does.
 from __future__ import annotations
 
 import numpy as np
+from scipy.spatial.transform import Rotation
+
+_AXIS_RGB = np.array([[255, 40, 40], [40, 200, 40], [40, 80, 255]], dtype=np.uint8)
+AXIS_RGB = _AXIS_RGB
+
+
+def polyline_segments(xyz: np.ndarray) -> np.ndarray:
+    return np.stack([xyz[:-1], xyz[1:]], axis=1)
+
+
+def wxyz_from_R(R: np.ndarray) -> np.ndarray:
+    q_xyzw = Rotation.from_matrix(np.asarray(R, dtype=float).reshape(3, 3)).as_quat()
+    return np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]])
+
+
+def contact_segment_colors(in_contact: np.ndarray, n_seg: int) -> np.ndarray:
+    flags = np.asarray(in_contact[:n_seg], dtype=bool)
+    colors = np.zeros((n_seg, 2, 3), dtype=np.uint8)
+    colors[:, :, :] = (80, 180, 90)
+    colors[flags] = (220, 60, 50)
+    return colors
+
+
+def axis_arrows(origin: np.ndarray, R: np.ndarray, length: float) -> np.ndarray:
+    o = np.asarray(origin, dtype=float).reshape(3)
+    R = np.asarray(R, dtype=float).reshape(3, 3)
+    return np.stack([np.stack([o, o + length * R[:, ax]]) for ax in range(3)])
 
 
 def sitting_up_axis(points: np.ndarray) -> np.ndarray:

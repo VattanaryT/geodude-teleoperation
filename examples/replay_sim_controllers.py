@@ -1,15 +1,16 @@
 """Check 6: closed-loop MuJoCo replay through speedJ + DualLoop (not hardware).
 
-Kinematics are checks 3/5. This clocks the check-4 sandwich into the same
-plants as ``hardware_object_contact_teleop.py`` and prints TCP tracking error.
-
-The gafro plant is yaml ``right_ee``. Error is chamfer FK vs bag TCP, relative
-to each path's start (MuJoCo home joints are not the bag). DualLoop Fz is the
-bag force label played back as a UR reaction, not simulated contact physics.
+Same right_base wrist-cam viewer as check 5 (stringer + bag path + live TCP).
+The gafro plant is yaml ``right_ee``. DualLoop Fz is bag playback, not MuJoCo
+contact. Default boots the right UR at bag start joints so cyan sits on orange
+at t=0. In contact, DualLoop owns tool-Z: score XY, not 3D TCP.
+``--follow-path`` skips DualLoop and keeps press (``a_n``) so cyan can track
+orange through contact; that does not sign off the force loop.
 
   PYTHONPATH=src python examples/local_frame_checks.py 6
 
-  PYTHONPATH=src python examples/replay_sim_controllers.py --headless --fast --frames 40
+  PYTHONPATH=src python examples/replay_sim_controllers.py --headless --frames 40
+  PYTHONPATH=src python examples/replay_sim_controllers.py --follow-path --headless --frames 40
 """
 from __future__ import annotations
 
@@ -24,24 +25,54 @@ from gafropy import robot_interface as ri
 from scipy.spatial.transform import Rotation
 
 from geodude_teleoperation import AdmittanceTeleoperationController, ContactTeleoperationController
-from geodude_teleoperation.local_frames_npz import load_cga_episode
+from geodude_teleoperation.local_frames_npz import integrate_desired_xyz, load_cga_episode
+from geodude_teleoperation.mesh_fixture import load_points
 from geodude_teleoperation.mode_segments import sandwich_local_actions
 from geodude_teleoperation.sim_replay import (
     TrackingRow,
+    absolute_error_mm,
     apply_mode_edge,
     body_twist_for_plant,
     enter_speedj_contact,
     exit_speedj_contact,
     format_tracking_table,
-    relative_error_mm,
+    path_follow_contact,
+    replay_mode_label,
+    score_legend,
     summarize_tracking,
     ur_reaction_fz,
 )
-from geodude_teleoperation.tcp_kinematics import MODEL, poses_in_right_base
+from geodude_teleoperation.tcp_kinematics import (
+    MODEL,
+    poses_in_right_base,
+    write_geodude_model_with_right_ur6,
+)
+from geodude_teleoperation.viser_view import (
+    AXIS_RGB,
+    apply_stringer_view,
+    axis_arrows,
+    contact_segment_colors,
+    polyline_segments,
+    wxyz_from_R,
+)
+from geodude_teleoperation.wrist_cam import (
+    WRIST_CAM_TOPIC,
+    annotate_wrist_frame,
+    decode_jpeg,
+    load_wrist_cam,
+    nearest_indices,
+)
 
 _DATA = Path("/mnt/data/boeing/local_frames_data/08_16_half_stringer_local_frames")
 _DEFAULT_NPZ = _DATA / "bags_08_16_half_stringer_bimanual_0_cga_actual.npz"
 _DEFAULT_TRAIN = _DATA / "training" / "bags_08_16_half_stringer_bimanual_0.npz"
+_DEFAULT_PLY = _DATA / "merged_rightbase.ply"
+_DEFAULT_BAG = Path("/mnt/data/boeing/data/bags_08_16_half_stringer/bimanual_0")
+_DEFAULT_CAM = _DATA / "bags_08_16_half_stringer_bimanual_0_wrist_cam.npz"
+_DEFAULT_JOINTS = Path(__file__).resolve().parent.parent / (
+    "tests/fixtures/bimanual_0_tcp_fk_samples.npz"
+)
+_START_MODEL = MODEL.parent / ".geodude_start_right_ur6.yaml"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,6 +85,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--headless", action="store_true")
     p.add_argument("--verbose-rows", action="store_true",
                    help="print every sample, not just the segment summary")
+    p.add_argument("--ply", type=Path, default=_DEFAULT_PLY)
+    p.add_argument("--bag", type=Path, default=_DEFAULT_BAG)
+    p.add_argument("--cam", type=Path, default=None)
+    p.add_argument("--port", type=int, default=8080)
+    p.add_argument(
+        "--follow-path", action="store_true",
+        help="keep a_n / never DualLoop; score 3D TCP (does not sign off force loop)",
+    )
+    p.add_argument(
+        "--no-bag-start", action="store_true",
+        help="boot yaml home joints instead of bag start (cyan off orange at t=0)",
+    )
+    p.add_argument(
+        "--joints", type=Path, default=_DEFAULT_JOINTS,
+        help="NPZ with q_ur6[0] for bag start joints",
+    )
     return p
 
 
@@ -96,17 +143,21 @@ def main() -> None:
     R_flange = Rotation.from_quat(np.asarray(ep.poses[: n + 1, 3:7], dtype=float)).as_matrix()
     raw = np.asarray(ep.in_contact[:n], dtype=bool)
     fn = None if ep.f_n is None else np.asarray(ep.f_n, dtype=float).reshape(-1)[:n]
+    sandwich_contact = path_follow_contact(raw, follow_path=args.follow_path)
     _, v_body, _, _, _ = sandwich_local_actions(
         R_field=ep.R_field, R_ee=R_flange, a_local=ep.a_local,
-        in_contact=raw, timestamps=t, f_n=fn, lost_s=0.0)
+        in_contact=sandwich_contact, timestamps=t, f_n=fn, lost_s=0.0)
     n_run = n if args.frames <= 0 else min(n, int(args.frames))
     bag_xyz = np.asarray(ep.action_xyz[: n_run + 1], dtype=float)
 
+    replay_kind = "path" if args.follow_path else "controllers"
     print(
         f"check 6  episode={ep.meta.get('episode')}  {ep.hz} Hz  "
-        f"frames={n_run}/{n}  plant=yaml right_ee  error=chamfer vs bag (relative t=0)",
+        f"frames={n_run}/{n}  plant=yaml right_ee  replay={replay_kind}  "
+        f"error=chamfer vs bag (absolute)",
         flush=True,
     )
+    print(score_legend(follow_path=args.follow_path), flush=True)
     print(
         "mode=raw in_contact  Fd=|f_n| at enter  "
         "Fz=bag playback (not MuJoCo contact)  not hardware",
@@ -119,8 +170,16 @@ def main() -> None:
             flush=True,
         )
 
+    model_file = MODEL
+    if not args.no_bag_start:
+        if not args.joints.is_file():
+            raise FileNotFoundError(f"bag start joints missing: {args.joints}")
+        q6 = np.asarray(np.load(args.joints)["q_ur6"][0], dtype=float).reshape(6)
+        model_file = write_geodude_model_with_right_ur6(q6, _START_MODEL)
+        print(f"start joints from {args.joints.name} -> {model_file.name}", flush=True)
+
     config = ri.Configuration()
-    config.model_file = str(MODEL)
+    config.model_file = str(model_file)
     config.type = "mujoco"
     interface = ri.RobotInterface(config)
     interface.initialize()
@@ -142,6 +201,7 @@ def main() -> None:
     approach.set_task_space(task_space)
     approach.set_interface(interface)
     approach.set_objective(ga.control.SingleArmMotorControlObjective(home))
+    approach._max_slide_mps = 0.08
 
     fz_state = {"i": 0, "contact": False, "fn": 0.0}
 
@@ -149,11 +209,11 @@ def main() -> None:
         return ur_reaction_fz(fz_state["fn"], in_contact=fz_state["contact"])
 
     contact = _make_contact(task_space, interface, home, measured_fz)
-    mode = {"active": "approach"}
+    mode = {"active": "path" if args.follow_path else "approach"}
     rows: list[TrackingRow] = []
-    live0 = {"p": None}
     bag0 = bag_xyz[0]
     approach_target = {"m": None}
+    view = {"draw": None}
 
     def live_ee_motor():
         return task_space.compute_ee_motor(
@@ -174,41 +234,44 @@ def main() -> None:
     def on_exit():
         exit_speedj_contact(
             mode=mode, contact_controller=contact, approach_controller=approach)
-        approach_target["m"] = None
 
     def step(i: int) -> None:
         fz_state["i"] = i
         fz_state["contact"] = bool(raw[i])
         fz_state["fn"] = 0.0 if fn is None else float(fn[i])
-        apply_mode_edge(
-            mode, bool(raw[i]), on_enter=on_enter, on_exit=on_exit)
-        _q, frames = live_frames()
-        tw = body_twist_for_plant(
-            v_body[i], dt_s=dt_s, contact=mode["active"] == "contact",
-            R_flange=R_flange[i], R_plant=frames["yaml_ee"][:3, :3])
-        if mode["active"] == "contact":
-            approach.update_command(ga.Twist.from_array(tw))
+        if args.follow_path:
+            mode["active"] = "path"
         else:
-            # Increment a chained target, not the lagged live EE, so the spring
-            # can catch up. SpaceMouse does the catch-up with the operator's eye.
-            if approach_target["m"] is None:
-                approach_target["m"] = live_ee_motor()
-            w, v = tw[:3], tw[3:]
-            approach_target["m"] = approach_target["m"].multiply(
-                ga.Motor.exp(w[0], w[1], w[2], v[0], v[1], v[2]))
+            apply_mode_edge(
+                mode, bool(raw[i]), on_enter=on_enter, on_exit=on_exit)
+        _q, frames = live_frames()
+        disp = body_twist_for_plant(
+            v_body[i], dt_s=dt_s, contact=False,
+            R_flange=R_flange[i], R_plant=frames["yaml_ee"][:3, :3])
+        if approach_target["m"] is None:
+            approach_target["m"] = live_ee_motor()
+        w, v = disp[:3], disp[3:]
+        approach_target["m"] = approach_target["m"].multiply(
+            ga.Motor.exp(w[0], w[1], w[2], v[0], v[1], v[2]))
+        if mode["active"] == "contact":
+            vel = body_twist_for_plant(
+                v_body[i], dt_s=dt_s, contact=True,
+                R_flange=R_flange[i], R_plant=frames["yaml_ee"][:3, :3])
+            approach.update_command(ga.Twist.from_array(vel))
+        else:
             approach.get_objective().set_target(approach_target["m"])
             approach.set_input_active(True)
-        if live0["p"] is None:
-            live0["p"] = frames["chamfer"][:3, 3].copy()
-        xy, z, err = relative_error_mm(
-            live_xyz=frames["chamfer"][:3, 3], bag_xyz=bag_xyz[i],
-            live0=live0["p"], bag0=bag0)
+        xy, z, err = absolute_error_mm(
+            live_xyz=frames["chamfer"][:3, 3], bag_xyz=bag_xyz[i])
         rows.append(TrackingRow(
-            i=i, t=float(t[i]), mode=mode["active"],
+            i=i, t=float(t[i]),
+            mode=replay_mode_label(bool(raw[i]), follow_path=args.follow_path),
             err_xy_mm=xy, err_z_mm=z, err_mm=err,
             abs_fn=None if fn is None else abs(float(fn[i])),
             plant_vz=float(approach._tool_z_velocity),
         ))
+        if view["draw"] is not None:
+            view["draw"](i, frames["chamfer"][:3, 3], frames["flange"][:3, :3], err)
 
     def run_clock() -> None:
         last_mode = None
@@ -219,7 +282,9 @@ def main() -> None:
                     last_mode = rows[-1].mode
                     r = rows[-1]
                     print(
-                        f"t={r.t:.2f}s -> {r.mode}  err={r.err_mm:.1f}mm",
+                        f"t={r.t:.2f}s -> {r.mode}  "
+                        f"xy={r.err_xy_mm:.1f}mm  z={r.err_z_mm:.1f}mm  "
+                        f"err={r.err_mm:.1f}mm",
                         flush=True,
                     )
                 time.sleep(0.01 if args.fast else dt_s)
@@ -233,7 +298,17 @@ def main() -> None:
             print("no samples", flush=True)
             return
         print(flush=True)
+        print(score_legend(follow_path=args.follow_path), flush=True)
         print(summarize_tracking(rows), flush=True)
+        contact_rows = [r for r in rows if r.mode == "contact"]
+        if contact_rows:
+            xys = np.array([r.err_xy_mm for r in contact_rows], dtype=float)
+            zs = np.array([r.err_z_mm for r in contact_rows], dtype=float)
+            print(
+                f"contact score mean_xy={float(xys.mean()):.2f} mm  "
+                f"(DualLoop Z mean_z={float(zs.mean()):.2f} mm)",
+                flush=True,
+            )
         errs = np.array([r.err_mm for r in rows], dtype=float)
         print(
             f"overall mean {float(errs.mean()):.2f} mm  max {float(errs.max()):.2f} mm  "
@@ -244,40 +319,109 @@ def main() -> None:
             print(flush=True)
             print(format_tracking_table(rows), flush=True)
 
+    interface.control(approach, blocking=False)
     approach.set_input_active(False)
     approach.hold_live_pose()
-    interface.control(approach, blocking=False)
+    _q0, fr0 = live_frames()
+    start_mm = float(np.linalg.norm(fr0["chamfer"][:3, 3] - bag0) * 1e3)
+    start_note = (
+        "yaml home, not bag joints" if args.no_bag_start
+        else "bag start joints"
+    )
+    print(
+        f"sim chamfer vs bag TCP at t=0: {start_mm:.1f} mm ({start_note}). "
+        f"Overlay is right_base like check 5.",
+        flush=True,
+    )
+
+    def _build_wrist_view():
+        import viser
+
+        n_pose = len(ep.poses)
+        actual = np.asarray(ep.poses[:, :3], dtype=float)
+        replay_xyz = integrate_desired_xyz(ep.action_xyz[0], ep.R_field, ep.a_local)
+        mode_flags = np.zeros(n_pose, dtype=bool)
+        mode_flags[: min(n_pose, len(raw))] = raw[:n_pose]
+        cam_src = args.cam if args.cam is not None else (
+            _DEFAULT_CAM if _DEFAULT_CAM.is_file() else args.bag)
+        print(f"loading wrist cam from {cam_src} ({WRIST_CAM_TOPIC})", flush=True)
+        cam_t, jpegs = load_wrist_cam(cam_src, WRIST_CAM_TOPIC)
+        stamps = np.asarray(ep.timestamps, dtype=float)
+        idx = nearest_indices(stamps, cam_t)
+        cloud = load_points(args.ply) if args.ply.is_file() else None
+        if cloud is None:
+            print(f"stringer ply missing: {args.ply}", flush=True)
+        else:
+            print(f"stringer {args.ply.name} in right_base ({len(cloud)} pts)", flush=True)
+        server = viser.ViserServer(port=args.port)
+        server.gui.configure_theme(control_width="large")
+        server.gui.main_panel.dock_right()
+        server.gui.main_panel.set_width(560)
+        apply_stringer_view(server, cloud if cloud is not None else actual)
+        if cloud is not None:
+            server.scene.add_point_cloud(
+                "/object", points=cloud, colors=(180, 180, 185), point_size=0.002)
+        server.scene.add_line_segments(
+            "/replay", points=polyline_segments(replay_xyz),
+            colors=contact_segment_colors(mode_flags, n_pose - 1),
+            thickness=0.0025,
+        )
+        server.scene.add_line_segments(
+            "/actual", points=polyline_segments(actual),
+            colors=(255, 170, 40), thickness=0.0015,
+        )
+        server.scene.add_frame("/axes", axes_length=0.08, axes_radius=0.003)
+        first = annotate_wrist_frame(
+            decode_jpeg(jpegs[int(idx[0])]), mode="free", t_s=0.0, f_n=None)
+        caption = server.gui.add_markdown("## check 6")
+        img = server.gui.add_image(first, label="wrist_cam_0", format="jpeg")
+
+        def draw(i: int, live_xyz: np.ndarray, live_R: np.ndarray, _err: float) -> None:
+            i = int(np.clip(i, 0, n_pose - 1))
+            p = actual[i]
+            R_f = ep.R_field[min(i, len(ep.R_field) - 1)]
+            R_b = R_flange[min(i, len(R_flange) - 1)]
+            contact_i = bool(mode_flags[i])
+            mode = "contact" if contact_i else "free"
+            fn_i = None if fn is None else float(fn[min(i, len(fn) - 1)])
+            img.image = annotate_wrist_frame(
+                decode_jpeg(jpegs[int(idx[i])]), mode=mode, t_s=float(t[i]), f_n=fn_i)
+            xy_mm = float(np.hypot(live_xyz[0] - p[0], live_xyz[1] - p[1]) * 1e3)
+            abs_mm = float(np.linalg.norm(live_xyz - p) * 1e3)
+            fn_txt = f"{fn_i:.1f}N" if fn_i is not None else "n/a"
+            caption.content = (
+                f"## {mode}  t={t[i]:.2f}s  fn={fn_txt}  "
+                f"xy={xy_mm:.0f}mm  abs={abs_mm:.0f}mm"
+            )
+            server.scene.add_frame(
+                "/flange", wxyz=wxyz_from_R(R_b), position=p,
+                axes_length=0.05, axes_radius=0.0025)
+            server.scene.add_arrows(
+                "/R_field", points=axis_arrows(p, R_f, 0.06), colors=AXIS_RGB,
+                shaft_radius=0.0015, head_radius=0.0035, head_length=0.008)
+            server.scene.add_icosphere(
+                "/tcp_bag", radius=0.006, color=(255, 170, 40), position=p)
+            server.scene.add_frame(
+                "/sim_tcp", wxyz=wxyz_from_R(live_R), position=live_xyz,
+                axes_length=0.05, axes_radius=0.0025)
+            server.scene.add_icosphere(
+                "/tcp_sim", radius=0.007, color=(80, 180, 255), position=live_xyz)
+
+        print(f"viser http://localhost:{args.port}  orange=bag  cyan=sim", flush=True)
+        return draw
 
     try:
         if args.headless:
             run_clock()
         else:
-            from gafropy import viz as gafropy_viz
-            from geodude_teleoperation.ee_viz import (
-                add_right_chamfer_visual,
-                hide_gripper_visuals,
-            )
-
-            viz = gafropy_viz.Visualizer()
-            robot_viz = viz.add_robot(interface.get_system(), joint_sliders=False)
-            hide_gripper_visuals(robot_viz)
-            q0 = np.asarray(interface.get_state().get_position(), dtype=float)
-            update_chamfer = add_right_chamfer_visual(viz, system, q=q0)
-
-            def update():
-                q = np.asarray(interface.get_state().get_position(), dtype=float)
-                robot_viz.update(q)
-                update_chamfer(q)
-
-            viz.add_ticker(lambda: update())
+            view["draw"] = _build_wrist_view()
             worker = threading.Thread(target=run_clock, daemon=True, name="check6-clock")
             worker.start()
             try:
-                viz.show(
-                    message=(
-                        f"check 6 mujoco replay (not hardware). "
-                        f"viser http://localhost:{viz.port} -- ctrl-c to quit."
-                    ))
+                while worker.is_alive():
+                    time.sleep(0.05)
+                while True:
+                    time.sleep(0.1)
             except KeyboardInterrupt:
                 pass
             worker.join(timeout=1.0)

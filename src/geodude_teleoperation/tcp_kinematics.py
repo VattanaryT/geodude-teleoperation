@@ -80,6 +80,53 @@ def poses_in_right_base(system, q_full: np.ndarray) -> dict[str, np.ndarray]:
     }
 
 
+def _yaml_joint_block(q6: np.ndarray) -> str:
+    return "\n".join(
+        f"          - {float(v)}" for v in np.asarray(q6, dtype=float).reshape(6)
+    )
+
+
+def write_geodude_model_with_right_ur6(
+    q_ur6: np.ndarray,
+    dest: Path,
+    *,
+    src: Path = MODEL,
+) -> Path:
+    """Copy ``src`` with ready/home right-UR6 joints set to ``q_ur6``.
+
+    MuJoCo boots from those keyframes. ``go_to_joint_position`` deadlocks the
+    Python GIL against the integrate thread, so the start pose has to be in
+    the model file.
+    """
+    src = Path(src)
+    dest = Path(dest)
+    text = src.read_text()
+    import gafropy as ga
+
+    system = ga.SystemSerialization.load(str(src))
+    ready = np.asarray(system.get_keyframe("ready").qpos, dtype=float)
+    by_name = {
+        j.get_name(): j.get_index()
+        for j in system.get_joints() if j.is_actuated()
+    }
+    old_q6 = np.array(
+        [ready[by_name[BAG_JOINT_TO_GAFRO[n]]] for n in UR6_ORDER], dtype=float
+    )
+    old_block = _yaml_joint_block(old_q6)
+    if old_block not in text:
+        raise ValueError(f"right UR6 keyframe block not found in {src}")
+    n = text.count(old_block)
+    if n < 2:
+        raise ValueError(f"expected ready+home right UR6 blocks, found {n} in {src}")
+    text = text.replace(old_block, _yaml_joint_block(q_ur6))
+    if dest.parent.resolve() != src.parent.resolve():
+        mesh = (src.parent / "assets").resolve()
+        text = text.replace("meshdir: assets", f"meshdir: {mesh}", 1)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(text)
+    return dest
+
+
 def rotation_error_deg(R_a: np.ndarray, R_b: np.ndarray) -> float:
     from scipy.spatial.transform import Rotation
 

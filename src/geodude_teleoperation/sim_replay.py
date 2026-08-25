@@ -5,8 +5,9 @@ step (meters per callback). DualLoop contact treats the same linear as a
 body-frame velocity (m/s). This module converts flange-body sandwich
 velocity into the plant EE body and applies that distinction.
 
-Tracking error is *relative* to each path's start so MuJoCo home joints do
-not have to match the bag.
+Default replay uses DualLoop in contact: score **XY** (and force), not 3D TCP.
+``--follow-path`` keeps ``a_n`` and never enters DualLoop: score 3D ``err_mm``.
+With bag start joints in the model, tracking error is absolute chamfer vs bag.
 """
 from __future__ import annotations
 
@@ -84,6 +85,43 @@ def relative_error_mm(
     z = float(e[2] * 1e3)
     n = float(np.linalg.norm(e) * 1e3)
     return xy, z, n
+
+
+def absolute_error_mm(
+    *,
+    live_xyz: np.ndarray,
+    bag_xyz: np.ndarray,
+) -> tuple[float, float, float]:
+    """(xy_mm, z_mm, norm_mm) of live chamfer vs bag TCP."""
+    e = np.asarray(live_xyz, dtype=float).reshape(3) - np.asarray(
+        bag_xyz, dtype=float
+    ).reshape(3)
+    xy = float(np.hypot(e[0], e[1]) * 1e3)
+    z = float(e[2] * 1e3)
+    n = float(np.linalg.norm(e) * 1e3)
+    return xy, z, n
+
+
+def path_follow_contact(raw: np.ndarray, *, follow_path: bool) -> np.ndarray:
+    """Contact flags for sandwich: all-false keeps ``a_n`` (path follow)."""
+    flags = np.asarray(raw, dtype=bool).reshape(-1)
+    if follow_path:
+        return np.zeros_like(flags)
+    return flags.copy()
+
+
+def replay_mode_label(in_contact: bool, *, follow_path: bool) -> str:
+    if follow_path:
+        return "path"
+    return "contact" if in_contact else "approach"
+
+
+def score_legend(*, follow_path: bool) -> str:
+    if follow_path:
+        return "score: 3D err_mm (path follow; DualLoop off)"
+    return (
+        "score: contact XY (+ |f_n|); mean_z is DualLoop-owned, not a tracking fail"
+    )
 
 
 def enter_speedj_contact(*, mode, contact_controller, approach_controller, interface=None):

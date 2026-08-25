@@ -3,7 +3,7 @@ from pathlib import Path
 
 import numpy as np
 
-from geodude_teleoperation.viser_view import framed_camera, sitting_up_axis
+from geodude_teleoperation.viser_view import framed_camera, sitting_up_axis, wxyz_from_R
 
 
 class SittingUpAxisTest(unittest.TestCase):
@@ -37,6 +37,11 @@ class FramedCameraTest(unittest.TestCase):
         self.assertGreater(float(np.linalg.norm(center)), 0.5)
         # PCA long-axis sign is arbitrary; pin so right_base +X is not yawed 180°.
         self.assertGreater(float((eye - center)[0]), 0.0)
+
+
+class WxyzFromRTest(unittest.TestCase):
+    def test_identity_is_w_first(self):
+        np.testing.assert_allclose(wxyz_from_R(np.eye(3)), [1.0, 0.0, 0.0, 0.0], atol=1e-12)
 
 
 @unittest.skipUnless(
