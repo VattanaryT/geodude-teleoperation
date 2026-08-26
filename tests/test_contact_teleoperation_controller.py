@@ -20,6 +20,10 @@ def _make_controller(**kwargs):
     params = dict(
         vf=None,
         config=config,
+        # These cases were written against the bare PID and assert its exact
+        # numbers, so pin them there; the dtc loop has its own cover in
+        # test_force_pid.py and in DtcPressLoopTest below.
+        press_loop="legacy",
         target_force=15.0,
         force_sign=1.0,
         log_period_s=0.0,
@@ -261,6 +265,108 @@ class ContactForceLoopTest(unittest.TestCase):
         ctrl._compute_force_command()
         self.assertEqual(ctrl._z_mode, "contact")
         self.assertGreater(seen[-1], 0.0)
+
+
+class DtcPressLoopTest(unittest.TestCase):
+    """The dtc delegation, mostly about signs. The loop itself is covered in
+    test_force_pid.py; what matters here is that the base-frame press axis and
+    the tool-Z velocity handed to _on_vz still mean what legacy meant."""
+
+    def _dtc(self, **kwargs):
+        params = dict(
+            press_loop="dtc", max_v_hold=0.008, v_approach=0.005,
+            log_period_s=0.0, dead_wrench_abort_s=0.0)
+        params.update(kwargs)
+        return _make_controller(**params)
+
+    def test_reduces_to_legacy_axis_without_a_normal(self):
+        # No set_contact_normal yet: press must still be press_sign * tool Z.
+        for sign in (1.0, -1.0):
+            with self.subTest(sign=sign):
+                ctrl = self._dtc(
+                    force_sign=sign,
+                    measured_force_fn=lambda: (0.0, 0.0, 0.0))
+                ctrl.set_contact_normal(None)
+                ctrl._R_tool_to_base = np.eye(3)
+                ctrl._t_start = time.monotonic()
+                seen = []
+                ctrl.set_on_vz(seen.append)
+                ctrl._compute_force_command()
+                # Free air seeks the surface along the sign the CLI selected.
+                self.assertGreater(seen[-1] * sign, 0.0)
+
+    def test_compression_reads_positive_through_the_reaction_convention(self):
+        # UR reports the reaction, so a +tool-Z press reads fz < 0 and must land
+        # on Fs > 0 -- same convention as _fs() in the legacy path.
+        ctrl = self._dtc(
+            force_sign=1.0, measured_force_fn=lambda: (0.0, 0.0, -15.0))
+        ctrl._R_tool_to_base = np.eye(3)
+        ctrl._t_start = time.monotonic()
+        for _ in range(200):
+            ctrl._compute_force_command()
+        self.assertGreater(ctrl._last_diag["Fs_N"], 0.0)
+
+    def test_over_target_retracts(self):
+        ctrl = self._dtc(
+            force_sign=1.0, measured_force_fn=lambda: (0.0, 0.0, -30.0))
+        ctrl._R_tool_to_base = np.eye(3)
+        ctrl._t_start = time.monotonic()
+        seen = []
+        ctrl.set_on_vz(seen.append)
+        for _ in range(200):
+            ctrl._compute_force_command()
+        self.assertLess(seen[-1], 0.0)
+
+    def test_field_normal_cannot_flip_the_press_hemisphere(self):
+        # A field sign convention must never invert the press: the normal
+        # refines direction, --force-sign still owns which way is "into".
+        ctrl = self._dtc(
+            force_sign=-1.0, measured_force_fn=lambda: (0.0, 0.0, 0.0))
+        ctrl._R_tool_to_base = np.eye(3)
+        ctrl._t_start = time.monotonic()
+        seen = []
+        ctrl.set_on_vz(seen.append)
+        ctrl.set_contact_normal([0.0, 0.0, 1.0], np.eye(3))
+        ctrl._compute_force_command()
+        self.assertLess(seen[-1], 0.0)
+        ctrl.set_contact_normal([0.0, 0.0, -1.0], np.eye(3))
+        ctrl._compute_force_command()
+        self.assertLess(seen[-1], 0.0)
+
+    def test_tilted_normal_scales_the_tool_z_component(self):
+        # v_z is the tool-Z component of motion along the base-frame press axis.
+        ctrl = self._dtc(
+            force_sign=1.0, measured_force_fn=lambda: (0.0, 0.0, 0.0))
+        ctrl._R_tool_to_base = np.eye(3)
+        ctrl._t_start = time.monotonic()
+        seen = []
+        ctrl.set_on_vz(seen.append)
+        ctrl.set_contact_normal([0.0, 0.0, 1.0], np.eye(3))
+        ctrl._compute_force_command()
+        straight = seen[-1]
+        ctrl2 = self._dtc(
+            force_sign=1.0, measured_force_fn=lambda: (0.0, 0.0, 0.0))
+        ctrl2._R_tool_to_base = np.eye(3)
+        ctrl2._t_start = time.monotonic()
+        seen2 = []
+        ctrl2.set_on_vz(seen2.append)
+        a = np.deg2rad(30.0)
+        ctrl2.set_contact_normal([np.sin(a), 0.0, np.cos(a)], np.eye(3))
+        ctrl2._compute_force_command()
+        self.assertAlmostEqual(seen2[-1], straight * np.cos(a), places=6)
+
+    def test_start_resets_the_ported_loop(self):
+        ctrl = self._dtc(measured_force_fn=lambda: (0.0, 0.0, 0.0))
+        ctrl._pid._integral = 5.0
+        ctrl._pid._gain_scale = 0.2
+        ctrl.start()
+        ctrl.stop()
+        self.assertEqual(ctrl._pid._integral, 0.0)
+        self.assertEqual(ctrl._pid._gain_scale, 1.0)
+
+    def test_rejects_an_unknown_press_loop(self):
+        with self.assertRaises(ValueError):
+            _make_controller(press_loop="nope")
 
 
 if __name__ == "__main__":

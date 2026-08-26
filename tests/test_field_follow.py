@@ -439,7 +439,11 @@ class FieldFollowTest(unittest.TestCase):
                 T[:3, 3] = [9.0, 9.0, 9.0]
                 return motor_from_matrix(T)
 
-        follow = FieldFollow(TiltVf(), hz=50.0, max_dR_rad=0.02)
+        # snap_to_surface off: this case is about the R slerp, and its vf parks
+        # the projected position at [9,9,9] purely to prove position did not
+        # come from project(). SurfaceSnapTest below covers the snap itself.
+        follow = FieldFollow(
+            TiltVf(), hz=50.0, max_dR_rad=0.02, snap_to_surface=False)
         follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
         follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
         follow.tick(0.0, _motor_at([0.0, 0.0, 1.0]))
@@ -501,6 +505,93 @@ class FieldFollowTest(unittest.TestCase):
                 return motor_from_matrix(T)
 
         follow = FieldFollow(BoomVf(), hz=50.0)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        tick = follow.tick(0.0, _motor_at([0.0, 0.0, 1.0]))
+        self.assertTrue(tick.idle)
+        np.testing.assert_allclose(follow.xyz, [0.0, 0.0, 1.0], atol=1e-9)
+
+
+class SurfaceSnapTest(unittest.TestCase):
+    """tick() used to keep stick_xyz wholesale and throw vf.project()'s position
+    away, so the command rode live + tangential step and never re-snapped to the
+    mesh -- the next project() was then queried off-surface."""
+
+    @staticmethod
+    def _offset_vf(offset):
+        class OffsetVf:
+            def project(self, motor):
+                T = np.asarray(motor.to_transformation_matrix(), dtype=float)
+                T = T.copy()
+                T[:3, 3] = T[:3, 3] + np.asarray(offset, dtype=float)
+                return motor_from_matrix(T)
+
+        return OffsetVf()
+
+    def _run(self, offset, **kwargs):
+        params = dict(hz=50.0, max_lead_m=0.05)
+        params.update(kwargs)
+        follow = FieldFollow(self._offset_vf(offset), **params)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        follow.tick(0.0, _motor_at([0.0, 0.0, 1.0]))
+        return follow
+
+    def test_normal_offset_is_taken_from_project(self):
+        # Tool Z is +Z here, so a project() 3 mm along +Z is a normal offset.
+        follow = self._run([0.0, 0.0, 0.003])
+        np.testing.assert_allclose(follow.xyz, [0.01, 0.0, 1.003], atol=1e-9)
+
+    def test_tangential_offset_is_ignored(self):
+        # Only the normal is corrected; tangential stays with the stick so the
+        # snap can never fight the operator.
+        follow = self._run([0.02, 0.0, 0.0])
+        np.testing.assert_allclose(follow.xyz, [0.01, 0.0, 1.0], atol=1e-9)
+
+    def test_correction_is_bounded_by_max_lead(self):
+        # A bad project at a mesh edge must not teleport the command.
+        follow = self._run([0.0, 0.0, 0.5], max_lead_m=0.02)
+        np.testing.assert_allclose(follow.xyz, [0.01, 0.0, 1.02], atol=1e-9)
+
+    def test_snap_can_be_disabled(self):
+        follow = self._run([0.0, 0.0, 0.003], snap_to_surface=False)
+        np.testing.assert_allclose(follow.xyz, [0.01, 0.0, 1.0], atol=1e-9)
+
+    def test_snap_follows_the_commanded_normal_not_world_z(self):
+        from scipy.spatial.transform import Rotation
+
+        # Tool Z rotated 90 deg about Y -> +X. A project() offset along +X is
+        # then the normal component, and one along +Z is tangential.
+        R = Rotation.from_rotvec([0.0, np.pi / 2.0, 0.0]).as_matrix()
+
+        class TiltOffsetVf:
+            def project(self, motor):
+                T = np.asarray(motor.to_transformation_matrix(), dtype=float)
+                T = T.copy()
+                T[:3, :3] = R
+                T[:3, 3] = T[:3, 3] + np.array([0.003, 0.0, 0.004])
+                return motor_from_matrix(T)
+
+        follow = FieldFollow(
+            TiltOffsetVf(), hz=50.0, max_lead_m=0.05, max_dR_rad=10.0)
+        follow.seed(np.array([0.0, 0.0, 1.0]), R)
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        follow.tick(0.0, _motor_at([0.0, 0.0, 1.0], R))
+        # Body step goes through R, so the stick lands at [0, 0, 0.99]. The
+        # commanded normal is now +X, so the 3 mm along X is the correction and
+        # the 4 mm along Z (tangential here) is dropped -- if the snap used
+        # world Z instead, Z would have picked up the 4 mm.
+        np.testing.assert_allclose(follow.xyz, [0.003, 0.0, 0.99], atol=1e-9)
+
+    def test_non_finite_project_position_still_reverts(self):
+        class NanVf:
+            def project(self, motor):
+                T = np.asarray(motor.to_transformation_matrix(), dtype=float)
+                T = T.copy()
+                T[:3, 3] = np.array([np.nan, 0.0, 0.0])
+                return motor_from_matrix(T)
+
+        follow = FieldFollow(NanVf(), hz=50.0)
         follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
         follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
         tick = follow.tick(0.0, _motor_at([0.0, 0.0, 1.0]))

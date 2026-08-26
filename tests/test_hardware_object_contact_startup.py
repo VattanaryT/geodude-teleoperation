@@ -279,6 +279,103 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         self.assertGreater(abs(float(qdot[3])), 1e-4)
         self.assertAlmostEqual(float(qdot[5]), 0.0, places=6)
 
+    def test_lift_off_fixes_default_on_and_are_all_switchable(self):
+        # Each fix must be independently defeatable so a hardware session can
+        # bisect which one actually stops the lift-off.
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args([])
+        self.assertEqual(args.press_loop, "dtc")
+        self.assertTrue(args.free_along_normal)
+        self.assertTrue(args.snap_follow_to_surface)
+
+        off = mod.build_arg_parser().parse_args([
+            "--press-loop", "legacy",
+            "--no-free-along-normal",
+            "--no-snap-follow-to-surface",
+        ])
+        self.assertEqual(off.press_loop, "legacy")
+        self.assertFalse(off.free_along_normal)
+        self.assertFalse(off.snap_follow_to_surface)
+
+    def test_free_along_normal_projects_the_spring_off_the_normal(self):
+        # The lift-off fix. stiffness[5,5]=0 only frees the body Z of the pose
+        # error; field-follow slerps tool Z behind the field normal on purpose,
+        # so mid-slide the spring pushes along the true normal and outruns the
+        # press. Jacobian is identity here, so qdot[3:6] is the task linear.
+        ctrl = _pose_ctrl()
+        ctrl.set_z_compliant(True)
+        ctrl.set_input_active(True)
+        error = np.zeros(6)
+        error[3] = 0.01  # linear X
+        before = ctrl.compute_control_command(
+            _VelState(), _ObjState(error), _TaskState())
+        self.assertGreater(abs(float(before[3])), 1e-4)
+
+        ctrl = _pose_ctrl()
+        ctrl.set_z_compliant(True)
+        ctrl.set_input_active(True)
+        ctrl.set_contact_normal([1.0, 0.0, 0.0], np.eye(3))
+        after = ctrl.compute_control_command(
+            _VelState(), _ObjState(error), _TaskState())
+        self.assertAlmostEqual(float(after[3]), 0.0, places=9)
+
+    def test_free_along_normal_keeps_the_tangential_spring(self):
+        # Only the normal component goes; sliding must still be position-held.
+        ctrl = _pose_ctrl()
+        ctrl.set_z_compliant(True)
+        ctrl.set_input_active(True)
+        ctrl.set_contact_normal([1.0, 0.0, 0.0], np.eye(3))
+        error = np.zeros(6)
+        error[3] = 0.01  # along the normal -> removed
+        error[4] = 0.01  # tangential -> kept
+        qdot = ctrl.compute_control_command(
+            _VelState(), _ObjState(error), _TaskState())
+        self.assertAlmostEqual(float(qdot[3]), 0.0, places=9)
+        self.assertGreater(abs(float(qdot[4])), 1e-4)
+
+    def test_free_along_normal_handles_a_tilted_normal(self):
+        ctrl = _pose_ctrl()
+        ctrl.set_z_compliant(True)
+        ctrl.set_input_active(True)
+        n = np.array([1.0, 1.0, 0.0]) / np.sqrt(2.0)
+        ctrl.set_contact_normal(n, np.eye(3))
+        error = np.zeros(6)
+        error[3] = 0.01
+        error[4] = 0.01
+        qdot = ctrl.compute_control_command(
+            _VelState(), _ObjState(error), _TaskState())
+        self.assertAlmostEqual(float(np.asarray(qdot)[3:6] @ n), 0.0, places=9)
+
+    def test_free_space_is_untouched_by_the_normal(self):
+        # Not z_compliant: the projection must not run at all.
+        ctrl = _pose_ctrl()
+        ctrl.set_input_active(True)
+        ctrl.set_contact_normal([1.0, 0.0, 0.0], np.eye(3))
+        error = np.zeros(6)
+        error[3] = 0.01
+        qdot = ctrl.compute_control_command(
+            _VelState(), _ObjState(error), _TaskState())
+        self.assertGreater(abs(float(qdot[3])), 1e-4)
+
+    def test_leaving_contact_clears_the_normal(self):
+        ctrl = _pose_ctrl()
+        ctrl.set_z_compliant(True)
+        ctrl.set_contact_normal([1.0, 0.0, 0.0], np.eye(3))
+        self.assertIsNotNone(ctrl._n_body)
+        ctrl.set_z_compliant(False)
+        self.assertIsNone(ctrl._n_body)
+
+    def test_free_along_normal_can_be_disabled(self):
+        ctrl = _pose_ctrl(free_along_normal=False)
+        ctrl.set_z_compliant(True)
+        ctrl.set_input_active(True)
+        ctrl.set_contact_normal([1.0, 0.0, 0.0], np.eye(3))
+        error = np.zeros(6)
+        error[3] = 0.01
+        qdot = ctrl.compute_control_command(
+            _VelState(), _ObjState(error), _TaskState())
+        self.assertGreater(abs(float(qdot[3])), 1e-4)
+
     def test_z_compliant_idle_overlays_tool_z(self):
         ctrl = _pose_ctrl()
         ctrl.set_z_compliant(True)

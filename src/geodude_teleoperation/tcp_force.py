@@ -49,3 +49,14 @@ def connect_tcp_force_reader(robot_ip: str) -> tuple[Callable[[], Sequence[float
 def fz_from_tcp_force(tcp_force: Sequence[float]) -> float:
     """Tool-frame linear Z from UR ``ActualTCPForce`` (index 2)."""
     return float(tcp_force[2])
+
+
+def force_from_tcp_force(tcp_force: Sequence[float]) -> tuple[float, float, float]:
+    """Tool-frame linear force ``(Fx, Fy, Fz)`` from UR ``ActualTCPForce``.
+
+    UR's order is ``[Fx, Fy, Fz, Rx, Ry, Rz]``, so the linear part is just the
+    first three. The press loop needs all of it once the press axis is a field
+    normal rather than tool Z; ``fz_from_tcp_force`` stays for the paths that
+    only ever look along tool Z.
+    """
+    return (float(tcp_force[0]), float(tcp_force[1]), float(tcp_force[2]))

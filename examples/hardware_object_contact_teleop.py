@@ -3,10 +3,24 @@
 Free space: gafropy speedJ + SpaceMouse (approach mode).
 
 Contact (default ``speedj``): same pose-spring speedJ plant as free space.
-Button 0 latches DualLoop force-hold until button 0 again — no auto-drop to
-free-space / DualLoop approach. PID overlays tool-Z (``v ≤ max_v_hold``).
+Button 0 latches force-hold until button 0 again — no auto-drop to free-space
+approach. The press PID overlays tool-Z; it owns Fd and nothing else does.
 Stick XY still field-follows (``project()`` rewrites R; stick Z ignored).
 Button 0 must not switch to line admittance.
+
+Three switches exist for the contact lift-off fixes, so a hardware session can
+bisect which one matters. ``--press-loop legacy --no-free-along-normal
+--no-snap-follow-to-surface`` restores the previous behavior exactly:
+
+* ``--press-loop dtc`` uses the ``in_contact_control`` ForcePIDController
+  (LPF + deadband on the measurement, oscillation/spike/overshoot handling)
+  instead of the bare ``clip(kp*(Fd-Fs))`` on fz alone.
+* free-along-normal projects the pose spring's velocity off the surface normal
+  while in contact. ``stiffness[5,5]=0`` alone only frees the body Z of the
+  pose error, and field-follow slerps tool Z behind the normal on purpose, so
+  the spring otherwise keeps a component along the normal and lifts the tool.
+* snap-follow-to-surface takes the along-normal component of the commanded
+  point from ``vf.project()`` so the next query stays on the mesh.
 
 ``--contact-backend force_mode`` is UR hybrid force/position (not admittance).
 """
@@ -84,7 +98,11 @@ from geodude_teleoperation.spacemouse import (
     resolve_spacemouse_path,
     verify_spacemouse_connection,
 )
-from geodude_teleoperation.tcp_force import connect_tcp_force_reader, fz_from_tcp_force
+from geodude_teleoperation.tcp_force import (
+    connect_tcp_force_reader,
+    force_from_tcp_force,
+    fz_from_tcp_force,
+)
 from geodude_teleoperation.virtual_fixture import FieldAlignPreview, workstation_field_z_arrows
 
 DEFAULT_OBJECT = str(ROOT / "assets" / "laser_profilometer" / "merged.ply")
@@ -156,7 +174,8 @@ def _dashboard_bring_up(ip: str) -> None:
     print(f"{ip}: RUNNING")
 
 
-def _make_approach_controller(interface, task_space, home_ee_motor):
+def _make_approach_controller(interface, task_space, home_ee_motor,
+                              free_along_normal=True):
     # Match hardware_free_teleop defaults for smooth free-space tracking.
     # Do NOT attach OrientationField here: vf.project() every stick sample snaps
     # orientation and makes speedJ feel discontinuous vs the SpaceMouse.
@@ -168,6 +187,7 @@ def _make_approach_controller(interface, task_space, home_ee_motor):
         max_joint_velocity=0.8,
         twist_linear_scale=1.0,
         max_qddot=5.0,
+        free_along_normal=free_along_normal,
     )
     approach.set_task_space(task_space)
     approach.set_interface(interface)
@@ -284,8 +304,10 @@ def build_arg_parser():
         "--target-force", type=float, default=15.0,
         help="desired contact force (N) along tool Z in contact mode")
     parser.add_argument(
-        "--force-sign", type=float, default=-1.0,
-        help="approach press sign along tool Z (default -1). Fixed knob; not latched from Fz.",
+        "--force-sign", type=float, default=1.0,
+        help="press sign along tool Z (default +1, verified on hardware: press "
+             "is along +tool Z). Fixed knob; never latched from Fz polarity, and "
+             "a field normal refines the press axis without flipping this sign.",
         )
     parser.add_argument(
         "--no-zero-ft", dest="zero_ft_sensor", action="store_false",
@@ -299,6 +321,26 @@ def build_arg_parser():
         "--contact-backend", choices=["speedj", "force_mode"], default="speedj",
         help="contact implementation (default: speedj = pose spring + Z force overlay). "
              "'force_mode' is UR hybrid force/position, not admittance.")
+    # --- contact lift-off fixes, independently switchable so a hardware run can
+    # bisect which one actually matters. All three off reproduces the previous
+    # behavior exactly: --press-loop legacy --no-free-along-normal
+    # --no-snap-follow-to-surface
+    parser.add_argument(
+        "--press-loop", choices=["dtc", "legacy"], default="dtc",
+        help="speedj press seek law (default: dtc = the in-contact-dtc "
+             "ForcePIDController, with LPF/deadband on the measurement plus "
+             "oscillation, spike and overshoot handling). 'legacy' is the bare "
+             "clip(kp*(Fd-Fs)) PID on fz alone.")
+    parser.add_argument(
+        "--no-free-along-normal", dest="free_along_normal",
+        action="store_false", default=True,
+        help="do not project the pose spring's velocity off the surface normal "
+             "in contact (stiffness[5,5]=0 alone, the previous behavior)")
+    parser.add_argument(
+        "--no-snap-follow-to-surface", dest="snap_follow_to_surface",
+        action="store_false", default=True,
+        help="let field-follow keep discarding vf.project()'s position, so the "
+             "commanded point never re-snaps to the mesh (previous behavior)")
     parser.add_argument("--no-viz", action="store_true",
                         help="disable the viser visualization")
     parser.add_argument(
@@ -438,7 +480,8 @@ def main():
     field_preview = FieldAlignPreview(vf)
     follow = FieldFollow(
         vf, hz=args.follow_hz, project_in_process=True, mesh=object_surface,
-        max_lead_m=0.005, max_step_m=0.004, max_dR_rad=0.02)
+        max_lead_m=0.005, max_step_m=0.004, max_dR_rad=0.02,
+        snap_to_surface=args.snap_follow_to_surface)
     follow_log_t = {"t": float("-inf")}
     stick = {
         "t": float("-inf"), "t_nz": float("-inf"),
@@ -446,11 +489,13 @@ def main():
     }
 
     approach_controller = _make_approach_controller(
-        interface, task_space, home_ee_motor)
+        interface, task_space, home_ee_motor,
+        free_along_normal=args.free_along_normal)
 
     # --- speedj contact: stay on gafropy (default). force_mode is opt-in. ---
     contact_controller = None
     measured_fz_fn = None
+    measured_force_fn = None
     close_tcp_force = None
     if args.contact_backend == "speedj":
         contact_stiffness = np.diag([400.0] * 5 + [0.0])
@@ -465,6 +510,9 @@ def main():
         try:
             read_tcp_force, close_tcp_force = connect_tcp_force_reader(robot_ip)
             measured_fz_fn = lambda: fz_from_tcp_force(read_tcp_force())
+            # The dtc loop resolves force along the field normal, not tool Z, so
+            # it needs all three linear components.
+            measured_force_fn = lambda: force_from_tcp_force(read_tcp_force())
             print(f"contact FT: RTDE ActualTCPForce from {robot_ip}", flush=True)
         except Exception as exc:
             print(
@@ -475,10 +523,12 @@ def main():
         contact_controller = ContactTeleoperationController(
             vf, contact_config, target_force=args.target_force,
             kp_force=0.001, ki_force=0.0003,
-            v_approach=0.005, max_v_hold=0.002, z_damping=z_damping,
+            v_approach=0.005, max_v_hold=0.008, z_damping=z_damping,
             v_slew_mps2=0.05, lost_s=1.0, sit_s=2.0,
             force_sign=args.force_sign,
-            measured_fz_fn=measured_fz_fn)
+            press_loop=args.press_loop,
+            measured_fz_fn=measured_fz_fn,
+            measured_force_fn=measured_force_fn)
         contact_controller.set_task_space(task_space)
         contact_controller.set_interface(interface)
         contact_controller.set_objective(
@@ -556,6 +606,18 @@ def main():
             tangent=mode["active"] == "contact")
         if not approach_controller._input_active:
             approach_controller.hold_live_pose()
+        # Publish the surface normal both loops need, in the *controller* world
+        # (map_target has already taken the field pose through field_tcp_to_ee,
+        # so its Z column and T_ee's rotation share a frame). The force thread
+        # must not query vf itself -- project() is why follow runs in a helper
+        # process in the first place.
+        if follow.last_target is not None:
+            T_cmd = matrix_from_motor(map_target(follow.last_target))
+            n_base = T_cmd[:3, 2]
+            R_tool = T_ee_m[:3, :3]
+            approach_controller.set_contact_normal(n_base, R_tool)
+            if contact_controller is not None:
+                contact_controller.set_contact_normal(n_base, R_tool)
         if (now - follow_log_t["t"]) >= 1.0:
             follow_log_t["t"] = now
             p_live = live_tcp_xyz_from_flange(T_flange_viz)

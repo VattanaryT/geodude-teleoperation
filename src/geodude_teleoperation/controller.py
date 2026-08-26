@@ -4,6 +4,11 @@ import time
 import gafropy
 import numpy as np
 
+from geodude_teleoperation.in_contact_control.force_pid import (
+    ForcePIDConfig,
+    ForcePIDController,
+)
+
 
 def _adaptive_linear_scale(distance, min_factor, max_factor, offset=0.01, scale_range=0.075):
     """ufactory_demos' TeleoperationController::updateCommand adaptive linear-twist scaling
@@ -165,7 +170,7 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
     def __init__(self, inertia=None, damping=None, stiffness=None, dt=0.001,
                  max_joint_velocity=1.0, min_twist_scaling_factor=1.0,
                  max_twist_scaling_factor=10.0, twist_linear_scale=2.0,
-                 max_qddot=5.0, stick_hz=50.0):
+                 max_qddot=5.0, stick_hz=50.0, free_along_normal=True):
         super().__init__()
         self._inertia = np.diag([1.0] * 6) if inertia is None else inertia
         self._damping = np.diag([20.0] * 6) if damping is None else damping
@@ -190,6 +195,14 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         self._kang_pose = np.diag(self._stiffness)[:3].copy()
         self._z_compliant = False
         self._ori_compliant = False
+        # Body-frame surface normal for the free-along-normal projection.
+        # set_z_compliant() only zeroes stiffness[5,5], which is the body Z of
+        # the *pose error* -- not the surface normal. field_follow slerps tool Z
+        # behind the field normal on purpose, so mid-slide the two differ and
+        # the K on the remaining axes gets a component along the true normal,
+        # which outruns the press loop and lifts the tool off. Project it out.
+        self._free_along_normal = bool(free_along_normal)
+        self._n_body = None
         self._slide_twist = np.zeros(6)
         self._max_slide_mps = 0.008
         self._max_slide_radps = 0.12
@@ -263,6 +276,7 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         self._stiffness[5, 5] = 0.0 if self._z_compliant else self._kz_pose
         if not self._z_compliant:
             self._slide_twist = np.zeros(6)
+            self._n_body = None
 
     def set_orientation_compliant(self, compliant):
         """Zero angular K so the pose spring tracks xyz only (field follow)."""
@@ -308,8 +322,16 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
 
             bias = jacobian_derivative @ qdot_task
 
-            qdot = self._dt * \
-                j_inverse @ jacobian.T @ (task_acceleration - bias)
+            v_task = self._dt * (task_acceleration - bias)
+            if (self._z_compliant and self._free_along_normal
+                    and self._n_body is not None):
+                # Align never owns the unbound axis -- force does. Same
+                # invariant as in_contact_control's alignment_admittance
+                # (`v_lin -= (v_lin.n) n`, free_along_normal=True). Twist blade
+                # order puts linear in 3:6, matching `twist[5] = vz` below.
+                n = self._n_body
+                v_task[3:6] = v_task[3:6] - float(v_task[3:6] @ n) * n
+            qdot = j_inverse @ jacobian.T @ v_task
 
         if abs(vz) > 1e-12:
             twist = np.zeros(6)
@@ -333,6 +355,28 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
                 qdot, measured=qdot_meas, spring=self._input_active,
                 stick=self._stick_linear)
         return qdot
+
+    def set_contact_normal(self, n_base, R_tool_to_base):
+        """Surface normal (base frame) to free the pose spring along in contact.
+
+        Stored in the *body* frame, because the jacobian and the objective error
+        this controller works in are body-frame. Pass ``None`` to clear, which
+        falls back to the pre-existing behavior of relying on stiffness[5,5]=0
+        alone. Only has an effect while ``_z_compliant`` is set, so free space is
+        untouched.
+        """
+        if n_base is None or R_tool_to_base is None:
+            self._n_body = None
+            return
+        n = np.asarray(n_base, dtype=float).reshape(3)
+        norm = float(np.linalg.norm(n))
+        if norm < 1e-12:
+            self._n_body = None
+            return
+        R = np.asarray(R_tool_to_base, dtype=float).reshape(3, 3)
+        n_body = R.T @ (n / norm)
+        n_norm = float(np.linalg.norm(n_body))
+        self._n_body = None if n_norm < 1e-12 else n_body / n_norm
 
     def set_virtual_fixture(self, vf):
         self.vf = vf
@@ -493,16 +537,37 @@ class LineAdmittanceTeleoperationController(gafropy.control.VelocityAdmittanceCo
 
 
 class ContactTeleoperationController(gafropy.control.VelocityAdmittanceController):
-    """Hybrid contact: DualLoop force PID on tool Z, latched for the DualLoop session.
+    """Hybrid contact: force PID along the surface normal, latched for the session.
 
     ``start()`` (button 0) is contact until ``stop()`` (button 0 again). There is
-    no DualLoop approach / free-space fallback: unload must not re-arm a 5 mm/s
-    feed. Seek is PID ``v = clip(kp*(Fd − Fs), ±max_v_hold)``. Over target,
-    press is 0 or retract — speedJ must not keep inching into a rigid stop (C153).
+    no approach / free-space fallback: unload must not re-arm a 5 mm/s feed.
+
+    **This controller owns Fd, and nothing else in the speedj path does.** It is
+    never handed to ``interface.control(...)`` in that backend (see
+    ``enter_speedj_contact``) and ``_run`` skips ``set_desired_wrench`` whenever
+    ``_on_vz`` is set, so the gafropy VelocityAdmittance plant underneath is
+    never stepped -- ``config`` / ``z_damping`` survive only for the legacy
+    wrench path and the tests that read ``v_z`` back out of it. Two loops
+    authoritative on the same axis is the fight that produces drift, so the
+    pose spring must stay freed along the normal (see
+    ``AdmittanceTeleoperationController.set_contact_normal``).
+
+    ``press_loop`` selects the seek law:
+
+    ``"dtc"`` (default) delegates to ``ForcePIDController`` ported from
+    ``exp/in-contact-dtc`` -- 5 Hz LPF and deadband on the measurement plus
+    oscillation detector, spike guard, overshoot retract, soft-approach cap and
+    force-rate damping. It needs the full force *vector* and the surface normal,
+    so it uses ``measured_force_fn`` and the normal pushed in by
+    ``set_contact_normal``.
+
+    ``"legacy"`` is the previous bare PID ``v = clip(kp*(Fd − Fs), ±max_v_hold)``
+    on ``fz`` alone, kept verbatim so ``--press-loop legacy`` reproduces the old
+    behavior on hardware. Over target, press is 0 or retract -- speedJ must not
+    keep inching into a rigid stop (C153).
 
     ``Fs = −force_sign · fz`` (UR ``ActualTCPForce`` is the reaction, so a +Z
-    press reads ``Fz < 0``). ``Fext`` is left at 0 (mapped through Z damping:
-    ``set_desired_wrench[5] = v_z * z_damping``).
+    press reads ``Fz < 0``).
     """
 
     def __init__(self, vf, config, target_force=5.0, kp_force=0.001, ki_force=0.0, kd_force=0.0,
@@ -511,7 +576,8 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                  log_period_s=0.5, measured_fz_fn=None, dead_wrench_abort_s=0.4,
                  dead_wrench_eps_n=0.05, contact_engage_n=None, contact_release_n=0.4,
                  fz_tau_s=0.03, v_approach=0.005, max_v_hold=0.005, lost_s=1.0,
-                 z_damping=200.0, v_slew_mps2=0.05, contact_sign_n=None, sit_s=2.0):
+                 z_damping=200.0, v_slew_mps2=0.05, contact_sign_n=None, sit_s=2.0,
+                 press_loop="dtc", measured_force_fn=None):
         super().__init__(config)
         self.vf = vf
         self._target_force = abs(float(target_force))
@@ -541,8 +607,35 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._force_ramp_s = max(0.0, float(force_ramp_s))
         self._log_period_s = max(0.0, float(log_period_s))
         self._measured_fz_fn = measured_fz_fn
+        self._measured_force_fn = measured_force_fn
         self._dead_wrench_abort_s = max(0.0, float(dead_wrench_abort_s))
         self._dead_wrench_eps_n = max(0.0, float(dead_wrench_eps_n))
+
+        if press_loop not in ("dtc", "legacy"):
+            raise ValueError(f"press_loop must be 'dtc' or 'legacy', got {press_loop!r}")
+        self._press_loop = press_loop
+        self._pid = None
+        if press_loop == "dtc":
+            # max_v_along caps the *hold* seek; approach_v_max caps the soft
+            # feed while barely touching, so it must not exceed it.
+            # DTC's Fs = force_sign * (R_ee @ f) . n_base. UR ActualTCPForce is
+            # the reaction, so compression reads negative along the press axis:
+            # force_sign = -1 lands on the same Fs > 0 convention as _fs().
+            self._pid = ForcePIDController(ForcePIDConfig(
+                Fd_N=self._target_force,
+                force_sign=-1.0,
+                max_v_along_m_s=self._max_v_hold,
+                approach_v_max_m_s=min(self._v_approach, self._max_v_hold),
+                integral_limit_N_s=self._integral_limit,
+                kp=self._kp_force,
+                ki=self._ki_force,
+                kd=self._kd_force,
+                wrench_in_tool_frame=True,
+            ))
+        # Surface normal (base frame) and tool->base rotation for the dtc loop,
+        # pushed in by the field-follow tick. Falls back to the live tool Z.
+        self._n_star = None
+        self._R_tool_to_base = None
 
         self._interface = None
         self._integral = 0.0
@@ -563,6 +656,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._external_wrench = np.zeros(6)
         self._on_force_abort = None
         self._on_vz = None
+        self._last_diag = {}
 
     def set_interface(self, interface):
         self._interface = interface
@@ -570,6 +664,28 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
     def set_measured_fz_fn(self, measured_fz_fn):
         """Callable () -> float tool-frame fz in Newtons, or None to use get_wrench()[3]."""
         self._measured_fz_fn = measured_fz_fn
+
+    def set_measured_force_fn(self, measured_force_fn):
+        """Callable () -> (fx, fy, fz) tool-frame force in N, for the dtc loop."""
+        self._measured_force_fn = measured_force_fn
+
+    def set_contact_normal(self, n_base, R_tool_to_base=None):
+        """Surface normal in base frame (and tool->base R) for the dtc press loop.
+
+        Pushed in from the field-follow tick rather than queried here: the force
+        thread runs at 1/update_period and must not block on vf.
+        """
+        # Write R first, then n: _press_axis_base falls back to the legacy
+        # tool-Z axis when n is None, so the transient pair is the safe one.
+        if R_tool_to_base is not None:
+            self._R_tool_to_base = np.asarray(
+                R_tool_to_base, dtype=float).reshape(3, 3).copy()
+        if n_base is None:
+            self._n_star = None
+        else:
+            n = np.asarray(n_base, dtype=float).reshape(3)
+            norm = float(np.linalg.norm(n))
+            self._n_star = None if norm < 1e-12 else n / norm
 
     def set_on_force_abort(self, callback):
         """Optional callback() invoked once if force feedback looks dead (open-loop)."""
@@ -587,9 +703,80 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
     def _read_fz_raw(self):
         if self._measured_fz_fn is not None:
             return float(self._measured_fz_fn())
+        if self._measured_force_fn is not None:
+            # Vector reader only: take its Z rather than falling through to
+            # get_wrench(), which is always zero on hardware and would trip the
+            # dead-feedback abort on a perfectly live sensor.
+            return float(np.asarray(
+                self._measured_force_fn(), dtype=float).reshape(-1)[2])
         wrench = np.asarray(
             self._interface.get_state().get_wrench().to_array(), dtype=float).reshape(6)
         return float(wrench[3])
+
+    def _read_force_tool(self):
+        """Tool-frame (fx, fy, fz) in N for the dtc loop; falls back to (0, 0, fz)."""
+        if self._measured_force_fn is not None:
+            return np.asarray(
+                self._measured_force_fn(), dtype=float).reshape(-1)[:3].copy()
+        return np.array([0.0, 0.0, self._read_fz_raw()], dtype=float)
+
+    def _press_axis_base(self):
+        """Press direction in base frame, and its component along tool Z.
+
+        Reduces exactly to the legacy ``press_sign * tool_Z`` when no field
+        normal has been pushed in. When one has, it is used for *direction*
+        only -- the hemisphere stays the one ``--force-sign`` selected and the
+        operator has already validated, so a field sign convention can never
+        silently invert the press.
+        """
+        # Snapshot both together: set_contact_normal writes them from the
+        # field-follow thread, and a torn (new R, old n) pair would aim the
+        # press one tick stale.
+        R, n = self._R_tool_to_base, self._n_star
+        if R is None:
+            return None, self._press_sign
+        tool_z = np.asarray(R, dtype=float).reshape(3, 3)[:, 2]
+        axis = self._press_sign * tool_z
+        if n is not None:
+            axis = n if float(n @ axis) > 0.0 else -n
+        return axis, float(axis @ tool_z)
+
+    def _press_velocity_dtc(self, now):
+        """Delegate the seek to the ported DTC ForcePIDController.
+
+        Returns press velocity in the same units/sign as ``_press_velocity``:
+        positive = into the part, and the caller maps it to tool Z.
+        """
+        self._z_mode = "contact"
+        if self._contact_since is None:
+            self._contact_since = now
+
+        axis, axis_dot_tool_z = self._press_axis_base()
+        R_ee = self._R_tool_to_base
+        if axis is None or R_ee is None:
+            # No pose yet: press along tool Z with the legacy sign, using fz only.
+            axis = np.array([0.0, 0.0, self._press_sign], dtype=float)
+            axis_dot_tool_z = self._press_sign
+            R_ee = np.eye(3)
+
+        _cmd, diag = self._pid.step(
+            n_base=axis,
+            force_base=self._read_force_tool(),
+            dt=self._update_period,
+            R_ee=R_ee,
+        )
+        self._last_diag = diag
+        v_along = float(diag["v_along_m_s"])
+        # v_along is along the base-frame press axis, but the overlay downstream
+        # is a tool-Z speed, so take the component: the delivered normal speed
+        # picks up a cos^2 of the axis/tool-Z angle. That is a bounded positive
+        # gain inside a closed force loop, so it costs response, not steady
+        # state -- field-follow keeps the angle small anyway. Near-perpendicular
+        # is the one case that would silently stall the press, so fall back to
+        # the legacy tool-Z axis there rather than command ~0.
+        if abs(axis_dot_tool_z) < 0.2:
+            axis_dot_tool_z = self._press_sign
+        return v_along * float(axis_dot_tool_z) * self._press_sign
 
     def _press_velocity(self, fs, now):
         """Positive = press into the part (tool Z = press_sign * this)."""
@@ -674,7 +861,10 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                     print(f"on_vz failed: {exc}", flush=True)
             return np.zeros(6)
 
-        v_press = self._press_velocity(fs, now)
+        if self._press_loop == "dtc":
+            v_press = self._press_velocity_dtc(now)
+        else:
+            v_press = self._press_velocity(fs, now)
         v_z = self._slew_vz(self._press_sign * v_press)
 
         if self._log_period_s > 0.0:
@@ -687,11 +877,27 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                     and self._contact_since is not None
                     and (now - self._contact_since) < self._sit_s
                 )
+                extra = ""
+                if self._press_loop == "dtc" and self._last_diag:
+                    d = self._last_diag
+                    # Fs here is the dtc loop's own along-normal measurement,
+                    # which is what it actually regulates; `fs` above is the
+                    # tool-Z-only legacy figure and can differ once the field
+                    # normal is off tool Z.
+                    extra = (
+                        f"  Fs_n={d.get('Fs_N', 0.0):+.2f}N"
+                        f"  gain={d.get('gain_scale', 1.0):.2f}"
+                        f"{'  SPIKE' if d.get('spike') else ''}"
+                        f"{'  OSC' if d.get('osc') else ''}"
+                        f"{'  WRONGSIGN' if d.get('wrong_sign') else ''}"
+                        f"{'  FAULT' if d.get('fault_fs') else ''}"
+                    )
                 print(
-                    f"contact force[{src}]: mode={self._z_mode}  fz_raw={fz_raw:+.2f}N  "
+                    f"contact force[{src}/{self._press_loop}]: mode={self._z_mode}  "
+                    f"fz_raw={fz_raw:+.2f}N  "
                     f"Fs={fs:+.2f}N  Fd={self._target_force:.1f}N  "
                     f"v_z={v_z:+.4f}m/s  Fext=0  sign={self._press_sign:+.0f}"
-                    f"{'  sit' if sit else ''}",
+                    f"{'  sit' if sit else ''}{extra}",
                     flush=True,
                 )
 
@@ -725,6 +931,12 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._contact_since = None
         self._prev_v_z = None
         self._external_wrench = np.zeros(6)
+        self._last_diag = {}
+        if self._pid is not None:
+            # Same reason as the legacy integrator reset: a second start() must
+            # not inherit windup, LPF state or a cut gain_scale from the
+            # previous contact session.
+            self._pid.reset()
         self._t_start = time.monotonic()
         self._t_last_log = None
         self._stop.clear()

@@ -76,6 +76,32 @@ def _limit_rotation(R_prev, R_new, max_rad):
     return slerp_rotation(R_prev, R_new, float(max_rad / err))
 
 
+def _snap_normal_to_surface(stick_xyz, xyz_proj, R, max_correction_m=0.02):
+    """Take the along-normal component from ``vf.project()``, tangential from the stick.
+
+    ``tick()`` used to keep ``stick_xyz`` wholesale and throw ``xyz_proj`` away,
+    so the commanded point rode ``live_xyz + tangential step`` and never
+    re-snapped to the mesh -- straight steps across curvature accumulate, and
+    the next ``vf.project()`` is then queried off-surface, degrading the
+    orientation it returns. Tangential stays with the stick so this cannot fight
+    the operator; only the normal offset is corrected, and the force loop owns
+    that axis anyway.
+    """
+    stick_xyz = np.asarray(stick_xyz, dtype=float).reshape(3)
+    xyz_proj = np.asarray(xyz_proj, dtype=float).reshape(3)
+    n = np.asarray(R, dtype=float).reshape(3, 3)[:, 2]
+    n_norm = float(np.linalg.norm(n))
+    if n_norm < 1e-12:
+        return stick_xyz.copy()
+    n = n / n_norm
+    # Bounded like _clamp_lead: a bad project at a mesh edge must not teleport
+    # the command along the normal, and _clamp_lead has already run by here.
+    d = float(np.clip(float((xyz_proj - stick_xyz) @ n),
+                      -abs(max_correction_m), abs(max_correction_m)))
+    out = stick_xyz + d * n
+    return out if _is_finite_xyz(out) else stick_xyz.copy()
+
+
 def _project_once(vf, xyz, R):
     proposed = _motor_at(xyz, R)
     t0 = time.perf_counter()
@@ -112,7 +138,7 @@ class FieldFollow:
 
     def __init__(self, vf, *, hz=20.0, zero_smoothing_after_first=True,
                  project_in_process=False, mesh=None, max_lead_m=0.02,
-                 max_dR_rad=0.12, max_step_m=0.0):
+                 max_dR_rad=0.12, max_step_m=0.0, snap_to_surface=True):
         hz = float(hz)
         if hz <= 0.0:
             raise ValueError(f"hz must be positive, got {hz}")
@@ -121,6 +147,7 @@ class FieldFollow:
         self._max_lead_m = float(max_lead_m)
         self._max_dR_rad = float(max_dR_rad)
         self._max_step_m = float(max_step_m)
+        self._snap_to_surface = bool(snap_to_surface)
         self._zero_smoothing_after_first = bool(zero_smoothing_after_first)
         self._proc = None
         self._in_q = None
@@ -333,7 +360,9 @@ class FieldFollow:
             self.revert_tick()
             return FollowTick(idle=True)
         self._R = R_new
-        self._xyz = stick_xyz
+        self._xyz = _snap_normal_to_surface(
+            stick_xyz, xyz_proj, R_new,
+            max_correction_m=self._max_lead_m) if self._snap_to_surface else stick_xyz
         target = _motor_at(self._xyz, self._R)
         self.last_target = target
         quat = _quat_wxyz_from_motor(target)
