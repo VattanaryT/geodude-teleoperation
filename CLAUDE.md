@@ -70,6 +70,13 @@ These are established, not guesses. Trusting the wrong one here moves hardware.
   `SPIKE gain=0.50` with `Fs≈0` and `v_z=+0.0000`, and contact mode never
   approached at all. An impact is a *sustained* rise and still clears 40 N/s
   against a 20 ms baseline.
+- **The contact loop integrates on the *measured* tick period, not on
+  `update_period`.** `_run` sleeps `update_period` after the work, and the work
+  includes a blocking RTDE read, so the real period is always longer than
+  nominal. Nominal dt rescales the integral and the LPF pole and inflates the
+  spike guard's rate by the same ratio — dividing a real ~32 ms change by a
+  nominal 20 ms baseline manufactures trips. `_tick_dt()` measures it and the
+  `dt` column in the contact CSV shows what it actually is.
 - **Both seek laws answer a wrong-sign reading the same way.** `Fs` at or below
   `min(−2, −0.5·Fd)` is a bounce or a flipped reading, not more force owed.
   Without that guard the legacy PID reads `fe = Fd − Fs` growing without bound
@@ -138,10 +145,13 @@ Library data (`frames/`, laser `crop_meta`/offsets, `chamfer_ee.stl`) lives in
 defaults in `laser_frames`/`ee_viz` read it. The bulk meshes and scans stay in
 `assets/`, which belongs to `examples/` and is not packaged.
 
-`--contact-log` (on by default) streams one CSV row per force tick — `Fs`,
-`Fd`, `v_z`, the tare, and the dtc flags — next to `speedj_logs/`. It is
+`--contact-log` (on by default) streams one CSV row per force tick — `dt`,
+`Fs`, `Fd`, `v_z`, the tare, and the dtc flags — next to `speedj_logs/`. It is
 flushed as it runs, so a protective-stopped or Ctrl+C'd session still leaves
 the record that explains it; the speedj `.npz` only lands on a clean exit.
+`python examples/analyze_contact_log.py` (newest log by default) summarizes
+loop period, force noise per tick, time inside the target band and which guard
+held `v_along` — the 0.5 s console lines alias all of that away.
 
 Hardware entry point is `examples/hardware_object_contact_teleop.py`. Contact
 lift-off fixes are behind three independent flags so a session can bisect them:

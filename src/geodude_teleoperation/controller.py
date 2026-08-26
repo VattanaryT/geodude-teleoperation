@@ -688,6 +688,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._on_force_abort = None
         self._on_vz = None
         self._last_diag = {}
+        self._t_tick = None
         self._log_path = None
         self._log_file = None
         self._log_writer = None
@@ -734,10 +735,10 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._log_path = None if path is None else str(path)
 
     _LOG_FIELDS = (
-        "t", "elapsed", "mode", "press_loop", "fz_raw", "bias_x", "bias_y",
-        "bias_z", "Fs", "Fd", "v_press", "v_z", "aborted",
-        "Fs_n", "Fe_n", "dFs_dt", "gain", "v_along", "spike", "osc",
-        "wrong_sign", "fault_fs",
+        "t", "elapsed", "dt", "mode", "press_loop", "fz_raw", "bias_x",
+        "bias_y", "bias_z", "Fs", "Fd", "v_press", "v_z", "aborted",
+        "Fs_n", "Fs_n_raw", "Fe_n", "dFs_dt", "gain", "v_along", "spike",
+        "osc", "wrong_sign", "fault_fs",
     )
 
     def _open_contact_log(self):
@@ -898,7 +899,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
             axis = n if float(n @ axis) > 0.0 else -n
         return axis, float(axis @ tool_z)
 
-    def _press_velocity_dtc(self, now):
+    def _press_velocity_dtc(self, now, dt):
         """Delegate the seek to the ported DTC ForcePIDController.
 
         Returns press velocity in the same units/sign as ``_press_velocity``:
@@ -919,7 +920,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         _cmd, diag = self._pid.step(
             n_base=axis,
             force_base=self._read_force_tool(),
-            dt=self._update_period,
+            dt=dt,
             R_ee=R_ee,
         )
         self._last_diag = diag
@@ -935,7 +936,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
             axis_dot_tool_z = self._press_sign
         return v_along * float(axis_dot_tool_z) * self._press_sign
 
-    def _press_velocity(self, fs, now):
+    def _press_velocity(self, fs, now, dt):
         """Positive = press into the part (tool Z = press_sign * this)."""
         # Latched for this DualLoop session (button 0 → start, button 0 → stop).
         # Unload must not drop to approach: that is free-space 5 mm/s and C153.
@@ -958,12 +959,11 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
             return -self._unload_v_m_s
         if fs > 0.0:
             self._integral = np.clip(
-                self._integral + fe * self._update_period,
+                self._integral + fe * dt,
                 -self._integral_limit, self._integral_limit)
         else:
             self._integral = 0.0
-        deriv = 0.0 if self._prev_error is None else \
-            (fe - self._prev_error) / self._update_period
+        deriv = 0.0 if self._prev_error is None else (fe - self._prev_error) / dt
         self._prev_error = fe
         v_pid = (self._kp_force * fe + self._ki_force * self._integral +
                  self._kd_force * deriv + self._force_feedforward)
@@ -975,16 +975,36 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         # and lost_s→approach both walk the TCP off into free space.
         return v_pid
 
+    def _tick_dt(self, now):
+        """Real seconds since the previous tick, clamped.
+
+        ``_run`` sleeps ``update_period`` *after* the work, and the work
+        includes a blocking RTDE read, so the true period is always longer than
+        nominal. Handing the nominal value to the seek laws rescales the
+        integral and the LPF pole, and -- worst -- the spike guard, which then
+        divides a real ~32 ms change by a nominal 20 ms baseline and inflates
+        every rate by that ratio. That manufactures trips: on hardware SPIKE
+        latched on almost every tick once Fs was past contact_threshold_N, so
+        v_along sat at 0 and the loop could not close the last 2 N to Fd.
+        """
+        prev = self._t_tick
+        self._t_tick = now
+        if prev is None:
+            return self._update_period
+        return float(np.clip(now - prev,
+                             0.2 * self._update_period,
+                             10.0 * self._update_period))
+
     def _wrong_sign_threshold(self):
         """Fs at or below this is a bad reading, not a deeper press."""
         return min(self._wrong_sign_fs_n,
                    -abs(self._wrong_sign_fd_frac * self._target_force))
 
-    def _slew_vz(self, v_z):
+    def _slew_vz(self, v_z, dt):
         if self._v_slew_mps2 <= 0.0 or self._prev_v_z is None:
             self._prev_v_z = v_z
             return v_z
-        max_dv = self._v_slew_mps2 * self._update_period
+        max_dv = self._v_slew_mps2 * dt
         v_z = float(np.clip(v_z, self._prev_v_z - max_dv, self._prev_v_z + max_dv))
         self._prev_v_z = v_z
         return v_z
@@ -997,6 +1017,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         bias_tool = self._bias_tool_now()
         fs = self._fs(fz_raw - float(bias_tool[2]))
         now = time.monotonic()
+        dt = self._tick_dt(now)
         elapsed = 0.0 if self._t_start is None else now - self._t_start
 
         if abs(fz_raw) > self._dead_wrench_eps_n:
@@ -1039,10 +1060,10 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
             return np.zeros(6)
 
         if self._press_loop == "dtc":
-            v_press = self._press_velocity_dtc(now)
+            v_press = self._press_velocity_dtc(now, dt)
         else:
-            v_press = self._press_velocity(fs, now)
-        v_z = self._slew_vz(self._press_sign * v_press)
+            v_press = self._press_velocity(fs, now, dt)
+        v_z = self._slew_vz(self._press_sign * v_press, dt)
 
         if self._log_period_s > 0.0:
             if self._t_last_log is None or (now - self._t_last_log) >= self._log_period_s:
@@ -1083,6 +1104,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
             d = self._last_diag or {}
             self._write_contact_log({
                 "t": f"{now:.6f}", "elapsed": f"{elapsed:.4f}",
+                "dt": f"{dt:.6f}",
                 "mode": self._z_mode, "press_loop": self._press_loop,
                 "fz_raw": f"{fz_raw:.4f}",
                 "bias_x": f"{bias_tool[0]:.4f}", "bias_y": f"{bias_tool[1]:.4f}",
@@ -1091,6 +1113,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                 "v_press": f"{v_press:.6f}", "v_z": f"{v_z:.6f}",
                 "aborted": int(self._force_aborted),
                 "Fs_n": f"{d.get('Fs_N', float('nan')):.4f}",
+                "Fs_n_raw": f"{d.get('Fs_raw_N', float('nan')):.4f}",
                 "Fe_n": f"{d.get('Fe_N', float('nan')):.4f}",
                 "dFs_dt": f"{d.get('dFs_dt_N_s', float('nan')):.3f}",
                 "gain": f"{d.get('gain_scale', float('nan')):.3f}",
@@ -1138,6 +1161,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._external_wrench = np.zeros(6)
         self._last_diag = {}
         self._t_last_log = None
+        self._t_tick = None
         if self._pid is not None:
             # Same reason as the legacy integrator reset: a second start() must
             # not inherit windup, LPF state or a cut gain_scale from the

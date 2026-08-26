@@ -623,5 +623,58 @@ class ContactLogTest(unittest.TestCase):
         self.assertIsNone(ctrl._log_writer)
 
 
+
+class TickPeriodTest(unittest.TestCase):
+    """The seek laws must integrate on real time, not on update_period.
+
+    ``_run`` sleeps update_period *after* the work, and the work includes a
+    blocking RTDE read, so the true period is always longer than nominal.
+    Nominal dt rescales the integral and the LPF pole, and inflates the spike
+    guard's rate by the same ratio -- which is what pinned SPIKE on almost
+    every tick in contact and left v_along at 0 short of Fd.
+    """
+
+    def _ctrl(self, **kw):
+        params = dict(
+            press_loop="dtc", target_force=10.0, update_period=0.005,
+            log_period_s=0.0, dead_wrench_abort_s=0.0, force_tare=False,
+            measured_force_fn=lambda: (0.0, 0.0, 0.0))
+        params.update(kw)
+        ctrl = _make_controller(**params)
+        ctrl._R_tool_to_base = np.eye(3)
+        return ctrl
+
+    def test_first_tick_falls_back_to_nominal(self):
+        ctrl = self._ctrl()
+        self.assertEqual(ctrl._tick_dt(100.0), 0.005)
+
+    def test_later_ticks_use_the_measured_gap(self):
+        ctrl = self._ctrl()
+        ctrl._tick_dt(100.0)
+        self.assertAlmostEqual(ctrl._tick_dt(100.008), 0.008, places=9)
+
+    def test_a_scheduling_hiccup_is_clamped(self):
+        ctrl = self._ctrl()
+        ctrl._tick_dt(100.0)
+        self.assertEqual(ctrl._tick_dt(101.0), 0.05)      # 10x nominal
+        ctrl._tick_dt(200.0)
+        self.assertEqual(ctrl._tick_dt(200.0), 0.001)     # 0.2x nominal
+
+    def test_start_clears_the_tick_clock(self):
+        ctrl = self._ctrl()
+        ctrl._tick_dt(100.0)
+        ctrl._reset_press_loop()
+        self.assertIsNone(ctrl._t_tick)
+
+    def test_the_slew_uses_the_measured_period(self):
+        # 0.4 m/s^2 over a real 10 ms tick is 4 mm/s of allowed change, twice
+        # what the nominal 5 ms would have permitted.
+        ctrl = self._ctrl(v_slew_mps2=0.4)
+        ctrl._prev_v_z = 0.0
+        self.assertAlmostEqual(ctrl._slew_vz(1.0, 0.010), 0.004, places=9)
+        ctrl._prev_v_z = 0.0
+        self.assertAlmostEqual(ctrl._slew_vz(1.0, 0.005), 0.002, places=9)
+
+
 if __name__ == "__main__":
     unittest.main()
