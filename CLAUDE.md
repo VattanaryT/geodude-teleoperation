@@ -76,6 +76,20 @@ These are established, not guesses. Trusting the wrong one here moves hardware.
   loops authoritative on the same axis is the fight that produces drift.
 - **Never keep inching into a rigid stop (C153).** At or over target, press
   velocity is 0 or retract. speedJ cannot yield.
+- **`unload_v_m_s` is a *floor* on the escape speed, never a ceiling.** The
+  overload guards used to assign it, throwing away the PID's own answer exactly
+  when the load was worst: at `|Fs| = 40 N` with `Fd = 10 N` the PID wants the
+  full `max_v_along` and the guard forced half of it, so shedding 30 N through a
+  stiff contact took ~2 s — the pendant protective-stopped well inside that.
+  Use `min(v_along, -unload)`, not `= -unload`.
+- **A UR protective stop must stop the press, not queue one up.** While stopped
+  the controller discards the speedJ stream, but the force loop went on
+  computing against a robot that was not moving, so the error stayed large and
+  the held command would have been applied the instant someone cleared the
+  pendant. `safety_mode_fn` (from the same RTDE receive socket as the force
+  reader — there is only one client allowed) zeroes the overlay and the slew
+  while safety mode is outside NORMAL/REDUCED. A *failed* read is not a stop:
+  refusing to press on a missing status signal is the worse failure.
 - **The dtc guards must shape the seek, not own it.** Measured on this rig
   (`contact_20260826_145209.csv`, 9152 ticks): `SPIKE` on 75.4% of ticks, `v_z`
   exactly 0 on 68.6%, `gain_scale` at 1.0 on 4.3% — about **0.9 mm/s of mean

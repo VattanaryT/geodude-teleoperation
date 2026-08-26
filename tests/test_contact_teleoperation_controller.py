@@ -676,5 +676,66 @@ class TickPeriodTest(unittest.TestCase):
         self.assertAlmostEqual(ctrl._slew_vz(1.0, 0.005), 0.002, places=9)
 
 
+
+class SafetyModeHaltTest(unittest.TestCase):
+    """A protective stop must stop the press, not queue one up.
+
+    The UR discards our speedJ stream while stopped, but this loop kept
+    computing press velocity against a robot that was not moving. The force
+    error therefore stayed large, and whatever it was holding would have been
+    applied the instant someone cleared the stop on the pendant.
+    """
+
+    def _ctrl(self, state):
+        ctrl = _make_controller(
+            press_loop="dtc", target_force=10.0, force_sign=1.0,
+            max_v_hold=0.008, v_approach=0.005, log_period_s=0.0,
+            dead_wrench_abort_s=0.0, force_tare=False, v_slew_mps2=0.0,
+            measured_force_fn=lambda: (0.0, 0.0, 0.0),
+            safety_mode_fn=lambda: state["mode"])
+        ctrl._R_tool_to_base = np.eye(3)
+        ctrl._t_start = time.monotonic()
+        return ctrl
+
+    def _v_z(self, ctrl, n=1):
+        seen = []
+        ctrl.set_on_vz(seen.append)
+        for _ in range(n):
+            ctrl._compute_force_command()
+        return seen[-1]
+
+    def test_a_protective_stop_zeroes_the_overlay(self):
+        state = {"mode": 1}
+        ctrl = self._ctrl(state)
+        self.assertGreater(self._v_z(ctrl, n=20), 0.0)
+        state["mode"] = 3                       # PROTECTIVE_STOP
+        self.assertEqual(self._v_z(ctrl), 0.0)
+
+    def test_clearing_the_stop_resumes_from_zero_not_mid_ramp(self):
+        state = {"mode": 1}
+        ctrl = self._ctrl(state)
+        self._v_z(ctrl, n=20)
+        state["mode"] = 3
+        self._v_z(ctrl)
+        self.assertEqual(ctrl._prev_v_z, 0.0)
+        state["mode"] = 1
+        self.assertGreater(self._v_z(ctrl), 0.0)
+
+    def test_reduced_mode_still_allows_the_press(self):
+        state = {"mode": 2}                     # REDUCED is a live robot
+        self.assertGreater(self._v_z(self._ctrl(state), n=20), 0.0)
+
+    def test_a_missing_or_failing_reader_is_not_treated_as_a_stop(self):
+        # Refusing to press because a status read failed would be a worse
+        # failure than the one this guards against.
+        ctrl = self._ctrl({"mode": 1})
+        ctrl.set_safety_mode_fn(None)
+        self.assertGreater(self._v_z(ctrl, n=20), 0.0)
+        def boom():
+            raise RuntimeError("rtde hiccup")
+        ctrl.set_safety_mode_fn(boom)
+        self.assertGreater(self._v_z(ctrl), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

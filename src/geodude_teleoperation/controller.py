@@ -10,6 +10,7 @@ from geodude_teleoperation.in_contact_control.force_pid import (
     ForcePIDConfig,
     ForcePIDController,
 )
+from geodude_teleoperation.tcp_force import is_safe_to_command, safety_mode_name
 
 
 def _adaptive_linear_scale(distance, min_factor, max_factor, offset=0.01, scale_range=0.075):
@@ -582,7 +583,8 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                  press_loop="dtc", measured_force_fn=None, force_tare=True,
                  force_tare_samples=20, force_tare_period=0.002,
                  wrong_sign_fs_n=-2.0, wrong_sign_fd_frac=0.5,
-                 unload_v_m_s=0.004, spike_dF_dt_N_s=None):
+                 unload_v_m_s=0.004, spike_dF_dt_N_s=None,
+                 safety_mode_fn=None):
         super().__init__(config)
         self.vf = vf
         self._target_force = abs(float(target_force))
@@ -691,6 +693,13 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._on_vz = None
         self._last_diag = {}
         self._t_tick = None
+        # Optional () -> UR safety mode. After a protective stop the controller
+        # discards our speedJ stream, but this loop went on computing press
+        # velocity against a robot that was not moving -- so the force error
+        # stayed large and the command it was holding would have been applied
+        # the instant someone cleared the stop on the pendant.
+        self._safety_mode_fn = safety_mode_fn
+        self._safety_halted = False
         self._log_path = None
         self._log_file = None
         self._log_writer = None
@@ -785,6 +794,30 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         except Exception as exc:
             print(f"contact log: write failed ({exc}); disabling", flush=True)
             self._close_contact_log()
+
+    def set_safety_mode_fn(self, safety_mode_fn):
+        """Callable () -> UR safety mode int (or None). See _safety_mode_fn."""
+        self._safety_mode_fn = safety_mode_fn
+
+    def _safety_blocks_motion(self):
+        """True when the robot is stopped and must not be commanded."""
+        if self._safety_mode_fn is None:
+            return False
+        try:
+            mode = self._safety_mode_fn()
+        except Exception:
+            return False        # a failed read is not evidence of a stop
+        if is_safe_to_command(mode):
+            if self._safety_halted:
+                self._safety_halted = False
+                print(f"\033[92mrobot safety cleared ({safety_mode_name(mode)}); "
+                      f"press resumes\033[0m", flush=True)
+            return False
+        if not self._safety_halted:
+            self._safety_halted = True
+            print(f"\033[91mrobot is in {safety_mode_name(mode)}: holding press "
+                  f"at zero until it is cleared\033[0m", flush=True)
+        return True
 
     def set_on_force_abort(self, callback):
         """Optional callback() invoked once if force feedback looks dead (open-loop)."""
@@ -1052,6 +1085,16 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                     print(f"on_force_abort failed: {exc}", flush=True)
 
         self._external_wrench = np.zeros(6)
+        if self._safety_blocks_motion():
+            # Zero the overlay and reset the slew, so clearing the stop does not
+            # resume mid-ramp into the part.
+            self._prev_v_z = 0.0
+            if self._on_vz is not None:
+                try:
+                    self._on_vz(0.0)
+                except Exception as exc:
+                    print(f"on_vz failed: {exc}", flush=True)
+            return np.zeros(6)
         if self._force_aborted:
             self._prev_v_z = 0.0
             if self._on_vz is not None:
@@ -1164,6 +1207,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._last_diag = {}
         self._t_last_log = None
         self._t_tick = None
+        self._safety_halted = False
         if self._pid is not None:
             # Same reason as the legacy integrator reset: a second start() must
             # not inherit windup, LPF state or a cut gain_scale from the

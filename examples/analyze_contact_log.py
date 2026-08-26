@@ -149,6 +149,24 @@ def summarize(path):
     print(f"  excursions >3N off median: {events} in {span:.0f}s"
           f"  ({events / max(span, 1e-9):.2f}/s)")
 
+    print("\n-- worst events (where to look for a pendant trip) --")
+    t0 = np.nanmin(t)
+    d_all = np.abs(np.diff(fs))
+    if d_all.size:
+        k = int(np.nanargmax(d_all)) + 1
+        print(f"  biggest jump: {d_all[k - 1]:5.2f} N in one tick at t+{t[k] - t0:.1f}s"
+              f"  (Fs {fs[k - 1]:+.1f} -> {fs[k]:+.1f} N)")
+    for flag, label in (("fault_fs", "|Fs| fault"), ("wrong_sign", "wrong sign")):
+        f = _col(rows, flag) > 0.5
+        if not f.any():
+            continue
+        starts = np.flatnonzero(f[1:] & ~f[:-1]) + 1
+        worst = np.nanmax(np.abs(fs[f])) if np.isfinite(fs[f]).any() else float("nan")
+        when = ", ".join(f"t+{t[i] - t0:.1f}s" for i in starts[:6])
+        more = "" if starts.size <= 6 else f", +{starts.size - 6} more"
+        print(f"  {label}: {starts.size} episode(s), peak |Fs|={worst:.1f} N"
+              f"  [{when}{more}]")
+
     print("\n-- guards --")
     for flag in ("spike", "osc", "wrong_sign", "fault_fs"):
         f = _col(rows, flag)

@@ -537,6 +537,7 @@ def main():
     # --- speedj contact: stay on gafropy (default). force_mode is opt-in. ---
     contact_controller = None
     measured_fz_fn = None
+    safety_mode_fn = None
     measured_force_fn = None
     close_tcp_force = None
     if args.contact_backend == "speedj":
@@ -555,6 +556,7 @@ def main():
             # The dtc loop resolves force along the field normal, not tool Z, so
             # it needs all three linear components.
             measured_force_fn = lambda: force_from_tcp_force(read_tcp_force())
+            safety_mode_fn = getattr(read_tcp_force, "safety_mode", None)
             print(f"contact FT: RTDE ActualTCPForce from {robot_ip}", flush=True)
         except Exception as exc:
             print(
@@ -569,6 +571,7 @@ def main():
             z_damping=z_damping,
             v_slew_mps2=args.v_slew, lost_s=1.0, sit_s=2.0,
             spike_dF_dt_N_s=args.spike_rate,
+            safety_mode_fn=safety_mode_fn,
             force_sign=args.force_sign,
             press_loop=args.press_loop,
             force_tare=args.force_tare,

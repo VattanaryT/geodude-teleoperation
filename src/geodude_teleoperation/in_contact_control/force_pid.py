@@ -444,14 +444,20 @@ class ForcePIDController:
                     v_along = -unload
                 elif v_along > 0.0:
                     v_along = min(v_along, 0.0)
+            # `min`, not `=`: unload_v_m_s is a *floor* on the escape, never a
+            # ceiling. Assigning it threw away the PID's own answer, which is
+            # much larger exactly when the load is worst -- at |Fs|=40 N with
+            # Fd=10 N the PID wants the full 8 mm/s and this forced 4 mm/s,
+            # so shedding 30 N through a stiff contact took ~2 s. The pendant
+            # protective-stopped well inside that.
             if mag_overload and fd >= 0.0 and not overshoot:
-                v_along = -unload
+                v_along = min(v_along, -unload)
             if fault_fs:
                 # Do not freeze — freezing traps |Fs| high (see FAULT=|Fs| with Fe≪0).
                 if fd >= 0.0:
-                    v_along = -unload
+                    v_along = min(v_along, -unload)
                 else:
-                    v_along = unload
+                    v_along = max(v_along, unload)
 
             # At / above target: stop pushing into the surface. DualLoop was
             # still driving approach when Fs jumped 0.6→22 N before DTC handoff.

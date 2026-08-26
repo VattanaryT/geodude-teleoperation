@@ -295,3 +295,31 @@ class GuardAuthorityTest(unittest.TestCase):
     def test_the_spike_threshold_clears_this_rigs_ordinary_variation(self):
         """0.635 N per 5.18 ms tick is ~123 N/s of perfectly normal spread."""
         self.assertGreater(ForcePIDConfig().spike_dF_dt_N_s, 123.0)
+
+
+class OverloadEscapeTest(unittest.TestCase):
+    """unload_v_m_s is a floor on the escape speed, never a ceiling.
+
+    The guards used to assign it, which discarded the PID's own answer exactly
+    when the load was worst: at |Fs|=40 N with Fd=10 N the PID wants the full
+    max_v_along, and the guard forced half of it. Shedding that through a stiff
+    contact took ~2 s and the pendant protective-stopped inside that window.
+    """
+
+    def test_a_large_overload_escapes_at_the_pid_speed_not_the_unload_floor(self):
+        pid = _make()
+        diag = _settle(pid, -(4.0 * FD))          # |Fs| = 4x target
+        self.assertTrue(diag["fault_fs"])
+        self.assertAlmostEqual(
+            diag["v_along_m_s"], -pid.config.max_v_along_m_s, places=9)
+
+    def test_a_mild_overload_still_gets_at_least_the_unload_floor(self):
+        pid = _make(kp=0.0, ki=0.0, kd=0.0)       # PID contributes nothing
+        diag = _settle(pid, -(FD + 2.0))
+        self.assertLessEqual(diag["v_along_m_s"], -pid.config.unload_v_m_s + 1e-12)
+
+    def test_the_escape_never_becomes_a_press(self):
+        for fz in (-(FD + 2.0), -(2.0 * FD), -(4.0 * FD), -(10.0 * FD)):
+            with self.subTest(fz=fz):
+                pid = _make()
+                self.assertLess(_settle(pid, fz)["v_along_m_s"], 0.0)
