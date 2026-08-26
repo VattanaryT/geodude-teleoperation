@@ -196,6 +196,7 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         self._qdot_cmd = None
         self._qdot_des = None
         self._qdot_cmd_t = None
+        self._force_owns_z = False
 
     def set_command_trace(self, fn):
         """Optional callback(qdot, measured=, spring=, stick=) after each speedJ command."""
@@ -236,11 +237,25 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         self._tool_z_velocity = float(vz)
 
     def set_z_compliant(self, compliant):
-        """Zero pose-spring Kz so a Z overlay is not fought. Stick Z is ignored."""
+        """Zero pose-spring Kz so a Z overlay is not fought. Stick Z is ignored.
+
+        Also switches the plant to velocity-slide (no XY spring). Replay that
+        must stay on a Cartesian path should use ``set_force_owns_z`` instead.
+        """
         self._z_compliant = bool(compliant)
-        self._stiffness[5, 5] = 0.0 if self._z_compliant else self._kz_pose
-        if not self._z_compliant:
+        if self._z_compliant:
+            self._stiffness[5, 5] = 0.0
+        else:
+            self._stiffness[5, 5] = (
+                0.0 if self._force_owns_z else self._kz_pose)
             self._slide_twist = np.zeros(6)
+
+    def set_force_owns_z(self, owns: bool) -> None:
+        """Zero Kz so DualLoop vz is not fought. XY pose-spring stays on."""
+        self._force_owns_z = bool(owns)
+        if self._z_compliant:
+            return
+        self._stiffness[5, 5] = 0.0 if self._force_owns_z else self._kz_pose
 
     def compute_control_command(self, robot_state, objective_state, task_space_state):
         jacobian = np.asarray(task_space_state.get_jacobian())

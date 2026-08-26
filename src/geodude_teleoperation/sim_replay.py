@@ -14,6 +14,7 @@ With bag start joints in the model, tracking error is absolute chamfer vs bag.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -30,6 +31,7 @@ class TrackingRow:
     err_mm: float
     abs_fn: float | None
     plant_vz: float
+    meas_fz: float | None = None
 
 
 def body_twist_for_plant(
@@ -95,6 +97,38 @@ def refuse_start_gap(gap_mm: float, limit_mm: float = MAX_START_GAP_MM) -> None:
         )
 
 
+def speedj_stalled(cmd_norm: float, meas_norm: float) -> bool:
+    """True when we command motion but the UR is not moving (pendant stop)."""
+    return float(cmd_norm) >= 0.03 and float(meas_norm) <= 0.005
+
+
+def wait_until_start_gap(
+    live_gap_mm_fn: Callable[[], float],
+    *,
+    limit_mm: float,
+    timeout_s: float,
+    dt_s: float = 0.1,
+    on_tick: Callable[[float], None] | None = None,
+) -> float:
+    """Poll until live TCP is within ``limit_mm`` of bag start.
+
+    The timed crawl can end while speedJ is still saturated (rotation
+    steals the |qdot| budget). Hold the final target until the gap closes.
+    """
+    deadline = time.monotonic() + float(timeout_s)
+    while True:
+        gap = float(live_gap_mm_fn())
+        if gap <= float(limit_mm):
+            return gap
+        if time.monotonic() >= deadline:
+            refuse_start_gap(gap, limit_mm=limit_mm)
+        if on_tick is not None:
+            on_tick(gap)
+        delay = float(dt_s)
+        if delay > 0.0:
+            time.sleep(delay)
+
+
 def ramp_duration_s(
     gap_m: float, *, speed_mps: float = 0.02, min_s: float = 2.0
 ) -> float:
@@ -113,11 +147,23 @@ def blend_pose_matrix(T0: np.ndarray, T1: np.ndarray, alpha: float) -> np.ndarra
     B = np.asarray(T1, dtype=float).reshape(4, 4)
     a = float(np.clip(alpha, 0.0, 1.0))
     out = np.eye(4)
-    key = Rotation.concatenate([
-        Rotation.from_matrix(A[:3, :3]),
-        Rotation.from_matrix(B[:3, :3]),
-    ])
+    q0 = Rotation.from_matrix(A[:3, :3]).as_quat()
+    q1 = Rotation.from_matrix(B[:3, :3]).as_quat()
+    if float(np.dot(q0, q1)) < 0.0:
+        q1 = -q1
+    key = Rotation.from_quat(np.vstack([q0, q1]))
     out[:3, :3] = Slerp([0.0, 1.0], key)(a).as_matrix()
+    out[:3, 3] = (1.0 - a) * A[:3, 3] + a * B[:3, 3]
+    return out
+
+
+def blend_translation_matrix(T0: np.ndarray, T1: np.ndarray, alpha: float) -> np.ndarray:
+    """Lerp XYZ only. Keeps ``T0`` rotation so the ramp cannot unwind wrist 3."""
+    A = np.asarray(T0, dtype=float).reshape(4, 4)
+    B = np.asarray(T1, dtype=float).reshape(4, 4)
+    a = float(np.clip(alpha, 0.0, 1.0))
+    out = np.eye(4)
+    out[:3, :3] = A[:3, :3]
     out[:3, 3] = (1.0 - a) * A[:3, 3] + a * B[:3, 3]
     return out
 
@@ -269,14 +315,27 @@ def score_legend(*, follow_path: bool) -> str:
     )
 
 
-def enter_speedj_contact(*, mode, contact_controller, approach_controller, interface=None):
-    """Keep the pose-spring speedJ plant. Overlay DualLoop Z. Do not swap to line admittance."""
+def enter_speedj_contact(
+    *, mode, contact_controller, approach_controller, interface=None,
+    keep_pose_xy: bool = False,
+):
+    """Keep the pose-spring speedJ plant. Overlay DualLoop Z. Do not swap to line admittance.
+
+    Teleop (default): freeze XY, velocity-slide, DualLoop Z (avoids C153).
+    Replay ``keep_pose_xy=True``: keep ``set_target`` bag TCP with Kz still on
+    until DualLoop sees live load. Do not overlay a tool-Z approach feed.
+    """
     del interface
     mode["active"] = "contact"
-    approach_controller.hold_live_pose()
-    approach_controller.set_input_active(False)
     approach_controller.set_tool_z_velocity(0.0)
-    approach_controller.set_z_compliant(True)
+    if keep_pose_xy:
+        approach_controller.set_z_compliant(False)
+        approach_controller.set_force_owns_z(False)
+        approach_controller.set_input_active(True)
+    else:
+        approach_controller.hold_live_pose()
+        approach_controller.set_input_active(False)
+        approach_controller.set_z_compliant(True)
     contact_controller.set_on_vz(approach_controller.set_tool_z_velocity)
     contact_controller.start()
 
@@ -287,6 +346,8 @@ def exit_speedj_contact(*, mode, contact_controller, approach_controller, interf
     contact_controller.stop()
     contact_controller.set_on_vz(None)
     approach_controller.set_tool_z_velocity(0.0)
+    if hasattr(approach_controller, "set_force_owns_z"):
+        approach_controller.set_force_owns_z(False)
     approach_controller.set_z_compliant(False)
     approach_controller.hold_live_pose()
     approach_controller.set_input_active(False)
@@ -347,3 +408,61 @@ def summarize_tracking(rows: list[TrackingRow]) -> str:
         )
         i0 = i1
     return "\n".join(lines)
+
+
+def tracking_save_paths(directory, when=None):
+    from datetime import datetime
+    from pathlib import Path
+
+    when = datetime.now() if when is None else when
+    stamp = when.strftime("%Y%m%d_%H%M%S")
+    d = Path(directory)
+    return d / f"tracking_{stamp}.png", d / f"tracking_{stamp}.npz"
+
+
+def write_tracking_session(rows: list[TrackingRow], path_png, path_npz=None):
+    """Save Test 1 tracking: NPZ always, PNG if matplotlib is available."""
+    from pathlib import Path
+
+    if not rows:
+        return None
+    path_png = Path(path_png)
+    path_npz = Path(path_npz or path_png.with_suffix(".npz"))
+    path_png.parent.mkdir(parents=True, exist_ok=True)
+    t = np.array([r.t for r in rows], dtype=float)
+    payload = dict(
+        t=t,
+        err_xy_mm=np.array([r.err_xy_mm for r in rows], dtype=float),
+        err_z_mm=np.array([r.err_z_mm for r in rows], dtype=float),
+        err_mm=np.array([r.err_mm for r in rows], dtype=float),
+        plant_vz=np.array([r.plant_vz for r in rows], dtype=float),
+        abs_fn=np.array(
+            [np.nan if r.abs_fn is None else r.abs_fn for r in rows], dtype=float),
+        meas_fz=np.array(
+            [np.nan if r.meas_fz is None else r.meas_fz for r in rows], dtype=float),
+        mode=np.array([r.mode for r in rows]),
+    )
+    np.savez_compressed(path_npz, **payload)
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print(f"tracking plot: saved {path_npz} (no matplotlib for png)", flush=True)
+        return path_npz
+    fig, ax = plt.subplots(2, 1, sharex=True, figsize=(8, 6))
+    ax[0].plot(t, payload["err_xy_mm"], label="xy mm")
+    ax[0].plot(t, payload["err_z_mm"], label="z mm")
+    ax[0].set_ylabel("error (mm)")
+    ax[0].legend(loc="upper right")
+    ax[0].grid(True, alpha=0.3)
+    ax[1].plot(t, payload["abs_fn"], label="bag |f_n|")
+    ax[1].plot(t, payload["meas_fz"], label="RTDE Fz")
+    ax[1].plot(t, payload["plant_vz"] * 1e3, label="vz mm/s")
+    ax[1].set_xlabel("t (s)")
+    ax[1].set_ylabel("force / vz")
+    ax[1].legend(loc="upper right")
+    ax[1].grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path_png, dpi=120)
+    plt.close(fig)
+    print(f"tracking plot: saved {path_png} and {path_npz}", flush=True)
+    return path_png

@@ -83,6 +83,28 @@ def wrap_ur6_to_pm_pi(q6: np.ndarray) -> np.ndarray:
     return (q + np.pi) % (2.0 * np.pi) - np.pi
 
 
+def shortest_q_delta(q_from: np.ndarray, q_to: np.ndarray) -> np.ndarray:
+    """Per-joint shortest wrap in (−π, π]. Avoids a 179° Cartesian wrist unwind."""
+    d = (
+        np.asarray(q_to, dtype=float).reshape(-1)
+        - np.asarray(q_from, dtype=float).reshape(-1)
+    )
+    return (d + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def limit_safe_q_delta(q_from: np.ndarray, q_to: np.ndarray) -> np.ndarray:
+    """Joint step that stays in (−π, π]. Shortest wrap that would cross ±π is skipped
+    when the joints are wrap-equivalent; otherwise take the interior path."""
+    q0 = wrap_ur6_to_pm_pi(q_from)
+    q1 = wrap_ur6_to_pm_pi(q_to)
+    dq_short = shortest_q_delta(q0, q1)
+    dq_lin = q1 - q0
+    end_short = q0 + dq_short
+    same = np.abs(dq_short) < np.deg2rad(5.0)
+    legal_short = np.abs(end_short) <= np.pi + 1e-9
+    return np.where(legal_short, dq_short, np.where(same, 0.0, dq_lin))
+
+
 def apply_right_ur6(system, q: np.ndarray, q_ur6: np.ndarray) -> np.ndarray:
     """Copy 6 UR joints (``UR6_ORDER``) into a full gafro configuration."""
     out = np.asarray(q, dtype=float).copy()
@@ -128,6 +150,15 @@ def right_base_T_to_world(system, q_full: np.ndarray, T_rb: np.ndarray) -> np.nd
     out[:3, :3] = R @ T_rb[:3, :3]
     out[:3, 3] = T_base[:3, 3] + R @ T_rb[:3, 3]
     return out
+
+
+def matrix_to_tcp_xyzw(T: np.ndarray) -> np.ndarray:
+    """4×4 pose → bag TCP ``xyz + xyzw``."""
+    from scipy.spatial.transform import Rotation
+
+    T = np.asarray(T, dtype=float).reshape(4, 4)
+    return np.concatenate(
+        [T[:3, 3], Rotation.from_matrix(T[:3, :3]).as_quat()])
 
 
 def bag_tcp_to_yaml_ee_world(system, q_full: np.ndarray, tcp_xyzw: np.ndarray) -> np.ndarray:

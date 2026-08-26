@@ -174,6 +174,29 @@ class TrackingErrorTest(unittest.TestCase):
         self.assertIn("path", score_legend(follow_path=True))
         self.assertIn("err_mm", score_legend(follow_path=True))
 
+    def test_write_tracking_session_saves_npz(self):
+        import tempfile
+        from pathlib import Path
+
+        from geodude_teleoperation.sim_replay import (
+            TrackingRow,
+            write_tracking_session,
+        )
+
+        rows = [
+            TrackingRow(0, 0.0, "approach", 1.0, 0.5, 1.1, 0.2, 0.0, 0.1),
+            TrackingRow(1, 0.1, "contact", 2.0, 3.0, 3.6, 40.0, 0.005, -12.0),
+        ]
+        tmp = Path(tempfile.mkdtemp())
+        png = tmp / "tracking.png"
+        out = write_tracking_session(rows, png)
+        npz = png.with_suffix(".npz")
+        self.assertTrue(npz.is_file())
+        z = np.load(npz)
+        np.testing.assert_allclose(z["err_xy_mm"], [1.0, 2.0])
+        np.testing.assert_allclose(z["meas_fz"], [0.1, -12.0])
+        self.assertIsNotNone(out)
+
 
 class SlowReplayTest(unittest.TestCase):
     def test_start_gap_refuses_when_far(self):
@@ -188,11 +211,50 @@ class SlowReplayTest(unittest.TestCase):
             refuse_start_gap(gap, limit_mm=25.0)
         refuse_start_gap(10.0, limit_mm=25.0)
 
+    def test_wait_until_start_gap_returns_when_close(self):
+        from geodude_teleoperation.sim_replay import wait_until_start_gap
+
+        gaps = [80.0, 50.0, 20.0]
+        i = {"n": 0}
+
+        def live():
+            g = gaps[min(i["n"], len(gaps) - 1)]
+            i["n"] += 1
+            return g
+
+        ticks: list[float] = []
+        g = wait_until_start_gap(
+            live, limit_mm=25.0, timeout_s=5.0, dt_s=0.0, on_tick=ticks.append)
+        self.assertAlmostEqual(g, 20.0)
+        self.assertEqual(ticks, [80.0, 50.0])
+
+    def test_wait_until_start_gap_times_out(self):
+        from geodude_teleoperation.sim_replay import wait_until_start_gap
+
+        with self.assertRaises(RuntimeError):
+            wait_until_start_gap(
+                lambda: 63.9, limit_mm=25.0, timeout_s=0.05, dt_s=0.01)
+
     def test_ramp_duration_is_distance_over_speed(self):
         from geodude_teleoperation.sim_replay import ramp_duration_s
 
         self.assertAlmostEqual(ramp_duration_s(0.10, speed_mps=0.02), 5.0)
         self.assertAlmostEqual(ramp_duration_s(0.01, speed_mps=0.02, min_s=2.0), 2.0)
+
+    def test_blend_pose_takes_short_arc_when_quat_signs_differ(self):
+        from geodude_teleoperation.sim_replay import blend_pose_matrix
+        from scipy.spatial.transform import Rotation
+
+        T0 = np.eye(4)
+        T1 = np.eye(4)
+        T1[:3, :3] = Rotation.from_euler("z", 10, degrees=True).as_matrix()
+        T1_flip = T1.copy()
+        q = Rotation.from_matrix(T1[:3, :3]).as_quat()
+        T1_flip[:3, :3] = Rotation.from_quat(-q).as_matrix()
+        mid = blend_pose_matrix(T0, T1_flip, 0.5)
+        ang = float(np.degrees(np.linalg.norm(
+            Rotation.from_matrix(mid[:3, :3]).as_rotvec())))
+        self.assertLess(ang, 10.0)
 
     def test_blend_pose_midpoint_is_halfway(self):
         from geodude_teleoperation.sim_replay import blend_pose_matrix
@@ -204,6 +266,25 @@ class SlowReplayTest(unittest.TestCase):
         np.testing.assert_allclose(T[:3, 3], [0.05, 0.0, 0.0])
         np.testing.assert_allclose(blend_pose_matrix(T0, T1, 0.0)[:3, 3], T0[:3, 3])
         np.testing.assert_allclose(blend_pose_matrix(T0, T1, 1.0)[:3, 3], T1[:3, 3])
+
+    def test_blend_translation_keeps_start_rotation(self):
+        from geodude_teleoperation.sim_replay import blend_translation_matrix
+        from scipy.spatial.transform import Rotation
+
+        T0 = np.eye(4)
+        T1 = np.eye(4)
+        T1[:3, :3] = Rotation.from_euler("z", 90, degrees=True).as_matrix()
+        T1[:3, 3] = [0.10, 0.0, 0.0]
+        T = blend_translation_matrix(T0, T1, 1.0)
+        np.testing.assert_allclose(T[:3, 3], T1[:3, 3])
+        np.testing.assert_allclose(T[:3, :3], T0[:3, :3])
+
+    def test_speedj_stalled_when_cmd_without_motion(self):
+        from geodude_teleoperation.sim_replay import speedj_stalled
+
+        self.assertTrue(speedj_stalled(0.10, 0.0))
+        self.assertFalse(speedj_stalled(0.10, 0.05))
+        self.assertFalse(speedj_stalled(0.0, 0.0))
 
     def test_slow_clock_is_five_times_longer_at_speed_0_2(self):
         from geodude_teleoperation.sim_replay import slow_replay_clock
@@ -294,6 +375,70 @@ class SpeedjHandoffTest(unittest.TestCase):
         self.assertEqual(mode["active"], "approach")
         self.assertFalse(contact.started)
         self.assertFalse(approach.z_compliant)
+
+    def test_enter_keep_pose_xy_does_not_freeze_or_slide(self):
+        from geodude_teleoperation.sim_replay import enter_speedj_contact
+
+        class Approach:
+            def __init__(self):
+                self.vz = 0.0
+                self.held = False
+                self.active = False
+                self.z_compliant = False
+                self.force_owns_z = False
+
+            def hold_live_pose(self):
+                self.held = True
+
+            def set_input_active(self, active):
+                self.active = active
+
+            def set_tool_z_velocity(self, vz):
+                self.vz = vz
+
+            def set_z_compliant(self, compliant):
+                self.z_compliant = compliant
+
+            def set_force_owns_z(self, owns):
+                self.force_owns_z = owns
+
+        class Contact:
+            def __init__(self):
+                self.started = False
+                self.on_vz = None
+
+            def set_on_vz(self, cb):
+                self.on_vz = cb
+
+            def start(self):
+                self.started = True
+
+        approach = Approach()
+        contact = Contact()
+        mode = {"active": "approach"}
+        enter_speedj_contact(
+            mode=mode, contact_controller=contact, approach_controller=approach,
+            keep_pose_xy=True)
+        self.assertEqual(mode["active"], "contact")
+        self.assertTrue(contact.started)
+        self.assertFalse(approach.held)
+        self.assertTrue(approach.active)
+        self.assertFalse(approach.z_compliant)
+        self.assertFalse(approach.force_owns_z)
+
+
+class ForceOwnsZTest(unittest.TestCase):
+    def test_zeros_kz_without_velocity_slide(self):
+        from geodude_teleoperation.controller import AdmittanceTeleoperationController
+
+        c = AdmittanceTeleoperationController(
+            stiffness=np.diag([2000.0] * 6))
+        self.assertAlmostEqual(float(c._stiffness[5, 5]), 2000.0)
+        c.set_force_owns_z(True)
+        self.assertAlmostEqual(float(c._stiffness[5, 5]), 0.0)
+        self.assertFalse(c._z_compliant)
+        c.set_force_owns_z(False)
+        self.assertAlmostEqual(float(c._stiffness[5, 5]), 2000.0)
 
 
 if __name__ == "__main__":

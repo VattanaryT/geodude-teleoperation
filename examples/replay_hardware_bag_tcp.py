@@ -6,9 +6,13 @@ connect. ``--live`` is the UR.
 
   PYTHONPATH=src python examples/replay_hardware_bag_tcp.py
   PYTHONPATH=src python examples/replay_hardware_bag_tcp.py --live --follow-path --frames 40
+  PYTHONPATH=src python examples/replay_hardware_bag_tcp.py --live --frames 40
 
-Jog is optional: ``--live`` first ramps **only the right UR** to bag TCP[0]
-at 20 mm/s (left arm and rails stay). Then Enter starts the replay.
+Always ``set_target`` bag TCP. DualLoop owns Z only after live Fz
+leaves air. ``--follow-path`` skips DualLoop (spring on the whole pose).
+
+Jog is optional: ``--live`` first ramps the chamfer in Cartesian to bag
+TCP[0] (translate, then in-place orient). Then Enter starts the replay.
 """
 from __future__ import annotations
 
@@ -32,8 +36,6 @@ from geodude_teleoperation.sim_replay import (
     TrackingRow,
     absolute_error_mm,
     apply_mode_edge,
-    bag_tcp_flange_velocity,
-    body_twist_for_plant,
     enter_speedj_contact,
     exit_speedj_contact,
     interpolate_tcp_xyzw,
@@ -41,15 +43,22 @@ from geodude_teleoperation.sim_replay import (
     replay_mode_label,
     ramp_duration_s,
     blend_pose_matrix,
+    blend_translation_matrix,
+    wait_until_start_gap,
+    speedj_stalled,
     score_legend,
     slow_replay_clock,
     start_gap_mm,
     summarize_tracking,
+    tracking_save_paths,
+    write_tracking_session,
 )
 from geodude_teleoperation.tcp_kinematics import (
     MODEL,
     bag_tcp_to_yaml_ee_world,
+    matrix_to_tcp_xyzw,
     poses_in_right_base,
+    rotation_error_deg,
 )
 from geodude_teleoperation.viser_view import (
     apply_stringer_view,
@@ -64,6 +73,9 @@ _DEFAULT_TRAIN = _DATA / "training" / "bags_08_16_half_stringer_bimanual_0.npz"
 _DEFAULT_PLY = _DATA / "merged_rightbase.ply"
 _DEFAULT_HW = Path(__file__).resolve().parent.parent / (
     "assets/robots/geodude/geodude_hardware.yaml"
+)
+_DEFAULT_JOINTS = Path(__file__).resolve().parent.parent / (
+    "tests/fixtures/bimanual_0_tcp_fk_samples.npz"
 )
 
 
@@ -106,6 +118,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ply", type=Path, default=_DEFAULT_PLY)
     p.add_argument("--port", type=int, default=8080)
     p.add_argument("--no-viz", action="store_true", help="terminal only; no viser")
+    p.add_argument(
+        "--log-dir", type=Path, default=Path("replay_logs"),
+        help="directory for tracking + speedJ png/npz (default replay_logs/)",
+    )
+    p.add_argument("--no-plots", action="store_true", help="do not save png/npz")
+    p.add_argument(
+        "--joints", type=Path, default=_DEFAULT_JOINTS,
+        help="NPZ with q_ur6 (unused for the Cartesian chamfer ramp)",
+    )
     return p
 
 
@@ -139,10 +160,6 @@ def _plan(args):
     fn_c = None if fn is None else fn[idx]
     dt_s = float(np.diff(t_wall).mean()) if len(t_wall) > 1 else 1.0 / DEFAULT_CMD_HZ
     R_flange = Rotation.from_quat(poses_c[:, 3:7]).as_matrix()
-    v_raw = bag_tcp_flange_velocity(poses_c[:, :3], R_flange, dt_s)
-    v_stick = np.zeros((len(poses_c), 3), dtype=float)
-    n_v = min(len(v_stick), len(v_raw))
-    v_stick[:n_v] = v_raw[:n_v]
     contact_i = int(np.argmax(raw)) if raw.any() else -1
     print(
         f"test 1 hardware  episode={ep.meta.get('episode')}  "
@@ -164,7 +181,7 @@ def _plan(args):
         print("preview: viser only, not the UR. Pass --live after you like the path.", flush=True)
     return {
         "t_wall": t_wall, "poses": poses_c, "raw": raw_c, "fn": fn_c,
-        "v_stick": v_stick, "dt_s": dt_s, "bag0": poses[0, :3],
+        "dt_s": dt_s, "bag0": poses[0, :3],
         "R_flange": R_flange,
     }
 
@@ -236,6 +253,11 @@ def _play_preview(draw, plan) -> None:
 
 def _wait_enter(msg: str) -> None:
     print(msg, flush=True)
+    print(
+        ">>> ARM IS HOLDING. Click this terminal (not viser, not a plot). "
+        "Press Enter to move. Ctrl+C aborts.",
+        flush=True,
+    )
     try:
         input()
     except EOFError as exc:
@@ -285,16 +307,53 @@ def _make_approach(interface, task_space, home_ee_motor, max_joint_velocity: flo
     return approach
 
 
+def _speedj_lost_guard(interface, approach, joint_idx):
+    """Raise if the pendant has stopped the arm while we still command speedJ."""
+    lost = {"t": None}
+    idx = np.asarray(joint_idx)
+
+    def check() -> None:
+        cmd = getattr(approach, "_qdot_cmd", None)
+        cmd_n = 0.0 if cmd is None else float(np.linalg.norm(cmd))
+        vel = np.asarray(interface.get_state().get_velocity(), dtype=float).reshape(-1)
+        if vel.size > int(idx.max()):
+            meas = vel[idx]
+        elif vel.size == len(idx):
+            meas = vel
+        else:
+            meas = vel[-len(idx):] if vel.size >= len(idx) else vel
+        meas_n = float(np.linalg.norm(np.asarray(meas, dtype=float).reshape(-1)))
+        if speedj_stalled(cmd_n, meas_n):
+            if lost["t"] is None:
+                lost["t"] = time.monotonic()
+            elif time.monotonic() - lost["t"] >= 0.4:
+                raise RuntimeError(
+                    "UR stopped following speedJ (C150A0 joint limit / "
+                    "protective stop). Clear the pendant, then rerun."
+                )
+        else:
+            lost["t"] = None
+
+    return check
+
+
 def _ramp_right_to_start(
-    *, args, plan, approach, system, live_q, live_ee_motor, draw,
+    *, args, plan, approach, system, live_q, live_ee_motor, draw, check_lost=None,
 ) -> None:
     from geodude_teleoperation.ee_viz import motor_aligned_to, motor_from_matrix
 
-    frames = poses_in_right_base(system, live_q())
-    gap = start_gap_mm(frames["chamfer"][:3, 3], plan["bag0"])
-    print(f"live chamfer vs bag TCP[0]: {gap:.1f} mm", flush=True)
+    T_live = poses_in_right_base(system, live_q())["chamfer"]
+    T_bag = np.eye(4)
+    T_bag[:3, 3] = np.asarray(plan["bag0"], dtype=float).reshape(3)
+    T_bag[:3, :3] = Rotation.from_quat(plan["poses"][0, 3:7]).as_matrix()
+    gap = start_gap_mm(T_live[:3, 3], plan["bag0"])
+    ang = rotation_error_deg(T_live[:3, :3], T_bag[:3, :3])
+    print(
+        f"live chamfer vs bag TCP[0]: {gap:.1f} mm  orient {ang:.0f} deg",
+        flush=True,
+    )
     if draw is not None:
-        draw(0, live_xyz=frames["chamfer"][:3, 3])
+        draw(0, live_xyz=T_live[:3, 3])
     if args.no_ramp:
         refuse_start_gap(gap, limit_mm=args.max_start_gap_mm)
         return
@@ -304,37 +363,109 @@ def _ramp_right_to_start(
             f"(ramp limit {float(args.max_ramp_mm):.0f} mm). "
             "Move the right arm into free space nearer the stringer."
         )
-    if gap <= float(args.max_start_gap_mm):
-        print("already at bag start; skip ramp", flush=True)
-        return
-    dur = ramp_duration_s(gap * 1e-3, speed_mps=float(args.ramp_mps))
     dt_s = 0.1
-    n = max(2, int(round(dur / dt_s)))
-    t0 = np.asarray(live_ee_motor().to_transformation_matrix(), dtype=float)
-    t1 = bag_tcp_to_yaml_ee_world(system, live_q(), plan["poses"][0])
+
+    def _set_chamfer(T) -> None:
+        world = bag_tcp_to_yaml_ee_world(
+            system, live_q(), matrix_to_tcp_xyzw(T))
+        approach.get_objective().set_target(
+            motor_aligned_to(motor_from_matrix(world), live_ee_motor()))
+        approach.set_input_active(True)
+        if draw is not None:
+            draw(0, live_xyz=poses_in_right_base(system, live_q())["chamfer"][:3, 3])
+        if check_lost is not None:
+            check_lost()
+
+    if gap > float(args.max_start_gap_mm):
+        dur = ramp_duration_s(gap * 1e-3, speed_mps=float(args.ramp_mps))
+        n = max(2, int(round(dur / dt_s)))
+        T_xyz = T_bag.copy()
+        T_xyz[:3, :3] = T_live[:3, :3]
+        _wait_enter(
+            f"right UR only: Enter to translate chamfer {gap:.0f} mm to bag "
+            f"start at {float(args.ramp_mps) * 1e3:.0f} mm/s (~{dur:.0f}s), "
+            "keeping live orientation. Ctrl+C holds."
+        )
+        for k in range(n):
+            _set_chamfer(blend_translation_matrix(T_live, T_bag, k / (n - 1)))
+            time.sleep(dt_s)
+        gap2 = start_gap_mm(
+            poses_in_right_base(system, live_q())["chamfer"][:3, 3], plan["bag0"])
+        print(f"after crawl: {gap2:.1f} mm from bag start", flush=True)
+        last_print = [0.0]
+
+        def _tick(remain_mm: float) -> None:
+            hold = T_bag.copy()
+            hold[:3, :3] = poses_in_right_base(
+                system, live_q())["chamfer"][:3, :3]
+            _set_chamfer(hold)
+            now = time.monotonic()
+            if now - last_print[0] >= 0.5:
+                last_print[0] = now
+                print(
+                    f"ramp remaining: {remain_mm:.1f} mm "
+                    f"(need < {float(args.max_start_gap_mm):.0f})",
+                    flush=True,
+                )
+
+        if gap2 > float(args.max_start_gap_mm):
+            timeout_s = max(60.0, gap2 / 5.0)
+            print(
+                f"still moving; holding bag-start chamfer XYZ (live orientation) "
+                f"until < {float(args.max_start_gap_mm):.0f} mm "
+                f"(timeout {timeout_s:.0f}s). Ctrl+C holds.",
+                flush=True,
+            )
+            gap2 = wait_until_start_gap(
+                lambda: start_gap_mm(
+                    poses_in_right_base(system, live_q())["chamfer"][:3, 3],
+                    plan["bag0"]),
+                limit_mm=args.max_start_gap_mm,
+                timeout_s=timeout_s,
+                dt_s=dt_s,
+                on_tick=_tick,
+            )
+        print(f"at bag start XYZ: {gap2:.1f} mm", flush=True)
+    else:
+        print("already at bag start XYZ; skip translate", flush=True)
+
+    T_now = poses_in_right_base(system, live_q())["chamfer"]
+    ang = rotation_error_deg(T_now[:3, :3], T_bag[:3, :3])
+    gap2 = start_gap_mm(T_now[:3, 3], plan["bag0"])
+    if ang < 5.0:
+        print(f"orientation already {ang:.0f} deg; skip in-place slerp", flush=True)
+        return
+    if ang > 90.0:
+        print(
+            f"orient {ang:.0f} deg is large; a joint-space crawl would walk the "
+            "TCP off the stringer. Cartesian in-place can still C150 — Ctrl+C holds.",
+            flush=True,
+        )
+    T_hold = T_bag.copy()
+    T_hold[:3, :3] = T_now[:3, :3]
+    dur_r = max(2.0, ang / 10.0)
+    n_r = max(2, int(round(dur_r / dt_s)))
     _wait_enter(
-        f"right UR only: Enter to ramp {gap:.0f} mm to bag start "
-        f"at {float(args.ramp_mps) * 1e3:.0f} mm/s (~{dur:.0f}s). Ctrl+C holds."
+        f"right UR only: Enter to in-place chamfer orient {ang:.0f} deg over "
+        f"~{dur_r:.0f}s (holds bag TCP XYZ; not a joint-space crawl). Ctrl+C holds."
     )
-    for k in range(n):
-        T = blend_pose_matrix(t0, t1, k / (n - 1))
-        approach.get_objective().set_target(
-            motor_aligned_to(motor_from_matrix(T), live_ee_motor()))
-        approach.set_input_active(True)
-        if draw is not None:
-            draw(0, live_xyz=poses_in_right_base(system, live_q())["chamfer"][:3, 3])
+    print(
+        f"in-place chamfer orient {ang:.0f} deg over ~{dur_r:.0f}s "
+        f"(tip stays at bag start XYZ)",
+        flush=True,
+    )
+    for k in range(n_r):
+        _set_chamfer(blend_pose_matrix(T_hold, T_bag, k / (n_r - 1)))
         time.sleep(dt_s)
-    for _ in range(10):
-        approach.get_objective().set_target(
-            motor_aligned_to(motor_from_matrix(t1), live_ee_motor()))
-        approach.set_input_active(True)
-        if draw is not None:
-            draw(0, live_xyz=poses_in_right_base(system, live_q())["chamfer"][:3, 3])
+    for _ in range(5):
+        _set_chamfer(T_bag)
         time.sleep(dt_s)
-    gap2 = start_gap_mm(
-        poses_in_right_base(system, live_q())["chamfer"][:3, 3], plan["bag0"])
-    print(f"after ramp: {gap2:.1f} mm from bag start", flush=True)
-    refuse_start_gap(gap2, limit_mm=args.max_start_gap_mm)
+    T_end = poses_in_right_base(system, live_q())["chamfer"]
+    print(
+        f"after orient: {start_gap_mm(T_end[:3, 3], plan['bag0']):.1f} mm  "
+        f"orient {rotation_error_deg(T_end[:3, :3], T_bag[:3, :3]):.0f} deg",
+        flush=True,
+    )
 
 
 def _make_contact(task_space, interface, home_ee_motor, measured_fz_fn, target_force: float):
@@ -354,9 +485,9 @@ def _make_contact(task_space, interface, home_ee_motor, measured_fz_fn, target_f
     contact = ContactTeleoperationController(
         None, cfg, target_force=target_force,
         kp_force=0.001, ki_force=0.0003,
-        v_approach=0.005, max_v_hold=0.002, z_damping=z_damping,
+        v_approach=0.0, max_v_hold=0.002, z_damping=z_damping,
         v_slew_mps2=0.05, lost_s=1.0, sit_s=2.0,
-        force_sign=-1.0, log_period_s=0.0,
+        force_sign=1.0, log_period_s=0.5,
         measured_fz_fn=measured_fz_fn,
     )
     contact.set_task_space(task_space)
@@ -369,7 +500,6 @@ def _make_contact(task_space, interface, home_ee_motor, measured_fz_fn, target_f
 
 def _run_live(args, plan, draw=None) -> None:
     import yaml
-    import gafropy as ga
     from gafropy import robot_interface as ri
 
     from geodude_teleoperation.ee_viz import motor_aligned_to, motor_from_matrix
@@ -400,6 +530,24 @@ def _run_live(args, plan, draw=None) -> None:
 
     home = live_ee_motor()
     approach = _make_approach(interface, task_space, home, args.max_joint_velocity)
+    speedj_trace = None
+    if not args.no_plots:
+        from geodude_teleoperation.speedj_plot import SpeedJTrace
+        speedj_trace = SpeedJTrace()
+        approach.set_command_trace(speedj_trace.record)
+        speedj_trace.start(save_dir=str(args.log_dir), live_plot=False)
+
+    def _stop_plots() -> None:
+        nonlocal speedj_trace
+        if speedj_trace is not None:
+            speedj_trace.stop()
+            speedj_trace = None
+    if not args.follow_path:
+        print(
+            "DualLoop will press along tool-Z. The real stringer must be in "
+            "the workstation (same pose as the bag). Empty air is not a contact test.",
+            flush=True,
+        )
     approach.set_input_active(False)
     approach.hold_live_pose()
     interface.control(approach, blocking=False)
@@ -407,11 +555,24 @@ def _run_live(args, plan, draw=None) -> None:
     frames0 = poses_in_right_base(system, live_q())
     if draw is not None:
         draw(0, live_xyz=frames0["chamfer"][:3, 3])
+    check_lost = _speedj_lost_guard(interface, approach, joint_idx)
     try:
         _ramp_right_to_start(
             args=args, plan=plan, approach=approach, system=system,
-            live_q=live_q, live_ee_motor=live_ee_motor, draw=draw)
+            live_q=live_q, live_ee_motor=live_ee_motor, draw=draw,
+            check_lost=check_lost)
+    except KeyboardInterrupt:
+        print("aborted while holding. no ramp.", flush=True)
+        _stop_plots()
+        try:
+            approach.set_input_active(False)
+            approach.hold_live_pose()
+            interface.shutdown()
+        except Exception:
+            pass
+        return
     except Exception:
+        _stop_plots()
         try:
             interface.shutdown()
         except Exception:
@@ -424,9 +585,25 @@ def _run_live(args, plan, draw=None) -> None:
     if not args.follow_path:
         try:
             read_tcp_force, close_tcp_force = connect_tcp_force_reader(robot_ip)
-            measured_fz_fn = lambda: fz_from_tcp_force(read_tcp_force())
-            print(f"contact FT: RTDE ActualTCPForce from {robot_ip}", flush=True)
+
+            def read_fz_raw() -> float:
+                return float(fz_from_tcp_force(read_tcp_force()))
+
+            bias_samples = [read_fz_raw() for _ in range(20)]
+            fz_bias = float(np.median(bias_samples))
+            print(
+                f"contact FT: RTDE ActualTCPForce from {robot_ip}  "
+                f"tare={fz_bias:+.2f}N",
+                flush=True,
+            )
+
+            def measured_fz_fn():
+                raw = read_fz_raw() - fz_bias
+                if abs(raw) < 1.0:
+                    return 0.0
+                return -abs(raw)
         except Exception as exc:
+            _stop_plots()
             try:
                 interface.shutdown()
             except Exception:
@@ -436,18 +613,11 @@ def _run_live(args, plan, draw=None) -> None:
             ) from exc
         contact = _make_contact(task_space, interface, home, measured_fz_fn, 15.0)
 
-    _wait_enter(
-        f"at start. Enter to run {args.speed:g}x replay "
-        f"({len(plan['poses'])} cmds, {plan['t_wall'][-1]:.1f}s wall). Ctrl+C holds."
-    )
-
     mode = {"active": "path" if args.follow_path else "approach"}
     rows: list[TrackingRow] = []
     raw = plan["raw"]
     fn = plan["fn"]
     poses_c = plan["poses"]
-    v_stick = plan["v_stick"]
-    R_flange = plan["R_flange"]
     dt_s = plan["dt_s"]
     t_wall = plan["t_wall"]
 
@@ -457,8 +627,13 @@ def _run_live(args, plan, draw=None) -> None:
         contact._target_force = fd
         contact._contact_engage_n = max(0.4, 0.25 * fd)
         enter_speedj_contact(
-            mode=mode, contact_controller=contact, approach_controller=approach)
-        print(f"-> contact  Fd={fd:.1f}N", flush=True)
+            mode=mode, contact_controller=contact, approach_controller=approach,
+            keep_pose_xy=True)
+        print(
+            f"-> contact  Fd={fd:.1f}N  bag TCP spring until live Fz; "
+            "then DualLoop owns Z",
+            flush=True,
+        )
 
     def on_exit():
         exit_speedj_contact(
@@ -468,8 +643,13 @@ def _run_live(args, plan, draw=None) -> None:
     fz_state = {"i": 0}
 
     try:
+        _wait_enter(
+            f"at start. Enter to run {args.speed:g}x replay "
+            f"({len(plan['poses'])} cmds, {plan['t_wall'][-1]:.1f}s wall). Ctrl+C holds."
+        )
         last_mode = None
         for i in range(len(poses_c)):
+            check_lost()
             fz_state["i"] = i
             if args.follow_path:
                 mode["active"] = "path"
@@ -481,14 +661,10 @@ def _run_live(args, plan, draw=None) -> None:
             m_des = motor_aligned_to(
                 motor_from_matrix(bag_tcp_to_yaml_ee_world(system, q, poses_c[i])),
                 live_ee_motor())
-            if mode["active"] == "contact":
-                vel = body_twist_for_plant(
-                    v_stick[i], dt_s=dt_s, contact=True,
-                    R_flange=R_flange[i], R_plant=frames["yaml_ee"][:3, :3])
-                approach.update_command(ga.Twist.from_array(vel))
-            else:
-                approach.get_objective().set_target(m_des)
-                approach.set_input_active(True)
+            approach.get_objective().set_target(m_des)
+            approach.set_input_active(True)
+            if contact is not None:
+                approach.set_force_owns_z(getattr(contact, "_z_mode", "") == "contact")
             xy, z, err = absolute_error_mm(
                 live_xyz=frames["chamfer"][:3, 3], bag_xyz=poses_c[i, :3])
             if draw is not None:
@@ -499,6 +675,7 @@ def _run_live(args, plan, draw=None) -> None:
                 err_xy_mm=xy, err_z_mm=z, err_mm=err,
                 abs_fn=None if fn is None else abs(float(fn[i])),
                 plant_vz=float(approach._tool_z_velocity),
+                meas_fz=None if args.follow_path else read_fz_raw(),
             ))
             if label != last_mode:
                 last_mode = label
@@ -509,11 +686,19 @@ def _run_live(args, plan, draw=None) -> None:
                 )
             time.sleep(dt_s)
         print(summarize_tracking(rows), flush=True)
+        if rows and not args.no_plots:
+            png, npz = tracking_save_paths(args.log_dir)
+            write_tracking_session(rows, png, npz)
+    except KeyboardInterrupt:
+        print("aborted. holding pose.", flush=True)
+    except RuntimeError as exc:
+        print(str(exc), flush=True)
     finally:
         if mode["active"] == "contact" and contact is not None:
             on_exit()
         approach.set_input_active(False)
         approach.hold_live_pose()
+        _stop_plots()
         if contact is not None:
             contact.stop()
         if close_tcp_force is not None:

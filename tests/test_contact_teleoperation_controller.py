@@ -174,6 +174,19 @@ class ContactForceLoopTest(unittest.TestCase):
         desired = ctrl._compute_force_command()
         np.testing.assert_allclose(_vz(ctrl, desired), -0.005)
 
+    def test_negative_force_sign_engages_on_positive_fz(self):
+        # Press along −tool Z: UR reaction is Fz > 0. Gravity Fz≈−4 N must not engage.
+        ctrl = _make_controller(measured_fz_fn=lambda: 10.39, force_sign=-1.0)
+        ctrl._t_start = time.monotonic()
+        ctrl._compute_force_command()
+        self.assertEqual(ctrl._z_mode, "contact")
+
+    def test_negative_force_sign_gravity_bias_does_not_engage(self):
+        ctrl = _make_controller(measured_fz_fn=lambda: -4.0, force_sign=-1.0)
+        ctrl._t_start = time.monotonic()
+        ctrl._compute_force_command()
+        self.assertEqual(ctrl._z_mode, "approach")
+
     def test_on_vz_callback_sits_at_zero(self):
         seen = []
         ctrl = _make_controller(measured_fz_fn=lambda: -11.04, force_sign=1.0, sit_s=2.0)

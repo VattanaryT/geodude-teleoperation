@@ -6,8 +6,8 @@ bag joints are only the start pose (and, for Test 1, the FK source of TCP).
 Check 6 (default): Test 2 shape. Contact XY is CGA ``a_local`` sandwiched into
 the flange. That is the policy path.
 
-``--bag-tcp``: Test 1. Command recorded TCP poses. Contact XY is bag TCP
-Δp/Δt in the flange, not ``a_local``. If this walks off, Test 2 cannot succeed.
+``--bag-tcp``: Test 1. Command recorded TCP poses. Contact keeps that
+``set_target`` on XY; DualLoop owns Z. If this walks off, Test 2 cannot succeed.
 
 MuJoCo pose-spring is not the UR. This check does not talk to hardware.
 
@@ -285,7 +285,8 @@ def main() -> None:
         contact._target_force = fd
         contact._contact_engage_n = max(0.4, 0.25 * fd)
         enter_speedj_contact(
-            mode=mode, contact_controller=contact, approach_controller=approach)
+            mode=mode, contact_controller=contact, approach_controller=approach,
+            keep_pose_xy=bool(args.bag_tcp))
 
     def on_exit():
         exit_speedj_contact(
@@ -305,7 +306,7 @@ def main() -> None:
         m_des = motor_aligned_to(
             motor_from_matrix(bag_tcp_to_yaml_ee_world(system, _q, pose_i)),
             live_ee_motor())
-        if mode["active"] == "contact":
+        if mode["active"] == "contact" and not args.bag_tcp:
             vel = body_twist_for_plant(
                 v_stick[i], dt_s=dt_s, contact=True,
                 R_flange=R_flange[i], R_plant=frames["yaml_ee"][:3, :3])

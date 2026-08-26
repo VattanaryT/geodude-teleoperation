@@ -54,6 +54,72 @@ class TcpKinematicsFixtureTest(unittest.TestCase):
         bag_mm = np.linalg.norm(p_wrap["chamfer"][:3, 3] - self.tcp[0, :3]) * 1e3
         self.assertLess(bag_mm, 3.0)
 
+    def test_shortest_q_delta_does_not_take_the_long_way_around_pi(self):
+        from geodude_teleoperation.tcp_kinematics import shortest_q_delta
+
+        q_from = np.array([-3.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        q_to = np.array([3.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        dq = shortest_q_delta(q_from, q_to)
+        self.assertLess(abs(float(dq[0])), np.pi)
+        self.assertLess(abs(float(dq[0])), 0.5)
+
+    def test_joint_lerp_to_bag_q_walks_chamfer_off_the_start_line(self):
+        from geodude_teleoperation.tcp_kinematics import (
+            BAG_JOINT_TO_GAFRO,
+            UR6_ORDER,
+            limit_safe_q_delta,
+        )
+
+        q0 = np.asarray(self.system.get_default_configuration(), dtype=float)
+        by_name = {
+            j.get_name(): j.get_index()
+            for j in self.system.get_joints() if j.is_actuated()
+        }
+        idx = np.array([by_name[BAG_JOINT_TO_GAFRO[n]] for n in UR6_ORDER])
+        q_from = wrap_ur6_to_pm_pi(q0[idx])
+        q_to = wrap_ur6_to_pm_pi(self.q_ur6[0])
+        dq = limit_safe_q_delta(q_from, q_to)
+        p0 = poses_in_right_base(self.system, q0)["chamfer"][:3, 3]
+        p1 = self.tcp[0, :3]
+        v = p1 - p0
+        max_off = 0.0
+        for a in np.linspace(0.0, 1.0, 21):
+            qk = q0.copy()
+            qk[idx] = q_from + a * dq
+            p = poses_in_right_base(self.system, qk)["chamfer"][:3, 3]
+            t = float(np.clip(np.dot(p - p0, v) / np.dot(v, v), 0.0, 1.0))
+            max_off = max(max_off, float(np.linalg.norm(p - (p0 + t * v)) * 1e3))
+        self.assertGreater(max_off, 100.0)
+
+    def test_chamfer_pose_blend_stays_on_the_start_line(self):
+        from geodude_teleoperation.sim_replay import blend_pose_matrix
+        from scipy.spatial.transform import Rotation
+
+        q0 = np.asarray(self.system.get_default_configuration(), dtype=float)
+        T0 = poses_in_right_base(self.system, q0)["chamfer"]
+        T1 = np.eye(4)
+        T1[:3, 3] = self.tcp[0, :3]
+        T1[:3, :3] = Rotation.from_quat(self.tcp[0, 3:]).as_matrix()
+        p0, p1 = T0[:3, 3], T1[:3, 3]
+        v = p1 - p0
+        max_off = 0.0
+        for a in np.linspace(0.0, 1.0, 21):
+            p = blend_pose_matrix(T0, T1, a)[:3, 3]
+            t = float(np.clip(np.dot(p - p0, v) / np.dot(v, v), 0.0, 1.0))
+            max_off = max(max_off, float(np.linalg.norm(p - (p0 + t * v)) * 1e3))
+        self.assertLess(max_off, 0.5)
+
+    def test_limit_safe_q_delta_does_not_cross_pm_pi(self):
+        from geodude_teleoperation.tcp_kinematics import limit_safe_q_delta
+
+        q_from = np.array([2.5, 0.0, 0.0, 0.0, 0.0, 0.0])
+        q_to = np.array([-2.5, 0.0, 0.0, 0.0, 0.0, 0.0])
+        dq = limit_safe_q_delta(q_from, q_to)
+        end = q_from[0] + dq[0]
+        self.assertLessEqual(abs(float(end)), np.pi + 1e-9)
+        mids = q_from[0] + np.linspace(0.0, 1.0, 9) * dq[0]
+        self.assertTrue(np.all(np.abs(mids) <= np.pi + 1e-9))
+
     def test_right_arm_chain_is_ur5e_fk(self):
         q0 = np.asarray(self.system.get_default_configuration(), dtype=float)
         q = apply_right_ur6(self.system, q0, wrap_ur6_to_pm_pi(self.q_ur6[0]))
