@@ -175,8 +175,15 @@ def _dashboard_bring_up(ip: str) -> None:
 
 
 def _make_approach_controller(interface, task_space, home_ee_motor,
-                              free_along_normal=True):
-    # Match hardware_free_teleop defaults for smooth free-space tracking.
+                              free_along_normal=True, dls_damping=0.05,
+                              per_joint_velocity=True):
+    # These are NOT hardware_free_teleop's defaults, despite what this comment
+    # used to claim -- that file constructs AdmittanceTeleoperationController()
+    # with no arguments, so it runs the class defaults (stiffness 3000,
+    # max_joint_velocity 1.0). The values below (2000, 0.8) are what actually
+    # runs on hardware and are the ones to reason about; the class defaults are
+    # inherited from ufactory_demos' gafro_teleoperation via the root commit and
+    # have never been validated against this cell.
     # Do NOT attach OrientationField here: vf.project() every stick sample snaps
     # orientation and makes speedJ feel discontinuous vs the SpaceMouse.
     approach = AdmittanceTeleoperationController(
@@ -188,6 +195,8 @@ def _make_approach_controller(interface, task_space, home_ee_motor,
         twist_linear_scale=1.0,
         max_qddot=5.0,
         free_along_normal=free_along_normal,
+        dls_damping=dls_damping,
+        per_joint_velocity=per_joint_velocity,
     )
     approach.set_task_space(task_space)
     approach.set_interface(interface)
@@ -351,6 +360,17 @@ def build_arg_parser():
         action="store_false", default=True,
         help="let field-follow keep discarding vf.project()'s position, so the "
              "commanded point never re-snaps to the mesh (previous behavior)")
+    parser.add_argument(
+        "--dls-damping", type=float, default=0.05, metavar="LAMBDA",
+        help="damped-least-squares lambda for the jacobian inverse. Was a "
+             "hardcoded 0.001, which peaks the inverse gain at 500x near a "
+             "singularity and windmills one joint into a C153 position-"
+             "deviation stop. 0.001 restores the old behavior.")
+    parser.add_argument(
+        "--no-per-joint-velocity", dest="per_joint_velocity",
+        action="store_false", default=True,
+        help="clamp only norm(qdot), letting a single joint carry the whole "
+             "velocity budget (the previous behavior)")
     parser.add_argument(
         "--press-v-max", type=float, default=0.008, metavar="M_S",
         help="ceiling on the along-normal seek speed. Raise this only after "
@@ -532,7 +552,9 @@ def main():
 
     approach_controller = _make_approach_controller(
         interface, task_space, home_ee_motor,
-        free_along_normal=args.free_along_normal)
+        free_along_normal=args.free_along_normal,
+        dls_damping=args.dls_damping,
+        per_joint_velocity=args.per_joint_velocity)
 
     # --- speedj contact: stay on gafropy (default). force_mode is opt-in. ---
     contact_controller = None
@@ -578,6 +600,7 @@ def main():
             measured_fz_fn=measured_fz_fn,
             measured_force_fn=measured_force_fn)
         contact_controller.set_contact_log(_contact_log_path(args.contact_log))
+        contact_controller.set_conditioning_fn(approach_controller.conditioning)
         contact_controller.set_task_space(task_space)
         contact_controller.set_interface(interface)
         contact_controller.set_objective(
@@ -786,7 +809,16 @@ def main():
             raise RuntimeError(f"task space '{args.task_space}' missing after reopen")
         joint_idx = np.array(task_space.get_joint_indices())
         ee = live_ee_motor()
-        approach_controller = _make_approach_controller(interface, task_space, ee)
+        # Same flags as the original build: a rebuilt controller that silently
+        # reverted to library defaults would make a bisect meaningless, and the
+        # conditioning callback the contact log reads would go stale.
+        approach_controller = _make_approach_controller(
+            interface, task_space, ee,
+            free_along_normal=args.free_along_normal,
+            dls_damping=args.dls_damping,
+            per_joint_velocity=args.per_joint_velocity)
+        if contact_controller is not None:
+            contact_controller.set_conditioning_fn(approach_controller.conditioning)
         if robot_viz is not None:
             robot_viz.update(q_with_vention())
         if eeviz is not None:

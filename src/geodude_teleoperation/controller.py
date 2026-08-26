@@ -173,7 +173,8 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
     def __init__(self, inertia=None, damping=None, stiffness=None, dt=0.001,
                  max_joint_velocity=1.0, min_twist_scaling_factor=1.0,
                  max_twist_scaling_factor=10.0, twist_linear_scale=2.0,
-                 max_qddot=5.0, stick_hz=50.0, free_along_normal=True):
+                 max_qddot=5.0, stick_hz=50.0, free_along_normal=True,
+                 dls_damping=0.05, per_joint_velocity=True):
         super().__init__()
         self._inertia = np.diag([1.0] * 6) if inertia is None else inertia
         self._damping = np.diag([20.0] * 6) if damping is None else damping
@@ -205,6 +206,27 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         # the K on the remaining axes gets a component along the true normal,
         # which outruns the press loop and lifts the tool off. Project it out.
         self._free_along_normal = bool(free_along_normal)
+        # Damped-least-squares regularizer for the jacobian inverse. This was a
+        # hardcoded 1e-6 (lambda = 1e-3), inherited from ufactory_demos via the
+        # root commit and never validated here, while the sibling
+        # TeleoperationController uses damping=0.05 -- 2500x more, and
+        # configurable. DLS gain on a singular value is sigma/(sigma^2+lambda^2),
+        # peaking at 1/(2*lambda): 500 at lambda=1e-3 against 10 at 0.05. Near a
+        # shoulder singularity that turns a few mm/s of task command into rad/s
+        # of joint command, the norm clamp pins it, and the arm windmills one
+        # joint for almost no TCP motion until the UR protective-stops on
+        # position deviation (C153A1 "position deviates from path", shoulder).
+        # Well-conditioned poses barely notice: at sigma = 0.2 the gain goes
+        # 5.00 -> 4.71, a 6% change inside the pose spring's own time constant.
+        self._dls_damping = float(dls_damping)
+        # The magnitude clamp is on norm(qdot), so one joint could carry the
+        # entire budget. Also clamp per joint.
+        self._per_joint_velocity = bool(per_joint_velocity)
+        self._last_sigma_min = float("nan")
+        self._last_clamp_scale = 1.0
+        self._last_qdot_max = 0.0
+        self._n_joints_seen = None
+        self._t_cond_warn = None
         self._n_body = None
         self._slide_twist = np.zeros(6)
         self._max_slide_mps = 0.008
@@ -303,8 +325,10 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         else:
             qdot_meas = None
 
+        jtj = jacobian.T @ jacobian
         j_inverse = np.linalg.inv(
-            jacobian.T @ jacobian + 1e-6 * np.eye(jacobian.shape[1]))
+            jtj + self._dls_damping ** 2 * np.eye(jacobian.shape[1]))
+        self._note_conditioning(jacobian)
 
         # Same plant as hardware_free_teleop. Kz=0 in contact; DualLoop overlays vz
         # even when the stick is idle. Do not replace this with J# * slide.
@@ -342,8 +366,21 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
             qdot = qdot + j_inverse @ jacobian.T @ twist
 
         speed = np.linalg.norm(qdot)
+        scale = 1.0
         if speed > self._max_joint_velocity:
-            qdot = qdot * (self._max_joint_velocity / speed)
+            scale = self._max_joint_velocity / speed
+            qdot = qdot * scale
+        if self._per_joint_velocity:
+            # norm(qdot) alone lets one joint carry the whole budget, which is
+            # exactly what a near-singular pose produces: a single shoulder
+            # joint at the full limit delivering almost no TCP motion. Note the
+            # vz overlay is added *above* this, so the press shares the budget
+            # and is scaled by `scale` too -- the contact log prints the
+            # pre-clamp v_z, which is why the force loop can read healthy while
+            # the joint path is saturated.
+            qdot = np.clip(qdot, -self._max_joint_velocity, self._max_joint_velocity)
+        self._last_clamp_scale = float(scale)
+        self._last_qdot_max = float(np.max(np.abs(qdot))) if np.size(qdot) else 0.0
 
         now = time.perf_counter()
         dt_slew = self._dt if self._qdot_cmd_t is None else now - self._qdot_cmd_t
@@ -358,6 +395,46 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
                 qdot, measured=qdot_meas, spring=self._input_active,
                 stick=self._stick_linear)
         return qdot
+
+    def _note_conditioning(self, jacobian):
+        """Record how close this pose is to singular, and shout once if it is.
+
+        sigma_min is the smallest singular value of the jacobian, and it decides
+        whether the DLS inverse behaves or amplifies. Nothing recorded it
+        before, so a C153 protective stop left no evidence of the configuration
+        that produced it.
+
+        Use `J @ J.T` (6x6, one eigenvalue per task DOF), not the `J.T @ J`
+        (7x7) the inverse is built from: with 7 joints and 6 task DOF the
+        latter is rank-deficient by construction, so its smallest eigenvalue is
+        always ~0 and would report every pose as singular. The redundancy is a
+        nullspace, not ill-conditioning.
+        """
+        try:
+            ev = np.linalg.eigvalsh(jacobian @ jacobian.T)
+            self._last_sigma_min = float(np.sqrt(max(0.0, float(ev[0]))))
+        except np.linalg.LinAlgError:
+            self._last_sigma_min = float("nan")
+        if self._n_joints_seen is None:
+            self._n_joints_seen = tuple(jacobian.shape)
+            print(f"jacobian: {jacobian.shape[0]}x{jacobian.shape[1]}"
+                  f"  sigma_min={self._last_sigma_min:.4f}"
+                  f"  dls_lambda={self._dls_damping:g}", flush=True)
+        if self._last_sigma_min < 0.02:
+            now = time.perf_counter()
+            if self._t_cond_warn is None or (now - self._t_cond_warn) > 1.0:
+                self._t_cond_warn = now
+                print(f"\033[93mnear-singular pose: sigma_min="
+                      f"{self._last_sigma_min:.4f} (DLS gain up to "
+                      f"{1.0 / (2.0 * self._dls_damping):.0f}x)\033[0m", flush=True)
+
+    def conditioning(self):
+        """Last tick's kinematic health, for the contact log."""
+        return {
+            "sigma_min": self._last_sigma_min,
+            "clamp_scale": self._last_clamp_scale,
+            "qdot_max": self._last_qdot_max,
+        }
 
     def set_contact_normal(self, n_base, R_tool_to_base):
         """Surface normal (base frame) to free the pose spring along in contact.
@@ -700,6 +777,10 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         # the instant someone cleared the stop on the pendant.
         self._safety_mode_fn = safety_mode_fn
         self._safety_halted = False
+        # Optional () -> dict from AdmittanceTeleoperationController.conditioning().
+        # The joint path is where the C153A1 shoulder stop lives, and the force
+        # loop is blind to it, so carry it into the same durable CSV.
+        self._conditioning_fn = None
         self._log_path = None
         self._log_file = None
         self._log_writer = None
@@ -750,6 +831,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         "bias_y", "bias_z", "Fs", "Fd", "v_press", "v_z", "aborted",
         "Fs_n", "Fs_n_raw", "Fe_n", "dFs_dt", "gain", "v_along", "spike",
         "osc", "wrong_sign", "fault_fs",
+        "sigma_min", "clamp_scale", "qdot_max",
     )
 
     def _open_contact_log(self):
@@ -794,6 +876,18 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         except Exception as exc:
             print(f"contact log: write failed ({exc}); disabling", flush=True)
             self._close_contact_log()
+
+    def set_conditioning_fn(self, conditioning_fn):
+        """Callable () -> {sigma_min, clamp_scale, qdot_max} for the contact log."""
+        self._conditioning_fn = conditioning_fn
+
+    def _conditioning(self):
+        if self._conditioning_fn is None:
+            return {}
+        try:
+            return self._conditioning_fn() or {}
+        except Exception:
+            return {}
 
     def set_safety_mode_fn(self, safety_mode_fn):
         """Callable () -> UR safety mode int (or None). See _safety_mode_fn."""
@@ -1183,6 +1277,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                 "spike": int(d.get("spike", 0)), "osc": int(d.get("osc", 0)),
                 "wrong_sign": int(d.get("wrong_sign", 0)),
                 "fault_fs": int(d.get("fault_fs", 0)),
+                **{k: f"{v:.5f}" for k, v in self._conditioning().items()},
             })
 
         wrench_cmd = np.zeros(6)

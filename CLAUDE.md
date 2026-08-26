@@ -148,6 +148,43 @@ These are established, not guesses. Trusting the wrong one here moves hardware.
   q. `get_joint_indices()` are system-global and must not index it — that
   crashed with index 15 on size 7 (`controller.py:293`).
 
+### Joint space — the path the force loop cannot see
+
+- **C153A1 "position deviates from path" (shoulder) is kinematic, not force.**
+  It fired with the contact loop perfectly healthy (`Fs=+9.67 N` vs `Fd=10`,
+  `v_z=+0.0005`, no guards). Do not look for it in the force diagnostics.
+- **The DLS regularizer was `1e-6` (λ=1e-3), giving the jacobian inverse a peak
+  gain of `1/(2λ)` = 500.** Inherited from ufactory_demos via the root commit,
+  never validated here, while the sibling `TeleoperationController` has always
+  used `damping=0.05` for the same math — 2500× more. At σ_min = 0.005 (an
+  ordinary near-singular UR5e pose) the logged 2.6 mm pose error commanded
+  **0.8 rad/s, pinned at the clamp**, delivering almost no TCP motion — the arm
+  windmills one joint until the UR protective-stops. Now `dls_damping=0.05`
+  (`--dls-damping 0.001` restores the old behavior). Reduction to the working
+  case: at σ = 0.2 the gain goes 5.00 → 4.71, a 6% change.
+- **The velocity clamp was `norm(qdot)` only, so one joint could carry the whole
+  budget** — exactly what a near-singular pose produces. Now also per-joint
+  (`--no-per-joint-velocity` reverts).
+- **`sigma_min` must come from `J @ Jᵀ` (6×6), not the `Jᵀ J` (7×7) the inverse
+  is built from.** With 7 joints and 6 task DOF the latter is rank-deficient by
+  construction, so its smallest eigenvalue is always ~0 and every pose reads as
+  singular. That extra dimension is the redundancy nullspace, not
+  ill-conditioning.
+- **The vz press overlay is added *before* the shared clamp** (`controller.py`,
+  `twist[5] = vz` then `norm(qdot)`), so a saturating pose spring silently
+  scales the press down by the same factor while the contact log keeps printing
+  the *pre-clamp* `v_z`. A healthy-looking force log is not evidence the press
+  was healthy. `clamp_scale` in the contact CSV is the one that tells you.
+- **The constants that run on hardware are in `_make_approach_controller`, not
+  the class defaults.** It passes `stiffness=2000, max_joint_velocity=0.8`; the
+  class defaults are 3000/1.0 and `hardware_free_teleop.py` uses those. A stale
+  comment claimed the two matched — they never did.
+- **`exp/in-contact-dtc` called `speedJ` with an explicit `accel=0.5 rad/s²`.**
+  On this branch that argument lives inside gafropy's urcl backend and nothing
+  here controls it. `max_qddot` bounds *our commanded qdot* rate; it does not
+  change the acceleration the UR plans its ramp with. Unverified, still a
+  candidate.
+
 ### Geometry and fields
 
 - `OrientationField.approach_basis_at(p)[:, 2]` is the **into-surface** approach
