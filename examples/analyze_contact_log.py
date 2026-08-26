@@ -52,6 +52,29 @@ def _windowed_rate(t, fs, window_s=0.02):
     return (fs[good] - fs[j][good]) / span[good]
 
 
+def _dominant_hz(t, x, lo=0.2, hi=30.0):
+    """Peak frequency of x, and its amplitude, over [lo, hi] Hz.
+
+    Distinguishes a mechanical disturbance from one the loop is pumping: if Fs
+    and v_z peak at the same frequency the controller is part of the
+    oscillation, if only Fs does then something outside it (friction grabs) is
+    driving and the loop is only riding along.
+    """
+    ok = np.isfinite(t) & np.isfinite(x)
+    t, x = t[ok], x[ok]
+    if t.size < 64:
+        return float("nan"), float("nan")
+    fs_hz = (t.size - 1) / (t[-1] - t[0])
+    x = x - np.mean(x)
+    spec = np.abs(np.fft.rfft(x * np.hanning(x.size)))
+    freq = np.fft.rfftfreq(x.size, 1.0 / fs_hz)
+    band = (freq >= lo) & (freq <= hi)
+    if not band.any():
+        return float("nan"), float("nan")
+    k = np.argmax(spec[band])
+    return float(freq[band][k]), float(2.0 * spec[band][k] / x.size)
+
+
 def _band(fs, fd, width):
     ok = np.isfinite(fs) & np.isfinite(fd)
     return _pct(ok & (np.abs(fs - fd) <= width)) if ok.any() else 0.0
@@ -107,6 +130,24 @@ def summarize(path):
           "the surface has to not recede faster than this.")
     print(f"  gain_scale        : median={np.nanmedian(gain):.2f}"
           f"  at 1.0 for {_pct(gain >= 0.999):.1f}% of ticks")
+
+    print("\n-- oscillation (friction grabs are real on this rig; do not filter) --")
+    f_fs, a_fs = _dominant_hz(t, fs)
+    f_vz, a_vz = _dominant_hz(t, v_z)
+    print(f"  Fs   peaks at {f_fs:6.2f} Hz  (amplitude {a_fs:.2f} N)")
+    print(f"  v_z  peaks at {f_vz:6.2f} Hz  (amplitude {a_vz * 1e3:.2f} mm/s)")
+    if np.isfinite(f_fs) and np.isfinite(f_vz):
+        same = abs(f_fs - f_vz) < 0.25 * max(f_fs, f_vz)
+        print("  -> same frequency: the loop is part of the oscillation, so its"
+              " gains/limits are in play"
+              if same else
+              "  -> different frequencies: Fs is driven from outside the loop"
+              " (friction), the loop is only riding it")
+    big = np.abs(fs - np.nanmedian(fs)) > 3.0
+    events = int(np.count_nonzero(big[1:] & ~big[:-1]))
+    span = np.nanmax(t) - np.nanmin(t)
+    print(f"  excursions >3N off median: {events} in {span:.0f}s"
+          f"  ({events / max(span, 1e-9):.2f}/s)")
 
     print("\n-- guards --")
     for flag in ("spike", "osc", "wrong_sign", "fault_fs"):

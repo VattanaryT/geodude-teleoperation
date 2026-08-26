@@ -28,6 +28,19 @@ These are established, not guesses. Trusting the wrong one here moves hardware.
   already holds it. `connect_tcp_force_reader()` can therefore fail on a
   perfectly healthy robot — treat that as "no force feedback" and refuse to
   press, never as a reason to fall back to open loop.
+- **The UR5e has a real 6-axis wrist F/T sensor and `getActualTCPForce()` reads
+  it** on the e-series — it is not a motor-current estimate. The measured
+  tick-to-tick spread backs this up: 0.19 N median in contact, ±0.3 N in free
+  space, far better than any current-based estimate. Consequence: **large
+  in-contact excursions are physically real, not measurement artifact.** The
+  operator has observed the friction grabs directly. Do not "fix" them by
+  filtering — that is lying to yourself about a real contact condition.
+- **The free-space offset is sensor zeroing, not payload error.** The TCP and
+  payload are calibrated, so the ~10 N seen with nothing touching is F/T bias,
+  which `zero_ftsensor()` would clear — and the speedj backend cannot issue it
+  (single RTDE client; only the `force_mode` URScript path can). The per-session
+  base-frame tare is the stand-in, and it is strictly better than a one-shot
+  zero because it stays valid as the wrist turns.
 - **`getActualTCPForce()` is not gravity compensated** unless the UR payload is
   configured, and the **speedj backend never issues `zero_ftsensor()`** (only
   the `force_mode` URScript does). A perfectly live sensor therefore reads
