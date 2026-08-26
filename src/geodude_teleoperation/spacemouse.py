@@ -93,10 +93,10 @@ def verify_spacemouse_connection(
     import pyspacemouse
 
     peak = 0.0
-    deadline = time.monotonic() + wait_s
     period = 1.0 / poll_hz
+    deadline = time.monotonic() + max(wait_s, period)
     with pyspacemouse.open_by_path(path) as device:
-        while time.monotonic() < deadline:
+        while True:
             state = device.read()
             peak = max(
                 peak,
@@ -109,6 +109,8 @@ def verify_spacemouse_connection(
             )
             if peak >= move_threshold:
                 return True, peak
+            if time.monotonic() >= deadline:
+                break
             time.sleep(period)
     return False, peak
 
