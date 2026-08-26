@@ -1,0 +1,9 @@
+{
+  "source_ply": "merged_full.ply",
+  "voxel_m": 0.002,
+  "n_points_raw": 8290042,
+  "n_points_downsampled": 37754,
+  "frame": "left_ur_base",
+  "offset_sidecar": "merged.laser_offset.json",
+  "offset_note": "t_vention_m applied after left_base->vention; unchanged by downsampling"
+}
