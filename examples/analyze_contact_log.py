@@ -55,10 +55,12 @@ def _windowed_rate(t, fs, window_s=0.02):
 def _dominant_hz(t, x, lo=0.2, hi=30.0):
     """Peak frequency of x, and its amplitude, over [lo, hi] Hz.
 
-    Distinguishes a mechanical disturbance from one the loop is pumping: if Fs
-    and v_z peak at the same frequency the controller is part of the
-    oscillation, if only Fs does then something outside it (friction grabs) is
-    driving and the loop is only riding along.
+    Screening test for coupling, not proof of cause: if Fs and v_z peak at the
+    same frequency the controller is part of that oscillation, so its gains and
+    limits set the amplitude. Separate peaks mean something outside the loop is
+    driving Fs and the loop is only riding along. A shared peak does NOT say
+    which one started it -- the loop may simply be tracking a real disturbance
+    at that rate.
     """
     ok = np.isfinite(t) & np.isfinite(x)
     t, x = t[ok], x[ok]
@@ -66,13 +68,17 @@ def _dominant_hz(t, x, lo=0.2, hi=30.0):
         return float("nan"), float("nan")
     fs_hz = (t.size - 1) / (t[-1] - t[0])
     x = x - np.mean(x)
-    spec = np.abs(np.fft.rfft(x * np.hanning(x.size)))
+    win = np.hanning(x.size)
+    spec = np.abs(np.fft.rfft(x * win))
     freq = np.fft.rfftfreq(x.size, 1.0 / fs_hz)
     band = (freq >= lo) & (freq <= hi)
     if not band.any():
         return float("nan"), float("nan")
     k = np.argmax(spec[band])
-    return float(freq[band][k]), float(2.0 * spec[band][k] / x.size)
+    # Divide by the window's coherent gain (mean of hanning ~ 0.5), or every
+    # amplitude reads half of true and the oscillations look benign.
+    amp = 2.0 * spec[band][k] / (x.size * float(np.mean(win)))
+    return float(freq[band][k]), float(amp)
 
 
 def _band(fs, fd, width):
