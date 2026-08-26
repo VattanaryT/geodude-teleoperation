@@ -8,6 +8,78 @@ import numpy as np
 _EXAMPLE = pathlib.Path(__file__).resolve().parents[1] / "examples" / "hardware_object_contact_teleop.py"
 
 
+class _VelState:
+    def __init__(self, n=6):
+        self._v = np.zeros(n)
+
+    def get_velocity(self):
+        return self._v
+
+
+class _ObjState:
+    def __init__(self, error):
+        self._error = np.asarray(error, dtype=float)
+
+    def get_error(self):
+        return self._error
+
+    def get_error_derivative(self):
+        return np.zeros_like(self._error)
+
+
+class _TaskState:
+    def get_jacobian(self):
+        return np.eye(6)
+
+    def get_jacobian_derivative(self):
+        return np.zeros((6, 6))
+
+
+class _Iface:
+    def get_state(self):
+        return self
+
+    def get_position(self):
+        return np.zeros(6)
+
+
+class _TaskSpace:
+    def get_joint_indices(self):
+        return [0, 1, 2, 3, 4, 5]
+
+    def compute_ee_motor(self, position):
+        del position
+        return ga.Motor()
+
+
+class _Objective:
+    def __init__(self):
+        self.target = None
+
+    def set_target(self, motor):
+        self.target = motor
+
+
+def _pose_ctrl(**kwargs):
+    from geodude_teleoperation.controller import AdmittanceTeleoperationController
+
+    params = dict(
+        stiffness=np.diag([2000.0] * 6),
+        damping=np.diag([20.0] * 6),
+        inertia=np.diag([1.0] * 6),
+        dt=0.001,
+        max_qddot=1e6,
+        twist_linear_scale=1.0,
+    )
+    params.update(kwargs)
+    ctrl = AdmittanceTeleoperationController(**params)
+    obj = _Objective()
+    ctrl.set_interface(_Iface())
+    ctrl.get_task_space = lambda: _TaskSpace()
+    ctrl.get_objective = lambda: obj
+    return ctrl
+
+
 def _load_example():
     spec = importlib.util.spec_from_file_location("hardware_object_contact_teleop", _EXAMPLE)
     module = importlib.util.module_from_spec(spec)
@@ -48,6 +120,21 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         twist = ga.Twist.from_array(np.array([0.0, 0.0, 0.0, 0.0, 0.0, z]))
         self.assertTrue(mod.stick_is_idle(twist))
         self.assertTrue(mod.stick_has_linear(twist))
+
+    def test_contact_follow_linear_drops_stick_z(self):
+        # Live: contact pose-stepped without project(); TCP walked off the chamfer.
+        mod = _load_example()
+        lin = np.array([0.001, -0.002, 0.004])
+        got = mod.follow_linear(lin, ignore_z=True)
+        np.testing.assert_allclose(got, [0.001, -0.002, 0.0])
+        np.testing.assert_allclose(mod.follow_linear(lin, ignore_z=False), lin)
+
+    def test_speedj_contact_still_field_follows(self):
+        mod = _load_example()
+        self.assertTrue(mod.field_follow_in_mode("approach", "speedj"))
+        self.assertTrue(mod.field_follow_in_mode("contact", "speedj"))
+        self.assertTrue(mod.field_follow_in_mode("approach", "force_mode"))
+        self.assertFalse(mod.field_follow_in_mode("contact", "force_mode"))
 
     def test_nonzero_twist_is_not_idle(self):
         mod = _load_example()
@@ -179,36 +266,37 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         ctrl.set_orientation_compliant(False)
         self.assertEqual(ctrl._stiffness[0, 0], 2000.0)
 
-    def test_contact_slide_is_capped_xy_velocity_not_pose_spring(self):
-        from geodude_teleoperation.controller import AdmittanceTeleoperationController
-
-        ctrl = AdmittanceTeleoperationController(
-            stiffness=np.diag([2000.0] * 6), twist_linear_scale=1.0)
+    def test_z_compliant_keeps_pose_spring_xy(self):
+        # hardware_free_teleop plant: stick XY is a pose error, not a Cartesian twist.
+        # Live C153: z_compliant replaced the spring with J# * vz (5 mm/s ram).
+        ctrl = _pose_ctrl()
         ctrl.set_z_compliant(True)
-        # Blade order [tx,ty,tz,fx,fy,fz]; huge X stick must not become a pose increment.
-        twist = ga.Twist.from_array(np.array([0.0, 0.0, 0.0, 0.2, 0.0, 0.5]))
-        ctrl.update_command(twist)
-        slide = ctrl.contact_slide_twist()
-        self.assertEqual(slide[5], 0.0)
-        self.assertAlmostEqual(np.linalg.norm(slide[3:5]), 0.015, places=6)
-        self.assertGreater(abs(slide[3]), 0.0)
+        ctrl.set_input_active(True)
+        error = np.zeros(6)
+        error[3] = 0.01
+        qdot = ctrl.compute_control_command(
+            _VelState(), _ObjState(error), _TaskState())
+        self.assertGreater(abs(float(qdot[3])), 1e-4)
+        self.assertAlmostEqual(float(qdot[5]), 0.0, places=6)
 
-    def test_slide_suppresses_press_keeps_retract(self):
-        # Live: Fs 8→22 N with v_z=+2 mm/s while sliding, then C153.
-        from geodude_teleoperation.controller import AdmittanceTeleoperationController
-
-        ctrl = AdmittanceTeleoperationController(stiffness=np.diag([2000.0] * 6))
+    def test_z_compliant_idle_overlays_tool_z(self):
+        ctrl = _pose_ctrl()
         ctrl.set_z_compliant(True)
-        twist = ga.Twist.from_array(np.array([0.0, 0.0, 0.0, 0.01, 0.0, 0.0]))
-        ctrl.update_command(twist)
-        merged = ctrl.merged_contact_twist(0.002)
-        self.assertEqual(merged[5], 0.0)
-        self.assertGreater(abs(merged[3]), 0.0)
-        retract = ctrl.merged_contact_twist(-0.001)
-        self.assertLess(retract[5], 0.0)
         ctrl.set_input_active(False)
-        idle = ctrl.merged_contact_twist(0.002)
-        np.testing.assert_allclose(idle[5], 0.002)
+        ctrl.set_tool_z_velocity(0.005)
+        qdot = ctrl.compute_control_command(
+            _VelState(), _ObjState(np.zeros(6)), _TaskState())
+        self.assertAlmostEqual(float(qdot[5]), 0.005, places=6)
+        np.testing.assert_allclose(qdot[:5], 0.0, atol=1e-9)
+
+    def test_z_compliant_update_is_pose_step_like_free_teleop(self):
+        ctrl = _pose_ctrl()
+        ctrl.set_z_compliant(True)
+        twist = ga.Twist.from_array(np.array([0.1, 0.0, 0.0, 0.0015, 0.0, 0.5]))
+        ctrl.update_command(twist)
+        self.assertTrue(ctrl._input_active)
+        self.assertIsNotNone(ctrl.get_objective().target)
+        np.testing.assert_allclose(ctrl.contact_slide_twist(), 0.0)
 
     def test_speedj_contact_keeps_pose_plant(self):
         """Button 0 must not switch to C++ line admittance (that shake in air)."""
@@ -277,6 +365,12 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         self.assertFalse(contact.started)
         self.assertEqual(approach.vz, 0.0)
         self.assertFalse(approach.z_compliant)
+
+    def test_speedj_contact_exits_only_from_toggle(self):
+        src = _EXAMPLE.read_text()
+        self.assertEqual(src.count("exit_speedj_contact("), 2)
+        self.assertIn("def toggle_contact_mode():", src)
+        self.assertIn("latched until button", src)
 
     def test_viser_preview_twist_does_not_call_hardware(self):
         from geodude_teleoperation.ee_viz import SimTcpProbe

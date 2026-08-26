@@ -165,7 +165,7 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
     def __init__(self, inertia=None, damping=None, stiffness=None, dt=0.001,
                  max_joint_velocity=1.0, min_twist_scaling_factor=1.0,
                  max_twist_scaling_factor=10.0, twist_linear_scale=2.0,
-                 max_qddot=5.0):
+                 max_qddot=5.0, stick_hz=50.0):
         super().__init__()
         self._inertia = np.diag([1.0] * 6) if inertia is None else inertia
         self._damping = np.diag([20.0] * 6) if damping is None else damping
@@ -176,6 +176,7 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         self._min_twist_scaling_factor = min_twist_scaling_factor
         self._max_twist_scaling_factor = max_twist_scaling_factor
         self._twist_linear_scale = float(twist_linear_scale)
+        self._stick_hz = float(stick_hz)
         self._distance = 0.0
 
         self._interface = None
@@ -190,8 +191,10 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         self._z_compliant = False
         self._ori_compliant = False
         self._slide_twist = np.zeros(6)
-        self._max_slide_mps = 0.015
+        self._max_slide_mps = 0.008
         self._max_slide_radps = 0.12
+        self._slide_accel_mps2 = 0.04
+        self._slide_slew_t = None
         self._command_trace = None
         self._stick_linear = np.zeros(3)
         self._max_qddot = float(max_qddot)
@@ -209,11 +212,28 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
 
     def set_input_active(self, active: bool) -> None:
         self._input_active = bool(active)
-        if not self._input_active:
-            self._slide_twist = np.zeros(6)
 
     def contact_slide_twist(self):
         return np.array(self._slide_twist, copy=True)
+
+    def slew_slide(self, dt=None, max_dt=0.004):
+        """Ramp contact XY slide to 0. Idle must not dump twist in one tick."""
+        now = time.perf_counter()
+        if dt is None:
+            dt = self._dt if self._slide_slew_t is None else now - self._slide_slew_t
+        self._slide_slew_t = now
+        if self._input_active:
+            return
+        dt = min(max(float(dt), 0.0), float(max_dt))
+        max_step = float(self._slide_accel_mps2) * dt
+        if max_step <= 0.0:
+            return
+        lin = self._slide_twist[3:5]
+        n = float(np.linalg.norm(lin))
+        if n <= max_step:
+            self._slide_twist = np.zeros(6)
+            return
+        self._slide_twist[3:5] = lin * ((n - max_step) / n)
 
     def merged_contact_twist(self, vz):
         """DualLoop merge: slide never presses. Retract while sliding is still allowed."""
@@ -266,14 +286,12 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         else:
             qdot_meas = None
 
-        if self._z_compliant:
-            # DualLoop merge: stick ⊥n + ω as a capped Cartesian velocity, force owns Z.
-            # Do not run the K=2000 pose spring while loaded (that is the slide C153).
-            twist = self.merged_contact_twist(vz)
-            j_inverse = np.linalg.inv(
-                jacobian.T @ jacobian + 1e-6 * np.eye(jacobian.shape[1]))
-            qdot = j_inverse @ jacobian.T @ twist
-        elif not self._input_active:
+        j_inverse = np.linalg.inv(
+            jacobian.T @ jacobian + 1e-6 * np.eye(jacobian.shape[1]))
+
+        # Same plant as hardware_free_teleop. Kz=0 in contact; DualLoop overlays vz
+        # even when the stick is idle. Do not replace this with J# * slide.
+        if not self._input_active:
             qdot = np.zeros(n_joints)
         else:
             if qdot_meas is None:
@@ -290,16 +308,13 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
 
             bias = jacobian_derivative @ qdot_task
 
-            j_inverse = np.linalg.inv(
-                jacobian.T @ jacobian + 1e-6 * np.eye(jacobian.shape[1]))
-
             qdot = self._dt * \
                 j_inverse @ jacobian.T @ (task_acceleration - bias)
 
-            if abs(vz) > 1e-12:
-                twist = np.zeros(6)
-                twist[5] = vz
-                qdot = qdot + j_inverse @ jacobian.T @ twist
+        if abs(vz) > 1e-12:
+            twist = np.zeros(6)
+            twist[5] = vz
+            qdot = qdot + j_inverse @ jacobian.T @ twist
 
         speed = np.linalg.norm(qdot)
         if speed > self._max_joint_velocity:
@@ -329,17 +344,10 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         angular = np.asarray(twist.get_angular(), dtype=float).reshape(3)
         linear = self._twist_linear_scale * np.asarray(twist.get_linear(), dtype=float).reshape(3)
         if self._z_compliant:
+            # Same pose increment as hardware_free_teleop. Force owns tool Z;
+            # wrist angular is held (loaded yaw was a C153 lever).
             linear[2] = 0.0
-            lin_xy = np.linalg.norm(linear[:2])
-            if lin_xy > self._max_slide_mps:
-                linear[:2] *= self._max_slide_mps / lin_xy
-            ang = np.linalg.norm(angular)
-            if ang > self._max_slide_radps:
-                angular = angular * (self._max_slide_radps / ang)
-            self._slide_twist = np.array(
-                [angular[0], angular[1], angular[2], linear[0], linear[1], 0.0])
-            self._input_active = True
-            return
+            angular[:] = 0.0
 
         task_space = self.get_task_space()
         joint_indices = np.asarray(task_space.get_joint_indices())
@@ -485,18 +493,16 @@ class LineAdmittanceTeleoperationController(gafropy.control.VelocityAdmittanceCo
 
 
 class ContactTeleoperationController(gafropy.control.VelocityAdmittanceController):
-    """Hybrid contact: line spring on XY/rotation, DualLoop-style force PID on tool Z.
+    """Hybrid contact: DualLoop force PID on tool Z, latched for the DualLoop session.
 
-    SpaceMouse slides the target line (Z stick ignored). The C++ VelocityAdmittance
-    plant tracks that line with Kz=0. A host thread owns press: APPROACH is a constant
-    tool-Z feed along CLI ``force_sign``; CONTACT is DualLoop ``Fe = Fd − Fs`` with
-    ``Fs = force_sign · fz`` on the same-tick wrench and ``Fext`` left at 0
-    (mapped through Z damping: ``set_desired_wrench[5] = v_z * z_damping``).
-    CONTACT engages when compression ``Fs ≥ max(0.4 N, 0.25·|Fd|)`` with
+    ``start()`` (button 0) is contact until ``stop()`` (button 0 again). There is
+    no DualLoop approach / free-space fallback: unload must not re-arm a 5 mm/s
+    feed. Seek is PID ``v = clip(kp*(Fd − Fs), ±max_v_hold)``. Over target,
+    press is 0 or retract — speedJ must not keep inching into a rigid stop (C153).
+
     ``Fs = −force_sign · fz`` (UR ``ActualTCPForce`` is the reaction, so a +Z
-    press reads ``Fz < 0``). Unload needs ``Fs < 0.4 N`` for ``lost_s``.
-    ``force_sign`` is never latched from Fz polarity. Over target, press velocity
-    is 0 or retract — speedJ must not keep inching into a rigid stop (C153).
+    press reads ``Fz < 0``). ``Fext`` is left at 0 (mapped through Z damping:
+    ``set_desired_wrench[5] = v_z * z_damping``).
     """
 
     def __init__(self, vf, config, target_force=5.0, kp_force=0.001, ki_force=0.0, kd_force=0.0,
@@ -549,7 +555,8 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._force_feedback_seen = False
         self._press_sign = 1.0 if self._force_sign >= 0.0 else -1.0
         self._fz_filt = None
-        self._z_mode = "approach"
+        self._z_mode = "contact"
+        self._had_load = False
         self._unload_since = None
         self._contact_since = None
         self._prev_v_z = None
@@ -586,33 +593,12 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
 
     def _press_velocity(self, fs, now):
         """Positive = press into the part (tool Z = press_sign * this)."""
-        if self._z_mode == "approach":
-            if fs >= self._contact_engage_n:
-                self._z_mode = "contact"
-                self._unload_since = None
-                self._contact_since = now
-                self._integral = 0.0
-                self._prev_error = None
-                # Kill the approach feed immediately. Slew from +5 mm/s would keep ramming.
-                self._prev_v_z = 0.0
-            else:
-                return self._v_approach
-
-        if abs(fs) < self._contact_release_n:
-            if self._unload_since is None:
-                self._unload_since = now
-            elif self._lost_s > 0.0 and (now - self._unload_since) >= self._lost_s:
-                self._z_mode = "approach"
-                self._integral = 0.0
-                self._prev_error = None
-                self._unload_since = None
-                self._contact_since = None
-                return self._v_approach
-        else:
-            self._unload_since = None
-
-        if self._z_mode == "approach":
-            return self._v_approach
+        # Latched for this DualLoop session (button 0 → start, button 0 → stop).
+        # Unload must not drop to approach: that is free-space 5 mm/s and C153.
+        self._z_mode = "contact"
+        if self._contact_since is None:
+            self._contact_since = now
+        self._unload_since = None
 
         fe = self._target_force - fs
         if fs > 0.0:
@@ -627,23 +613,11 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         v_pid = (self._kp_force * fe + self._ki_force * self._integral +
                  self._kd_force * deriv + self._force_feedforward)
         v_pid = float(np.clip(v_pid, -self._max_v_hold, self._max_v_hold))
-        sitting = (
-            self._sit_s > 0.0
-            and self._contact_since is not None
-            and (now - self._contact_since) < self._sit_s
-        )
-        if sitting and fs >= 0.5 * self._target_force:
-            # DualLoop path waits ~2 s at real load. speedJ cannot yield, so do not press.
-            return min(0.0, v_pid)
         if fs >= self._target_force:
             # Over target: hold or retract. Never keep inching into a rigid stop (C153).
             return min(0.0, v_pid)
-        if fs < 0.0:
-            # FT sign flip / not compressed: DualLoop still presses, but slowly on UR.
-            return v_pid
-        if fs < 0.5 * self._target_force:
-            # Light contact: keep the approach feed so we actually reach Fd.
-            return self._v_approach
+        # Under Fd (air, light load, or signed dip): keep PID. Retract-on-Fs<0
+        # and lost_s→approach both walk the TCP off into free space.
         return v_pid
 
     def _slew_vz(self, v_z):
@@ -745,7 +719,8 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._force_feedback_seen = False
         self._press_sign = 1.0 if self._force_sign >= 0.0 else -1.0
         self._fz_filt = None
-        self._z_mode = "approach"
+        self._z_mode = "contact"
+        self._had_load = False
         self._unload_since = None
         self._contact_since = None
         self._prev_v_z = None

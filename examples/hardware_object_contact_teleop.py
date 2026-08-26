@@ -3,8 +3,10 @@
 Free space: gafropy speedJ + SpaceMouse (approach mode).
 
 Contact (default ``speedj``): same pose-spring speedJ plant as free space.
-A host DualLoop force loop overlays tool-Z velocity (APPROACH 5 mm/s, sit 2 s,
-then ``v = clip(kp*(Fd − Fs))``). Button 0 must not switch to line admittance.
+Button 0 latches DualLoop force-hold until button 0 again — no auto-drop to
+free-space / DualLoop approach. PID overlays tool-Z (``v ≤ max_v_hold``).
+Stick XY still field-follows (``project()`` rewrites R; stick Z ignored).
+Button 0 must not switch to line admittance.
 
 ``--contact-backend force_mode`` is UR hybrid force/position (not admittance).
 """
@@ -104,6 +106,21 @@ def stick_has_linear(twist):
     """
     linear = np.asarray(twist.get_linear(), dtype=float).reshape(3)
     return float(np.linalg.norm(linear)) > 1e-12
+
+
+def follow_linear(lin, *, ignore_z):
+    """Stick linear for FieldFollow. Contact drops Z; DualLoop owns press."""
+    out = np.asarray(lin, dtype=float).reshape(3).copy()
+    if ignore_z:
+        out[2] = 0.0
+    return out
+
+
+def field_follow_in_mode(mode, backend):
+    """Approach always follows. speedj contact does too; force_mode does not."""
+    if mode == "approach":
+        return True
+    return mode == "contact" and backend == "speedj"
 
 
 def _dashboard_bring_up(ip: str) -> None:
@@ -485,7 +502,8 @@ def main():
         T_prop = np.eye(4)
         T_prop[:3, 3] = follow.xyz
         now = time.monotonic()
-        lin_now = np.asarray(stick["lin"], dtype=float).reshape(3)
+        lin_now = follow_linear(
+            stick["lin"], ignore_z=mode["active"] == "contact")
         quiet = float(np.linalg.norm(lin_now)) <= 1e-12
         tick = drive_field_follow(
             follow, approach_controller, now, motor_from_matrix(T_prop),
@@ -493,7 +511,8 @@ def main():
             live_R=T_flange_viz[:3, :3],
             live_ee_xyz=T_ee_m[:3, 3],
             map_target=map_target,
-            stick_quiet=quiet)
+            stick_quiet=quiet,
+            tangent=mode["active"] == "contact")
         if not approach_controller._input_active:
             approach_controller.hold_live_pose()
         if (now - follow_log_t["t"]) >= 1.0:
@@ -671,8 +690,9 @@ def main():
                 approach_controller.set_input_active(False)
                 approach_controller.hold_live_pose()
             elif mode["active"] == "contact":
-                approach_controller.set_input_active(False)
-                approach_controller.hold_live_pose()
+                # hardware_free_teleop: zero twist still update_command so the
+                # pose spring tracks live EE. DualLoop keeps tool Z.
+                approach_controller.update_command(twist)
             if args.contact_backend == "force_mode" and force_session is not None and force_session.active:
                 force_session.clear_twist()
             return
@@ -684,7 +704,7 @@ def main():
                 # Spacemouse twist is body/tool frame; force session zeros tool Z.
                 force_session.set_twist(twist.get_linear(), twist.get_angular())
             return
-        # speedj contact: same pose-spring plant; stick Z ignored inside set_z_compliant.
+        # speedj contact: same pose-spring plant as hardware_free_teleop.
         approach_controller.update_command(twist)
 
     def on_twist(twist):
@@ -704,9 +724,10 @@ def main():
                 route_spacemouse_twist(
                     twist, sim_probe=sim_probe["p"], on_hardware=lambda _: None)
             return
-        if mode["active"] == "approach":
-            if stick_has_linear(twist):
-                follow.add_body_linear(lin)
+        if field_follow_in_mode(mode["active"], args.contact_backend):
+            lin_f = follow_linear(lin, ignore_z=mode["active"] == "contact")
+            if float(np.linalg.norm(lin_f)) > 1e-12:
+                follow.add_body_linear(lin_f)
             return
         route_spacemouse_twist(
             twist, sim_probe=None, on_hardware=_hardware_twist)
@@ -736,8 +757,8 @@ def main():
                 interface=interface,
             )
             print(
-                f"-> contact mode (speedj): XY slide ≤15mm/s, no press while sliding; "
-                f"APPROACH 5mm/s, sit 2s, PID to {args.target_force:.1f}N",
+                f"-> contact mode (speedj): latched until button {args.mode_button}; "
+                f"field-follow tangent XY, PID holds Fd ≤2mm/s to {args.target_force:.1f}N",
                 flush=True,
             )
             return
@@ -824,7 +845,7 @@ def main():
                 T_ee = np.asarray(live_ee_motor().to_transformation_matrix())
                 if align is not None and not align.finished:
                     run_startup_align(T_flange, T_ee)
-                elif mode["active"] == "approach":
+                elif field_follow_in_mode(mode["active"], args.contact_backend):
                     run_field_follow(T_flange, T_ee)
                 time.sleep(0.02)
         else:
@@ -950,7 +971,7 @@ def main():
                         update_ghost(ghost_flange_world(
                             T_live_flange, R_field, p_tcp, 1.0))
                     return
-                if mode["active"] == "approach":
+                if field_follow_in_mode(mode["active"], args.contact_backend):
                     run_field_follow(T_live_flange, T_ee)
                     if follow.last_target is not None:
                         T_tcp = matrix_from_motor(follow.last_target)

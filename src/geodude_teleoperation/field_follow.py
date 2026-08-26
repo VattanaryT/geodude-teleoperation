@@ -275,7 +275,7 @@ class FieldFollow:
         self._pending[:] = 0.0
         self._idle = True
 
-    def tick(self, now, proposed_motor, live_xyz=None, live_R=None):
+    def tick(self, now, proposed_motor, live_xyz=None, live_R=None, tangent=False):
         now = float(now)
         if self._xyz is None:
             T = np.asarray(proposed_motor.to_transformation_matrix(), dtype=float)
@@ -308,7 +308,11 @@ class FieldFollow:
             R_live = np.asarray(live_R, dtype=float).reshape(3, 3)
             if _is_rotation(R_live):
                 R_from = R_live
-        self._xyz = base + R_from @ delta
+        step = R_from @ delta
+        if tangent:
+            z_hat = R_from[:, 2]
+            step = step - z_hat * float(np.dot(step, z_hat))
+        self._xyz = base + step
         self._clamp_lead(live_xyz)
         stick_xyz = self._xyz.copy()
         target, project_ms = self._project(stick_xyz, R_from)
@@ -386,7 +390,8 @@ def _rotation_or_none(R):
 
 def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
                        err_rad=0.05, map_target=None, live_xyz=None,
-                       live_ee_xyz=None, max_ee_jump_m=0.08, stick_quiet=True):
+                       live_ee_xyz=None, max_ee_jump_m=0.08, stick_quiet=True,
+                       tangent=False):
     """Apply a follow tick to the pose spring.
 
     Stick tick: live TCP + body linear, field R slerped from live R.
@@ -396,7 +401,7 @@ def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
     del err_rad, max_ee_jump_m
     R_live = _rotation_or_none(live_R)
     tick = follow.tick(
-        now, proposed_motor, live_xyz=live_xyz, live_R=R_live)
+        now, proposed_motor, live_xyz=live_xyz, live_R=R_live, tangent=tangent)
     target = tick.target
     if target is not None and map_target is not None:
         target = map_target(target)

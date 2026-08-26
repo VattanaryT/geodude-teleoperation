@@ -378,6 +378,23 @@ class FieldFollowTest(unittest.TestCase):
             live_xyz=np.array([0.005, 0.0, 1.0]))
         np.testing.assert_allclose(follow.xyz, [0.015, 0.0, 1.0], atol=1e-9)
 
+    def test_tangent_stick_has_no_tool_z_step(self):
+        """Contact slide must stay in the tool XY plane so DualLoop owns depth."""
+        from scipy.spatial.transform import Rotation
+
+        R = Rotation.from_rotvec([0.0, 0.4, 0.0]).as_matrix()
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0)
+        live = np.array([0.1, 0.2, 0.3])
+        follow.seed(live, R)
+        follow.add_body_linear(np.array([0.01, 0.005, 0.0]))
+        follow.tick(
+            0.0, _motor_at(live), live_xyz=live, live_R=R, tangent=True)
+        step = follow.xyz - live
+        z_hat = R[:, 2]
+        self.assertAlmostEqual(float(np.dot(step, z_hat)), 0.0, places=9)
+        self.assertGreater(float(np.linalg.norm(step)), 1e-6)
+
     def test_lead_is_capped_to_live_tcp(self):
         vf = FakeVf()
         follow = FieldFollow(vf, hz=50.0, max_lead_m=0.02)
@@ -576,10 +593,15 @@ class HardwareFollowRoutingTest(unittest.TestCase):
         self.assertIn("live_R=", src)
         self.assertIn("pending_contact", src)
         self.assertIn("spacemouse: button", src)
+        self.assertIn("field_follow_in_mode", src)
+        self.assertIn("follow_linear", src)
         tree = ast.parse(src)
         self.assertTrue(any(
             isinstance(n, ast.FunctionDef) and n.name == "_make_approach_controller"
             for n in tree.body))
+        names = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
+        self.assertIn("field_follow_in_mode", names)
+        self.assertIn("follow_linear", names)
 
 
 if __name__ == "__main__":
