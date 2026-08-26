@@ -28,6 +28,11 @@ import yaml
 from gafropy import robot_interface as ri
 from gafropy import viz as gafropy_viz
 
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+_SRC = ROOT / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
 from geodude_teleoperation import (
     AdmittanceTeleoperationController,
     ContactTeleoperationController,
@@ -73,10 +78,15 @@ from geodude_teleoperation.mesh_fixture import (
     orient_surface_toward,
     reconstruct_mesh_from_points,
 )
+from geodude_teleoperation.spacemouse import (
+    format_spacemouse_paths,
+    list_spacemouse_paths,
+    resolve_spacemouse_path,
+    verify_spacemouse_connection,
+)
 from geodude_teleoperation.tcp_force import connect_tcp_force_reader, fz_from_tcp_force
 from geodude_teleoperation.virtual_fixture import FieldAlignPreview, workstation_field_z_arrows
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_OBJECT = str(ROOT / "assets" / "laser_profilometer" / "merged.ply")
 MODEL = str(ROOT / "assets" / "robots" / "geodude" / "geodude.yaml")
 DEFAULT_HARDWARE_CONFIG = str(ROOT / "assets" / "robots" / "geodude" / "geodude_hardware.yaml")
@@ -248,6 +258,17 @@ def build_arg_parser():
     parser.add_argument(
         "--device", choices=["keyboard", "spacemouse"], default="spacemouse")
     parser.add_argument(
+        "--spacemouse-path",
+        help="hidraw path for the SpaceMouse (e.g. /dev/hidraw5). "
+        "Default: by-id symlink, else newest hidraw when several are connected.")
+    parser.add_argument(
+        "--spacemouse-index", type=int,
+        help="index into sorted connected hidraw paths (0=first). "
+        "Ignored when --spacemouse-path is set.")
+    parser.add_argument(
+        "--check-spacemouse", action="store_true",
+        help="list connected SpaceMice, open the selected one, poll 3s, and exit")
+    parser.add_argument(
         "--hardware-config", default=DEFAULT_HARDWARE_CONFIG,
         help="YAML file mapping control groups to driver configs (Configuration.hardware_config)")
     parser.add_argument(
@@ -316,6 +337,26 @@ def build_arg_parser():
 
 def main():
     args = build_arg_parser().parse_args()
+    if args.check_spacemouse:
+        paths = list_spacemouse_paths()
+        if not paths:
+            print("spacemouse: none connected", flush=True)
+            raise SystemExit(1)
+        print(f"spacemouse: connected: {format_spacemouse_paths()}", flush=True)
+        path = resolve_spacemouse_path(
+            args.spacemouse_path, device_index=args.spacemouse_index)
+        print(f"spacemouse: opening {path} — move the cap for 3s…", flush=True)
+        saw_motion, peak = verify_spacemouse_connection(path, wait_s=3.0)
+        if saw_motion:
+            print(f"spacemouse: OK (peak axis={peak:.3f})", flush=True)
+            raise SystemExit(0)
+        print(
+            f"spacemouse: no motion detected (peak={peak:.3f}). "
+            "Wrong device? Try --spacemouse-path or --spacemouse-index.",
+            flush=True,
+        )
+        raise SystemExit(1)
+
     print(
         f"contact: backend={args.contact_backend}  "
         f"force_sign={args.force_sign:g}  "
@@ -801,7 +842,9 @@ def main():
                 # Slow enough that the 20 Hz field carrot stays inside the 2 cm
                 # lead and speedJ can catch it (full stick ~7.5 cm/s at 50 Hz).
                 linear_scale=STICK_LINEAR_SCALE, angular_scale=STICK_ANGULAR_SCALE,
-                deadzone=0.02)
+                deadzone=0.02,
+                device_path=args.spacemouse_path,
+                device_index=args.spacemouse_index)
         if args.device == "keyboard":
             device.start(on_twist, on_button, on_key=on_align_key)
         else:

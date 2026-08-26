@@ -1,0 +1,192 @@
+{
+  "T_rtde_base_vention": null,
+  "T_tag0_base": null,
+  "base_frame": null,
+  "calib_meta": null,
+  "call_args": null,
+  "call_args_list": [],
+  "call_count": 0,
+  "called": false,
+  "control_hz": 50.0,
+  "dry_run": false,
+  "enable_key": "\n",
+  "keyboard_step": 0.01,
+  "log_motion": null,
+  "max_joint_velocity": 1.0,
+  "method_calls": [],
+  "mock_calls": [
+    [
+      "in_contact.__bool__",
+      [],
+      {}
+    ],
+    [
+      "desired_normal_force.__float__",
+      [],
+      {}
+    ],
+    [
+      "tangent_scale.__float__",
+      [],
+      {}
+    ],
+    [
+      "tangent_hold_s.__float__",
+      [],
+      {}
+    ],
+    [
+      "force_sign.__float__",
+      [],
+      {}
+    ],
+    [
+      "approach_v_max.__float__",
+      [],
+      {}
+    ],
+    [
+      "force_max_v.__float__",
+      [],
+      {}
+    ],
+    [
+      "freeze_n_on_arm.__bool__",
+      [],
+      {}
+    ],
+    [
+      "align_first.__bool__",
+      [],
+      {}
+    ],
+    [
+      "align_enter_tol_deg.__float__",
+      [],
+      {}
+    ],
+    [
+      "align_exit_tol_deg.__float__",
+      [],
+      {}
+    ],
+    [
+      "standoff_distance.__float__",
+      [],
+      {}
+    ],
+    [
+      "standoff_gain.__float__",
+      [],
+      {}
+    ],
+    [
+      "standoff_max_speed.__float__",
+      [],
+      {}
+    ],
+    [
+      "ft_bias.__len__",
+      [],
+      {}
+    ],
+    [
+      "ft_bias.__iter__",
+      [],
+      {}
+    ],
+    [
+      "desired_normal_force.__float__",
+      [],
+      {}
+    ],
+    [
+      "wrench_kp.__float__",
+      [],
+      {}
+    ],
+    [
+      "wrench_ki.__float__",
+      [],
+      {}
+    ],
+    [
+      "wrench_kd.__float__",
+      [],
+      {}
+    ],
+    [
+      "wrench_to_vn.__float__",
+      [],
+      {}
+    ],
+    [
+      "tactile_max_vn.__float__",
+      [],
+      {}
+    ],
+    [
+      "record_mcap.__bool__",
+      [],
+      {}
+    ],
+    [
+      "record_sample_hz.__float__",
+      [],
+      {}
+    ],
+    [
+      "record_output_dir.__bool__",
+      [],
+      {}
+    ],
+    [
+      "record_save_images.__bool__",
+      [],
+      {}
+    ],
+    [
+      "record_target_frame.__str__",
+      [],
+      {}
+    ],
+    [
+      "arm.__str__",
+      [],
+      {}
+    ],
+    [
+      "in_contact.__bool__",
+      [],
+      {}
+    ],
+    [
+      "record_output_dir.__fspath__",
+      [],
+      {}
+    ],
+    [
+      "record_camera_topics.__iter__",
+      [],
+      {}
+    ],
+    [
+      "record_camera_topics.__len__",
+      [],
+      {}
+    ]
+  ],
+  "no_rtde_base_vention": true,
+  "plot_motion": false,
+  "robot_ip": "192.168.1.20",
+  "rtde_accel": 1.0,
+  "side_effect": null,
+  "status_hz": 0.0,
+  "tag0_frame": null,
+  "tip_offset": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "watchdog_ms": 500.0
+}

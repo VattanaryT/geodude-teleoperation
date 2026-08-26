@@ -4,11 +4,127 @@ device-poll-thread design of the original ufactory_demos teleoperation node (the
 a dedicated ROS2 node at the device's own rate; here: a plain Python thread).
 """
 
+import pathlib
 import threading
 import time
 
 import gafropy
 import numpy as np
+
+_BY_ID_GLOB = "/dev/input/by-id/usb-3Dconnexion_*"
+
+
+def list_spacemouse_paths() -> dict[str, str]:
+    """Return ``{hidraw_path: device_name}`` for connected SpaceMice."""
+    import pyspacemouse
+
+    return dict(pyspacemouse.get_connected_devices_by_path())
+
+
+def resolve_spacemouse_path(
+    preferred: str | None = None,
+    *,
+    device_index: int | None = None,
+) -> str:
+    """Pick a hidraw path when multiple SpaceMice are connected.
+
+    Resolution order:
+    1. Explicit ``preferred`` path (must exist in ``list_spacemouse_paths()``).
+    2. ``device_index`` into the sorted path list.
+    3. Hidraw node matching a ``/dev/input/by-id/usb-3Dconnexion_*`` symlink.
+    4. Newest hidraw node by mtime (most recently plugged/unplugged).
+    """
+    paths = list_spacemouse_paths()
+    if not paths:
+        raise RuntimeError(
+            "no SpaceMouse hidraw device found — check USB cable and "
+            "'ls -l /dev/input/by-id/usb-3Dconnexion_*'"
+        )
+
+    sorted_paths = sorted(paths)
+    if preferred is not None:
+        preferred = str(pathlib.Path(preferred).resolve())
+        if preferred not in paths:
+            known = ", ".join(sorted_paths)
+            raise ValueError(
+                f"SpaceMouse path {preferred!r} not connected "
+                f"(available: {known or 'none'})"
+            )
+        return preferred
+
+    if device_index is not None:
+        if device_index < 0 or device_index >= len(sorted_paths):
+            raise ValueError(
+                f"device_index {device_index} out of range "
+                f"(0..{len(sorted_paths) - 1}, {len(sorted_paths)} connected)"
+            )
+        return sorted_paths[device_index]
+
+    by_id = sorted(pathlib.Path(p) for p in pathlib.Path("/dev/input/by-id").glob(
+        "usb-3Dconnexion_*"
+    ) if not p.name.endswith("-mouse"))
+    for link in by_id:
+        event = link.resolve()
+        hidraw = _hidraw_for_input_event(event)
+        if hidraw is not None and hidraw in paths:
+            return hidraw
+
+    return max(sorted_paths, key=lambda p: pathlib.Path(p).stat().st_mtime)
+
+
+def _hidraw_for_input_event(event_path: pathlib.Path) -> str | None:
+    """Map ``/dev/input/eventN`` to its ``/dev/hidrawM`` sibling, if any."""
+    sys_name = event_path.name  # event19
+    for hidraw in sorted(pathlib.Path("/sys/class/hidraw").glob("hidraw*")):
+        for event_node in hidraw.glob("device/input/input*/event*"):
+            if event_node.name == sys_name:
+                return f"/dev/{hidraw.name}"
+    return None
+
+
+def verify_spacemouse_connection(
+    path: str,
+    *,
+    wait_s: float = 2.0,
+    poll_hz: float = 50.0,
+    move_threshold: float = 0.02,
+) -> tuple[bool, float]:
+    """Poll ``path`` briefly; return ``(saw_motion, peak_abs_axis)``."""
+    import pyspacemouse
+
+    peak = 0.0
+    deadline = time.monotonic() + wait_s
+    period = 1.0 / poll_hz
+    with pyspacemouse.open_by_path(path) as device:
+        while time.monotonic() < deadline:
+            state = device.read()
+            peak = max(
+                peak,
+                abs(state.x),
+                abs(state.y),
+                abs(state.z),
+                abs(state.roll),
+                abs(state.pitch),
+                abs(state.yaw),
+            )
+            if peak >= move_threshold:
+                return True, peak
+            time.sleep(period)
+    return False, peak
+
+
+def format_spacemouse_paths() -> str:
+    paths = list_spacemouse_paths()
+    if not paths:
+        return "none"
+    parts = []
+    for path in sorted(paths):
+        age = time.strftime(
+            "%Y-%m-%d %H:%M",
+            time.localtime(pathlib.Path(path).stat().st_mtime),
+        )
+        parts.append(f"{path} ({paths[path]}, mtime {age})")
+    return "; ".join(parts)
 
 
 def is_idle_twist(twist, linear_scale=0.01, angular_scale=0.1, deadzone=0.05,
@@ -50,15 +166,33 @@ def rising_button_indices(previous, buttons):
 
 
 class SpaceMouseTeleop:
-    def __init__(self, linear_scale=0.01, angular_scale=0.1, deadzone=0.05, frequency=50.0):
+    def __init__(
+        self,
+        linear_scale=0.01,
+        angular_scale=0.1,
+        deadzone=0.05,
+        frequency=50.0,
+        *,
+        device_path: str | None = None,
+        device_index: int | None = None,
+        verify_connection: bool = True,
+    ):
         self._linear_scale = linear_scale
         self._angular_scale = angular_scale
         self._deadzone = deadzone
         self._period = 1.0 / frequency
+        self._device_path = device_path
+        self._device_index = device_index
+        self._verify_connection = verify_connection
         self._thread = None
         self._running = threading.Event()
         self._on_twist = None
         self._on_button = None
+        self._opened_path: str | None = None
+
+    @property
+    def device_path(self) -> str | None:
+        return self._opened_path
 
     def start(self, on_twist, on_button=None):
         """on_twist(twist: gafropy.Twist) is called at `frequency` Hz with the latest
@@ -81,7 +215,33 @@ class SpaceMouseTeleop:
         # access, which is not available (and not needed) anywhere else in this package.
         import pyspacemouse
 
-        with pyspacemouse.open() as device:
+        all_paths = list_spacemouse_paths()
+        path = resolve_spacemouse_path(
+            self._device_path, device_index=self._device_index)
+        self._opened_path = path
+        if len(all_paths) > 1:
+            print(
+                "spacemouse: multiple devices — "
+                f"using {path}; others: "
+                f"{', '.join(p for p in sorted(all_paths) if p != path)}. "
+                "Pass --spacemouse-path or --spacemouse-index to override.",
+                flush=True,
+            )
+        else:
+            print(f"spacemouse: opened {path} ({all_paths[path]})", flush=True)
+
+        if self._verify_connection:
+            saw_motion, peak = verify_spacemouse_connection(path, wait_s=0.0)
+            if not saw_motion:
+                print(
+                    "spacemouse: no axis motion yet "
+                    f"(peak={peak:.3f}); move the cap now. "
+                    f"Connected: {format_spacemouse_paths()}",
+                    flush=True,
+                )
+
+        open_device = pyspacemouse.open_by_path(path)
+        with open_device as device:
             previous_buttons = None
 
             while self._running.is_set():

@@ -1,6 +1,26 @@
 import unittest
+from unittest import mock
 
-from geodude_teleoperation.spacemouse import rising_button_indices
+from geodude_teleoperation.spacemouse import (
+    rising_button_indices,
+    resolve_spacemouse_path,
+)
+
+
+class ResolveSpacemousePathTest(unittest.TestCase):
+    @mock.patch("geodude_teleoperation.spacemouse.list_spacemouse_paths")
+    def test_explicit_path(self, list_paths):
+        list_paths.return_value = {"/dev/hidraw0": "SpaceMouseCompact"}
+        self.assertEqual(
+            resolve_spacemouse_path("/dev/hidraw0"), "/dev/hidraw0")
+
+    @mock.patch("geodude_teleoperation.spacemouse.list_spacemouse_paths")
+    def test_device_index(self, list_paths):
+        list_paths.return_value = {
+            "/dev/hidraw0": "SpaceMouseCompact",
+            "/dev/hidraw5": "SpaceMouseCompact",
+        }
+        self.assertEqual(resolve_spacemouse_path(None, device_index=1), "/dev/hidraw5")
 
 
 class RisingButtonIndicesTest(unittest.TestCase):
