@@ -246,6 +246,16 @@ def drive_startup_align(align, controller, now, T_flange, R_field, T_ee,
     return cmd
 
 
+def _contact_log_path(spec, save_dir="speedj_logs"):
+    """Resolve --contact-log. 'none' disables; 'auto' names one by timestamp."""
+    if spec in (None, "", "none", "off"):
+        return None
+    if spec != "auto":
+        return spec
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    return str(pathlib.Path(save_dir).resolve() / f"contact_{stamp}.csv")
+
+
 def enter_speedj_contact(*, mode, contact_controller, approach_controller, interface=None):
     """Keep the pose-spring speedJ plant. Overlay DualLoop Z. Do not swap to line admittance."""
     del interface  # caller may pass it; we must not interface.control(contact)
@@ -341,6 +351,17 @@ def build_arg_parser():
         action="store_false", default=True,
         help="let field-follow keep discarding vf.project()'s position, so the "
              "commanded point never re-snaps to the mesh (previous behavior)")
+    parser.add_argument(
+        "--v-slew", type=float, default=0.4, metavar="M_S2",
+        help="press-velocity slew limit (m/s^2). At the old 0.05 a reversal "
+             "took 0.32s, so the loop kept pressing ~1.3mm after it had "
+             "decided to back off. Joint-space ramp is separately bounded by "
+             "max_qddot.")
+    parser.add_argument(
+        "--contact-log", default="auto", metavar="PATH",
+        help="per-tick CSV of the force loop (Fs, Fd, v_z, tare, dtc flags). "
+             "'auto' writes next to the speedj logs, 'none' disables. Streamed "
+             "to disk, so an aborted or protective-stopped run keeps its data.")
     parser.add_argument(
         "--no-force-tare", dest="force_tare", action="store_false", default=True,
         help="do not sample the free-space force offset when contact first "
@@ -532,12 +553,13 @@ def main():
             vf, contact_config, target_force=args.target_force,
             kp_force=0.001, ki_force=0.0003,
             v_approach=0.005, max_v_hold=0.008, z_damping=z_damping,
-            v_slew_mps2=0.05, lost_s=1.0, sit_s=2.0,
+            v_slew_mps2=args.v_slew, lost_s=1.0, sit_s=2.0,
             force_sign=args.force_sign,
             press_loop=args.press_loop,
             force_tare=args.force_tare,
             measured_fz_fn=measured_fz_fn,
             measured_force_fn=measured_force_fn)
+        contact_controller.set_contact_log(_contact_log_path(args.contact_log))
         contact_controller.set_task_space(task_space)
         contact_controller.set_interface(interface)
         contact_controller.set_objective(

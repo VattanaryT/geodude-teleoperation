@@ -1,3 +1,5 @@
+import csv
+import pathlib
 import threading
 import time
 
@@ -576,9 +578,11 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                  log_period_s=0.5, measured_fz_fn=None, dead_wrench_abort_s=0.4,
                  dead_wrench_eps_n=0.05, contact_engage_n=None, contact_release_n=0.4,
                  fz_tau_s=0.03, v_approach=0.005, max_v_hold=0.005, lost_s=1.0,
-                 z_damping=200.0, v_slew_mps2=0.05, contact_sign_n=None, sit_s=2.0,
+                 z_damping=200.0, v_slew_mps2=0.4, contact_sign_n=None, sit_s=2.0,
                  press_loop="dtc", measured_force_fn=None, force_tare=True,
-                 force_tare_samples=20, force_tare_period=0.002):
+                 force_tare_samples=20, force_tare_period=0.002,
+                 wrong_sign_fs_n=-2.0, wrong_sign_fd_frac=0.5,
+                 unload_v_m_s=0.004):
         super().__init__(config)
         self.vf = vf
         self._target_force = abs(float(target_force))
@@ -604,7 +608,19 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._max_v_hold = abs(float(max_v_hold))
         self._lost_s = max(0.0, float(lost_s))
         self._z_damping = float(z_damping)
+        # v_slew_mps2 was 0.05, which needs 0.16 s to walk +8 mm/s down to zero
+        # and 0.32 s to reach full retract. Against a rigid part that is ~1.3 mm
+        # of continued press *after* the loop has already decided to back off,
+        # and it is why v_z printed +0.0023 m/s at Fs=21.7 N with Fd=10 N: the
+        # command was negative, the slew was still descending. The joint-space
+        # ramp is separately bounded by max_qddot, so this only ever needed to
+        # be gentle, not slow.
         self._v_slew_mps2 = max(0.0, float(v_slew_mps2))
+        # Same wrong-sign rule as the dtc loop's ForcePIDConfig, so both seek
+        # laws answer a flipped/bouncing reading the same way.
+        self._wrong_sign_fs_n = float(wrong_sign_fs_n)
+        self._wrong_sign_fd_frac = float(wrong_sign_fd_frac)
+        self._unload_v_m_s = abs(float(unload_v_m_s))
         self._force_ramp_s = max(0.0, float(force_ramp_s))
         self._log_period_s = max(0.0, float(log_period_s))
         self._measured_fz_fn = measured_fz_fn
@@ -620,6 +636,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         # not, because it has to keep telling "live sensor, constant offset"
         # apart from "get_wrench() is dead" (C153A1).
         self._force_bias = np.zeros(3)
+        self._force_bias_base = None
         self._force_bias_valid = False
         self._force_tare = bool(force_tare)
         self._force_tare_samples = max(1, int(force_tare_samples))
@@ -671,6 +688,10 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._on_force_abort = None
         self._on_vz = None
         self._last_diag = {}
+        self._log_path = None
+        self._log_file = None
+        self._log_writer = None
+        self._log_rows = 0
 
     def set_interface(self, interface):
         self._interface = interface
@@ -700,6 +721,67 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
             n = np.asarray(n_base, dtype=float).reshape(3)
             norm = float(np.linalg.norm(n))
             self._n_star = None if norm < 1e-12 else n / norm
+
+    def set_contact_log(self, path):
+        """Write one CSV row per force tick to ``path`` (None disables).
+
+        The speedj trace is joint space and only saved on a clean exit -- the
+        last debug session lost its .npz to a second Ctrl+C landing inside
+        savez_compressed. This streams the force loop's own view to disk as it
+        runs, so an aborted or protective-stopped run still leaves the record
+        that explains it. Opened on start(), closed on stop().
+        """
+        self._log_path = None if path is None else str(path)
+
+    _LOG_FIELDS = (
+        "t", "elapsed", "mode", "press_loop", "fz_raw", "bias_x", "bias_y",
+        "bias_z", "Fs", "Fd", "v_press", "v_z", "aborted",
+        "Fs_n", "Fe_n", "dFs_dt", "gain", "v_along", "spike", "osc",
+        "wrong_sign", "fault_fs",
+    )
+
+    def _open_contact_log(self):
+        self._close_contact_log()
+        if not self._log_path:
+            return
+        try:
+            path = pathlib.Path(self._log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._log_file = path.open("w", newline="")
+            self._log_writer = csv.DictWriter(
+                self._log_file, fieldnames=list(self._LOG_FIELDS),
+                extrasaction="ignore")
+            self._log_writer.writeheader()
+            self._log_rows = 0
+            print(f"contact log: {path.resolve()}", flush=True)
+        except Exception as exc:
+            print(f"contact log: cannot open {self._log_path} ({exc})", flush=True)
+            self._log_file = None
+            self._log_writer = None
+
+    def _close_contact_log(self):
+        if self._log_file is not None:
+            try:
+                self._log_file.flush()
+                self._log_file.close()
+            except Exception:
+                pass
+        self._log_file = None
+        self._log_writer = None
+
+    def _write_contact_log(self, row):
+        if self._log_writer is None:
+            return
+        try:
+            self._log_writer.writerow(row)
+            self._log_rows += 1
+            # Flush often: the point of this file is to survive an abort, and a
+            # protective stop is exactly when the buffered tail matters most.
+            if self._log_rows % 50 == 0:
+                self._log_file.flush()
+        except Exception as exc:
+            print(f"contact log: write failed ({exc}); disabling", flush=True)
+            self._close_contact_log()
 
     def set_on_force_abort(self, callback):
         """Optional callback() invoked once if force feedback looks dead (open-loop)."""
@@ -734,9 +816,24 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                 self._measured_force_fn(), dtype=float).reshape(-1)[:3].copy()
         return np.array([0.0, 0.0, self._read_fz_raw()], dtype=float)
 
+    def _bias_tool_now(self):
+        """The tare, expressed in the *current* tool frame.
+
+        The offset is the tool's own weight, which is fixed in base and only
+        looks constant in the tool frame while the wrist holds still. Two runs
+        minutes apart on the same hardware tared at fz=+3.74 N and fz=+10.42 N
+        for exactly that reason. Storing it in base and rotating it back each
+        tick removes the orientation dependence; the tool-frame snapshot is the
+        fallback for a tare taken before any pose was known.
+        """
+        R = self._R_tool_to_base
+        if self._force_bias_base is None or R is None:
+            return self._force_bias
+        return np.asarray(R, dtype=float).reshape(3, 3).T @ self._force_bias_base
+
     def _read_force_tool(self):
         """Tare-corrected tool-frame (fx, fy, fz) in N for the dtc loop."""
-        return self._read_force_tool_raw() - self._force_bias
+        return self._read_force_tool_raw() - self._bias_tool_now()
 
     def tare_force(self, samples=None, period=None):
         """Sample the free-space force offset. Tool must be clear of the part.
@@ -767,12 +864,17 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
             if dt > 0.0 and i + 1 < n:
                 time.sleep(dt)
         self._force_bias = np.mean(np.asarray(acc, dtype=float), axis=0)
+        R = self._R_tool_to_base
+        self._force_bias_base = (
+            None if R is None
+            else np.asarray(R, dtype=float).reshape(3, 3) @ self._force_bias)
         self._force_bias_valid = True
         return self._force_bias.copy()
 
     def clear_force_tare(self):
         """Forget the tare so the next ``start()`` takes a fresh one."""
         self._force_bias = np.zeros(3)
+        self._force_bias_base = None
         self._force_bias_valid = False
 
     def _press_axis_base(self):
@@ -843,6 +945,17 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._unload_since = None
 
         fe = self._target_force - fs
+        # Wrong sign: Fs below -max(2, 0.5*Fd) is not "even more force owed" --
+        # it is a bounce, a flipped reading, or the tool being pulled. fe grows
+        # without bound as Fs goes negative, so the bare PID answered a -11.58 N
+        # read with kp*21.58 = +21.6 mm/s, clipped to the +8 mm/s ceiling and
+        # driven straight into the part; the C153 protective stop followed on
+        # the next tick. The over-target guard below never saw it, because Fs
+        # was nowhere near Fd. Mirrors ForcePIDController's wrong_sign trip.
+        if fs <= self._wrong_sign_threshold():
+            self._integral = 0.0
+            self._prev_error = fe
+            return -self._unload_v_m_s
         if fs > 0.0:
             self._integral = np.clip(
                 self._integral + fe * self._update_period,
@@ -862,6 +975,11 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         # and lost_s→approach both walk the TCP off into free space.
         return v_pid
 
+    def _wrong_sign_threshold(self):
+        """Fs at or below this is a bad reading, not a deeper press."""
+        return min(self._wrong_sign_fs_n,
+                   -abs(self._wrong_sign_fd_frac * self._target_force))
+
     def _slew_vz(self, v_z):
         if self._v_slew_mps2 <= 0.0 or self._prev_v_z is None:
             self._prev_v_z = v_z
@@ -876,7 +994,8 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         # Legacy seek regulates the tared reading; the abort below still looks
         # at fz_raw, since a live sensor sitting on a constant offset must not
         # read as dead feedback.
-        fs = self._fs(fz_raw - float(self._force_bias[2]))
+        bias_tool = self._bias_tool_now()
+        fs = self._fs(fz_raw - float(bias_tool[2]))
         now = time.monotonic()
         elapsed = 0.0 if self._t_start is None else now - self._t_start
 
@@ -952,13 +1071,34 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                     )
                 print(
                     f"contact force[{src}/{self._press_loop}]: mode={self._z_mode}  "
-                    f"fz_raw={fz_raw:+.2f}N  bias_z={self._force_bias[2]:+.2f}N"
+                    f"fz_raw={fz_raw:+.2f}N  bias_z={bias_tool[2]:+.2f}N"
                     f"{'' if self._force_bias_valid else '(untared)'}  "
                     f"Fs={fs:+.2f}N  Fd={self._target_force:.1f}N  "
                     f"v_z={v_z:+.4f}m/s  Fext=0  sign={self._press_sign:+.0f}"
                     f"{'  sit' if sit else ''}{extra}",
                     flush=True,
                 )
+
+        if self._log_writer is not None:
+            d = self._last_diag or {}
+            self._write_contact_log({
+                "t": f"{now:.6f}", "elapsed": f"{elapsed:.4f}",
+                "mode": self._z_mode, "press_loop": self._press_loop,
+                "fz_raw": f"{fz_raw:.4f}",
+                "bias_x": f"{bias_tool[0]:.4f}", "bias_y": f"{bias_tool[1]:.4f}",
+                "bias_z": f"{bias_tool[2]:.4f}",
+                "Fs": f"{fs:.4f}", "Fd": f"{self._target_force:.3f}",
+                "v_press": f"{v_press:.6f}", "v_z": f"{v_z:.6f}",
+                "aborted": int(self._force_aborted),
+                "Fs_n": f"{d.get('Fs_N', float('nan')):.4f}",
+                "Fe_n": f"{d.get('Fe_N', float('nan')):.4f}",
+                "dFs_dt": f"{d.get('dFs_dt_N_s', float('nan')):.3f}",
+                "gain": f"{d.get('gain_scale', float('nan')):.3f}",
+                "v_along": f"{d.get('v_along_m_s', float('nan')):.6f}",
+                "spike": int(d.get("spike", 0)), "osc": int(d.get("osc", 0)),
+                "wrong_sign": int(d.get("wrong_sign", 0)),
+                "fault_fs": int(d.get("fault_fs", 0)),
+            })
 
         wrench_cmd = np.zeros(6)
         wrench_cmd[5] = v_z * self._z_damping
@@ -1019,12 +1159,15 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                     flush=True,
                 )
             else:
+                frame = ("base-tracked" if self._force_bias_base is not None
+                         else "tool-frame only (no pose yet)")
                 print(
-                    f"force tare (tool frame, free space): "
+                    f"force tare (free space, {frame}): "
                     f"fx={bias[0]:+.2f} fy={bias[1]:+.2f} fz={bias[2]:+.2f} N",
                     flush=True,
                 )
         self._t_start = time.monotonic()
+        self._open_contact_log()
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -1034,6 +1177,8 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         if self._thread is not None:
             self._thread.join()
             self._thread = None
+        # After the join, so the last tick's row is in the file.
+        self._close_contact_log()
 
     def update_command(self, twist):
         task_space = self.get_task_space()

@@ -73,6 +73,13 @@ class ForcePIDConfig:
     # Force *drops* must NOT freeze — we need to re-approach quickly.
     spike_dF_dt_N_s: float = 40.0
     spike_hold_s: float = 0.15
+    # Window the raw rate is measured over. A single 200 Hz tick turns the UR
+    # sensor's own ±0.3 N noise into ±120 N/s, permanently above
+    # spike_dF_dt_N_s: the guard latched, v_along stayed pinned at 0 and
+    # contact mode never approached at all (every log line read SPIKE with
+    # gain=0.50 and Fs≈0). An impact is a *sustained* rise, so it still clears
+    # the threshold against a 20 ms baseline while white noise does not.
+    spike_rate_window_s: float = 0.02
     # Overshoot: if Fs_raw > Fd + margin, freeze integral and allow only retract
     overshoot_margin_N: float = 1.0
     # On overshoot/spike, unload at least this fast along −n* (m/s)
@@ -112,6 +119,7 @@ class ForcePIDController:
         self._fe_prev: Optional[float] = None
         self._fs_prev: Optional[float] = None
         self._fs_raw_prev: Optional[float] = None
+        self._fs_raw_hist: Deque[Tuple[float, float]] = deque()
         self._f_lpf: Optional[float] = None
         self._f_bias = np.zeros(3, dtype=np.float64)
         self._gain_scale = 1.0
@@ -128,6 +136,7 @@ class ForcePIDController:
         self._fe_prev = None
         self._fs_prev = None
         self._fs_raw_prev = None
+        self._fs_raw_hist.clear()
         self._f_lpf = None
         self._gain_scale = 1.0
         self._spike_timer = 0.0
@@ -214,11 +223,18 @@ class ForcePIDController:
         else:
             d_fs = (fs - self._fs_prev) / dt
         self._fs_prev = fs
-        if self._fs_raw_prev is None:
-            d_fs_raw = 0.0
-        else:
-            d_fs_raw = (fs_raw - self._fs_raw_prev) / dt
         self._fs_raw_prev = fs_raw
+        # Raw rate over spike_rate_window_s, not over one tick -- see the
+        # config field. Keep only samples inside the window and difference
+        # against the oldest survivor, so a variable loop period is handled.
+        self._fs_raw_hist.append((self._time_s, fs_raw))
+        win = max(0.0, float(c.spike_rate_window_s))
+        while (len(self._fs_raw_hist) > 1
+               and (self._time_s - self._fs_raw_hist[0][0]) > win):
+            self._fs_raw_hist.popleft()
+        t_old, fs_old = self._fs_raw_hist[0]
+        span = self._time_s - t_old
+        d_fs_raw = (fs_raw - fs_old) / span if span > 1e-9 else 0.0
 
         # Deadband on error
         db = float(c.force_deadband_N)
@@ -271,7 +287,12 @@ class ForcePIDController:
                 )
 
             # --- Spike guard on RAW rising edge (LPF hid impacts in logs) ---
-            if d_fs_raw >= float(c.spike_dF_dt_N_s):
+            # Gated on being in contact: you cannot be impacting anything while
+            # reading essentially no force, so a fast edge down there is sensor
+            # noise by definition. A real impact crosses contact_threshold_N on
+            # the same tick it spikes, so the guard still fires when it matters.
+            if (d_fs_raw >= float(c.spike_dF_dt_N_s)
+                    and abs(fs_raw) >= float(c.contact_threshold_N)):
                 spike_flag = 1.0
                 self._spike_timer = max(self._spike_timer, float(c.spike_hold_s))
                 self._integral = 0.0

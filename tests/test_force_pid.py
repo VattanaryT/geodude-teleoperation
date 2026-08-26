@@ -183,3 +183,57 @@ class PushStopThresholdTest(unittest.TestCase):
         pid = _make(push_stop_frac_of_fd=0.5)
         diag = _settle(pid, -0.6 * FD)
         self.assertEqual(diag["v_along_m_s"], 0.0)
+
+
+class SpikeGuardNoiseTest(unittest.TestCase):
+    """The spike guard must not fire on the sensor's own noise floor.
+
+    On hardware every log line read ``SPIKE gain=0.50`` with ``Fs≈0`` and
+    ``v_z=+0.0000`` forever: at 200 Hz a single-tick difference turns UR's
+    ±0.3 N of noise into ±120 N/s, permanently above ``spike_dF_dt_N_s``. The
+    hold then pinned ``v_along`` at 0, so contact mode never approached at all.
+    """
+
+    @staticmethod
+    def _noisy(pid, mean_fz, n=400, amp=0.35, seed=0):
+        rng = np.random.default_rng(seed)
+        diag = {}
+        for _ in range(n):
+            fz = mean_fz + rng.uniform(-amp, amp)
+            _cmd, diag = pid.step(
+                n_base=N, force_base=[0.0, 0.0, fz], dt=DT, R_ee=np.eye(3))
+        return diag
+
+    def test_free_space_noise_does_not_freeze_the_approach(self):
+        pid = _make()
+        diag = self._noisy(pid, 0.0)
+        self.assertFalse(diag["spike"])
+        self.assertGreater(diag["v_along_m_s"], 0.0)
+        self.assertEqual(diag["gain_scale"], 1.0)
+
+    def test_in_contact_noise_does_not_freeze_the_hold(self):
+        # Under target with a live noisy reading, the loop must still be
+        # allowed to close the remaining gap rather than sit at v=0.
+        pid = _make()
+        diag = self._noisy(pid, -0.5 * FD)
+        self.assertFalse(diag["spike"])
+        self.assertGreater(diag["v_along_m_s"], 0.0)
+
+    def test_a_real_impact_still_trips_it(self):
+        pid = _make()
+        self._noisy(pid, 0.0, n=40)
+        # 30 N inside one tick is 6000 N/s over any baseline, and lands well
+        # past contact_threshold_N, so both gates open.
+        _cmd, diag = pid.step(
+            n_base=N, force_base=[0.0, 0.0, -30.0], dt=DT, R_ee=np.eye(3))
+        self.assertTrue(diag["spike"])
+
+    def test_a_ramp_slower_than_the_threshold_does_not_trip(self):
+        pid = _make()
+        diag = {}
+        fz = 0.0
+        for _ in range(200):                      # 20 N/s: half the threshold
+            fz -= 20.0 * DT
+            _cmd, diag = pid.step(
+                n_base=N, force_base=[0.0, 0.0, fz], dt=DT, R_ee=np.eye(3))
+        self.assertFalse(diag["spike"])

@@ -312,8 +312,13 @@ class SpeedJTrace:
         if self._save_png is not None:
             try:
                 self.save_session()
-            except Exception as exc:
-                print(f"speedj plot: save failed ({exc})", flush=True)
+            except BaseException as exc:
+                # BaseException, not Exception: a second Ctrl+C during shutdown
+                # landed inside savez_compressed and took the whole session's
+                # data with it. We are already on the exit path, so swallowing
+                # the interrupt here costs nothing and keeps whatever was
+                # written. The per-tick contact CSV is the durable record.
+                print(f"speedj plot: save failed ({exc!r})", flush=True)
         if self._sink is None:
             return
         try:

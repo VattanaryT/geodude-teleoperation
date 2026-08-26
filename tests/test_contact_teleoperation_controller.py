@@ -1,3 +1,5 @@
+import inspect
+import pathlib
 import time
 import unittest
 
@@ -474,6 +476,151 @@ class ForceTareTest(unittest.TestCase):
         ctrl = self._ctrl(measured_force_fn=None, measured_fz_fn=None)
         self.assertIsNone(ctrl.tare_force())
         self.assertFalse(ctrl._force_bias_valid)
+
+
+
+class LegacyWrongSignTest(unittest.TestCase):
+    """The bare PID must not answer a flipped reading with full approach.
+
+    fe = Fd - Fs grows without bound as Fs goes negative, so on hardware a
+    -11.58 N read produced kp*21.58 = +21.6 mm/s, clipped to the +8 mm/s
+    ceiling and driven into a rigid part; the C153 protective stop followed on
+    the next tick. The over-target guard never saw it -- Fs was nowhere near Fd.
+    """
+
+    FD = 10.0
+
+    def _ctrl(self, fz, **kwargs):
+        params = dict(
+            press_loop="legacy", target_force=self.FD, force_sign=1.0,
+            max_v_hold=0.008, log_period_s=0.0, dead_wrench_abort_s=0.0,
+            v_slew_mps2=0.0, force_tare=False,
+            measured_fz_fn=lambda: fz)
+        params.update(kwargs)
+        ctrl = _make_controller(**params)
+        ctrl._R_tool_to_base = np.eye(3)
+        ctrl._t_start = time.monotonic()
+        return ctrl
+
+    def _v_z(self, ctrl):
+        seen = []
+        ctrl.set_on_vz(seen.append)
+        ctrl._compute_force_command()
+        return seen[-1]
+
+    def test_wrong_sign_reading_unloads(self):
+        # Fs = -press_sign * fz, so fz=+11.58 is the Fs=-11.58 from the log.
+        ctrl = self._ctrl(11.58)
+        self.assertLess(self._v_z(ctrl), 0.0)
+
+    def test_threshold_matches_the_dtc_loop(self):
+        ctrl = self._ctrl(0.0)
+        self.assertEqual(ctrl._wrong_sign_threshold(), min(-2.0, -0.5 * self.FD))
+
+    def test_a_mild_negative_dip_still_approaches(self):
+        # Bounce chatter must not trip it -- retract-on-any-Fs<0 is what walked
+        # the TCP off into free space before.
+        ctrl = self._ctrl(1.0)
+        self.assertGreater(self._v_z(ctrl), 0.0)
+
+    def test_the_integral_is_dumped_while_wrong_sign(self):
+        ctrl = self._ctrl(11.58)
+        ctrl._integral = 5.0
+        ctrl._compute_force_command()
+        self.assertEqual(ctrl._integral, 0.0)
+
+    def test_press_slew_default_allows_a_prompt_reversal(self):
+        """0.05 m/s^2 needed 0.32 s to swing +8 -> -8 mm/s, so the loop kept
+        pressing ~1.3 mm after it had decided to back off. That is why v_z
+        printed +0.0023 m/s at Fs=21.7 N with Fd=10 N."""
+        default = inspect.signature(
+            ContactTeleoperationController.__init__
+        ).parameters["v_slew_mps2"].default
+        self.assertLess(0.016 / default, 0.06)
+
+
+class BaseFrameTareTest(unittest.TestCase):
+    """The tare tracks the wrist, because the offset it removes is gravity.
+
+    Two runs minutes apart on the same hardware tared at fz=+3.74 N and
+    fz=+10.42 N. The tool's weight did not change; the wrist orientation did,
+    and a tool-frame constant cannot represent a base-frame vector.
+    """
+
+    WEIGHT_BASE = np.array([0.0, 0.0, 4.0])
+
+    def _ctrl(self, state):
+        ctrl = _make_controller(
+            press_loop="dtc", target_force=5.0, force_sign=1.0,
+            max_v_hold=0.008, v_approach=0.005, log_period_s=0.0,
+            dead_wrench_abort_s=0.0, force_tare_samples=3, force_tare_period=0.0,
+            measured_force_fn=lambda: state["R"].T @ self.WEIGHT_BASE)
+        ctrl._R_tool_to_base = state["R"]
+        ctrl._t_start = time.monotonic()
+        return ctrl
+
+    def test_rotating_the_wrist_keeps_the_tared_reading_at_zero(self):
+        state = {"R": np.eye(3)}
+        ctrl = self._ctrl(state)
+        ctrl.tare_force()
+        np.testing.assert_allclose(ctrl._read_force_tool(), np.zeros(3), atol=1e-9)
+
+        # Flip the tool 180 deg about X: the same base-frame weight now reads
+        # fz = -4 N in the tool frame.
+        state["R"] = np.diag([1.0, -1.0, -1.0])
+        ctrl._R_tool_to_base = state["R"]
+        np.testing.assert_allclose(
+            ctrl._read_force_tool(), np.zeros(3), atol=1e-9)
+        # The frozen tool-frame snapshot would have been off by 8 N here.
+        self.assertAlmostEqual(float(ctrl._force_bias[2]), 4.0, places=9)
+        self.assertAlmostEqual(float(ctrl._bias_tool_now()[2]), -4.0, places=9)
+
+    def test_falls_back_to_the_tool_frame_when_no_pose_is_known(self):
+        state = {"R": np.eye(3)}
+        ctrl = self._ctrl(state)
+        ctrl._R_tool_to_base = None
+        ctrl.tare_force()
+        self.assertIsNone(ctrl._force_bias_base)
+        np.testing.assert_allclose(ctrl._bias_tool_now(), ctrl._force_bias)
+
+    def test_clear_drops_the_base_frame_copy_too(self):
+        state = {"R": np.eye(3)}
+        ctrl = self._ctrl(state)
+        ctrl.tare_force()
+        self.assertIsNotNone(ctrl._force_bias_base)
+        ctrl.clear_force_tare()
+        self.assertIsNone(ctrl._force_bias_base)
+
+
+class ContactLogTest(unittest.TestCase):
+    def test_start_writes_a_streaming_csv_that_survives_an_abort(self):
+        import csv as _csv
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "nested" / "contact.csv"
+            ctrl = _make_controller(
+                press_loop="dtc", target_force=5.0, log_period_s=0.0,
+                dead_wrench_abort_s=0.0, force_tare=False,
+                measured_force_fn=lambda: (0.0, 0.0, 0.0))
+            ctrl._R_tool_to_base = np.eye(3)
+            # Contact mode always has an on_vz overlay; without one _run takes
+            # the set_desired_wrench branch, which is not what production does.
+            ctrl.set_on_vz(lambda vz: None)
+            ctrl.set_contact_log(path)
+            ctrl.start()
+            time.sleep(0.1)
+            ctrl.stop()
+            rows = list(_csv.DictReader(path.open()))
+        self.assertGreater(len(rows), 0)
+        self.assertIn("Fs", rows[0])
+        self.assertIn("spike", rows[0])
+        self.assertEqual(rows[0]["press_loop"], "dtc")
+
+    def test_none_disables_it(self):
+        ctrl = _make_controller(force_tare=False, log_period_s=0.0)
+        ctrl.set_contact_log(None)
+        ctrl._open_contact_log()
+        self.assertIsNone(ctrl._log_writer)
 
 
 if __name__ == "__main__":

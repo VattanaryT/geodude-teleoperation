@@ -37,8 +37,10 @@ These are established, not guesses. Trusting the wrong one here moves hardware.
   still reads `fz_raw`, or a tared-to-zero sensor would look dead. Untared, the
   dtc loop trips `wrong_sign` at `Fs ≤ min(−2, −0.5·Fd)` and commands
   `−unload_v_m_s` forever — button 0 retracted instead of approaching. The tare
-  is a *tool-frame* constant while the weight is fixed in base, so it is only
-  valid near the orientation it was taken at.
+  is stored in **base** and rotated back into the tool frame each tick, because
+  the weight it removes is fixed in base — a tool-frame constant is only right
+  at the orientation it was captured at, which is why two runs minutes apart
+  tared at `fz=+3.74 N` and `fz=+10.42 N` on the same hardware.
 - **Twist blade order** is `[e12, e13, e23, e1i, e2i, e3i]` = `[angular,
   linear]`, so linear Z is **index 5**. That is the slot `set_desired_wrench`
   and `AdmittanceConfig` use (`spacemouse.py:279`).
@@ -61,6 +63,23 @@ These are established, not guesses. Trusting the wrong one here moves hardware.
   loops authoritative on the same axis is the fight that produces drift.
 - **Never keep inching into a rigid stop (C153).** At or over target, press
   velocity is 0 or retract. speedJ cannot yield.
+- **`spike_dF_dt_N_s` is a rate over `spike_rate_window_s` (20 ms), not over one
+  tick, and only counts while `|Fs| ≥ contact_threshold_N`.** At 200 Hz a
+  single-tick difference turns UR's own ±0.3 N of noise into ±120 N/s, well
+  past the 40 N/s threshold, so the guard latched forever: every log line read
+  `SPIKE gain=0.50` with `Fs≈0` and `v_z=+0.0000`, and contact mode never
+  approached at all. An impact is a *sustained* rise and still clears 40 N/s
+  against a 20 ms baseline.
+- **Both seek laws answer a wrong-sign reading the same way.** `Fs` at or below
+  `min(−2, −0.5·Fd)` is a bounce or a flipped reading, not more force owed.
+  Without that guard the legacy PID reads `fe = Fd − Fs` growing without bound
+  and answers `Fs = −11.6 N` with full approach speed — that is what drove the
+  tool into the part right before a C153 protective stop.
+- **`v_slew_mps2` is 0.4, not 0.05.** At 0.05 a reversal from +8 to −8 mm/s
+  takes 0.32 s, so the loop keeps pressing ~1.3 mm after deciding to back off
+  (hardware printed `v_z=+0.0023 m/s` at `Fs=21.7 N`, `Fd=10 N` — the command
+  was already negative, the slew was still descending). The joint ramp is
+  separately bounded by `max_qddot`, so this only ever had to be gentle.
 - **`push_stop_frac_of_fd` is 1.0, not 0.5.** The ported guard zeroed every
   approach command from `0.5·Fd` upwards, which is right for DTC's *approach*
   phase handing off to the force loop but wrong for the loop that has to hold
@@ -118,6 +137,11 @@ Library data (`frames/`, laser `crop_meta`/offsets, `chamfer_ee.stl`) lives in
 `src/geodude_teleoperation/data/` and ships in the wheel, because module-scope
 defaults in `laser_frames`/`ee_viz` read it. The bulk meshes and scans stay in
 `assets/`, which belongs to `examples/` and is not packaged.
+
+`--contact-log` (on by default) streams one CSV row per force tick — `Fs`,
+`Fd`, `v_z`, the tare, and the dtc flags — next to `speedj_logs/`. It is
+flushed as it runs, so a protective-stopped or Ctrl+C'd session still leaves
+the record that explains it; the speedj `.npz` only lands on a clean exit.
 
 Hardware entry point is `examples/hardware_object_contact_teleop.py`. Contact
 lift-off fixes are behind three independent flags so a session can bisect them:
