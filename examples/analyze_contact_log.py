@@ -87,10 +87,19 @@ def _band(fs, fd, width):
 
 
 def summarize(path):
-    rows = list(csv.DictReader(Path(path).open()))
-    if not rows:
+    all_rows = list(csv.DictReader(Path(path).open()))
+    if not all_rows:
         print(f"{path}: empty")
         return
+
+    # Ticks logged while the robot was safety-halted are not the loop's doing:
+    # v_z was forced to zero and the arm was not moving. Report them, then
+    # exclude them, so tracking and guard percentages describe the ticks the
+    # loop was actually driving.
+    t_all = _col(all_rows, "t")
+    halted = np.array([r.get("mode") == "safety_halt" for r in all_rows])
+    rows = [r for r, h in zip(all_rows, halted) if not h] or all_rows
+
     t = _col(rows, "t")
     dt = _col(rows, "dt")
     fs = _col(rows, "Fs_n_raw")
@@ -102,8 +111,16 @@ def summarize(path):
     nominal = np.nanmedian(dt)
 
     print(f"\n=== {Path(path).name} ===")
-    print(f"{len(rows)} ticks over {np.nanmax(t) - np.nanmin(t):.1f}s"
+    print(f"{len(all_rows)} ticks over {np.nanmax(t_all) - np.nanmin(t_all):.1f}s"
           f"   Fd={np.nanmedian(fd):.1f}N   loop={1.0 / nominal:.0f}Hz")
+    if halted.any():
+        t0 = np.nanmin(t_all)
+        starts = np.flatnonzero(halted[1:] & ~halted[:-1]) + 1
+        if halted[0]:
+            starts = np.r_[0, starts]
+        when = ", ".join(f"t+{t_all[i] - t0:.1f}s" for i in starts[:6])
+        print(f"  !! robot safety-halted {starts.size}x, {_pct(halted):.1f}% of ticks"
+              f"  [{when}] -- excluded from everything below")
 
     print("\n-- loop period (the seek laws assume update_period) --")
     print(f"  dt  median={nominal * 1e3:.2f}ms  p95={np.nanpercentile(dt, 95) * 1e3:.2f}ms"

@@ -1094,6 +1094,23 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                     self._on_vz(0.0)
                 except Exception as exc:
                     print(f"on_vz failed: {exc}", flush=True)
+            # Keep logging through the stop. Returning early left the CSV blank
+            # for exactly the window worth reading -- what the force was doing
+            # while the robot was halted, and whether it settled before the
+            # operator cleared the pendant. mode marks the rows as not-commanded.
+            if self._log_writer is not None:
+                self._write_contact_log({
+                    "t": f"{now:.6f}", "elapsed": f"{elapsed:.4f}",
+                    "dt": f"{dt:.6f}", "mode": "safety_halt",
+                    "press_loop": self._press_loop,
+                    "fz_raw": f"{fz_raw:.4f}",
+                    "bias_x": f"{bias_tool[0]:.4f}",
+                    "bias_y": f"{bias_tool[1]:.4f}",
+                    "bias_z": f"{bias_tool[2]:.4f}",
+                    "Fs": f"{fs:.4f}", "Fd": f"{self._target_force:.3f}",
+                    "v_press": "0.0", "v_z": "0.0",
+                    "aborted": int(self._force_aborted),
+                })
             return np.zeros(6)
         if self._force_aborted:
             self._prev_v_z = 0.0
