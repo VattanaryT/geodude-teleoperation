@@ -237,3 +237,61 @@ class SpikeGuardNoiseTest(unittest.TestCase):
             _cmd, diag = pid.step(
                 n_base=N, force_base=[0.0, 0.0, fz], dt=DT, R_ee=np.eye(3))
         self.assertFalse(diag["spike"])
+
+
+class GuardAuthorityTest(unittest.TestCase):
+    """The guards must shape the seek, not remove it.
+
+    Measured on hardware (contact_20260826_145209.csv, 9152 ticks): SPIKE was
+    set on 75.4% of ticks, v_z was exactly 0 on 68.6%, and gain_scale reached
+    1.0 on 4.3%. Mean normal authority came out at ~0.9 mm/s against a 24 mm/s
+    lateral slide, so any slope past ~2 degrees outran the loop and the tool
+    left the surface -- "contact isn't very reactive".
+    """
+
+    def test_a_spike_well_under_target_caps_the_seek_rather_than_freezing_it(self):
+        pid = _make()
+        _settle(pid, 0.0, n=20)
+        # Fast enough to trip, but at half of Fd there is nothing to slam into:
+        # overshoot/mag_overload/fault are level checks and still own that.
+        _cmd, diag = pid.step(
+            n_base=N, force_base=[0.0, 0.0, -8.0], dt=DT, R_ee=np.eye(3))
+        self.assertTrue(diag["spike"])
+        self.assertGreater(diag["v_along_m_s"], 0.0)
+        self.assertLessEqual(
+            diag["v_along_m_s"], pid.config.spike_v_cap_m_s + 1e-12)
+
+    def test_a_spike_over_target_still_unloads(self):
+        pid = _make()
+        _settle(pid, 0.0, n=20)
+        _cmd, diag = pid.step(
+            n_base=N, force_base=[0.0, 0.0, -(FD + 10.0)], dt=DT, R_ee=np.eye(3))
+        self.assertTrue(diag["spike"])
+        self.assertLess(diag["v_along_m_s"], 0.0)
+
+    def test_a_sustained_spike_cuts_the_gain_only_on_the_rising_edge(self):
+        pid = _make()
+        _settle(pid, 0.0, n=20)
+        pid.step(n_base=N, force_base=[0.0, 0.0, -30.0], dt=DT, R_ee=np.eye(3))
+        self.assertLessEqual(pid._gain_scale, 0.5)
+        pid._gain_scale = 0.9                      # pretend it recovered
+        # Still inside spike_hold_s and still rising fast, so it trips again.
+        _cmd, diag = pid.step(
+            n_base=N, force_base=[0.0, 0.0, -70.0], dt=DT, R_ee=np.eye(3))
+        self.assertTrue(diag["spike"])
+        self.assertGreater(pid._gain_scale, 0.5)
+
+    def test_rate_damping_cannot_invert_the_seek(self):
+        # 2000 N/s x 0.00015 is 0.3 m/s of damping against an 8 mm/s ceiling.
+        # Uncapped that is not damping, it is full retract on a rising force.
+        pid = _make(spike_dF_dt_N_s=1e9, force_deadband_N=0.0)
+        _settle(pid, 0.0, n=20)
+        _cmd, diag = pid.step(
+            n_base=N, force_base=[0.0, 0.0, -10.0], dt=DT, R_ee=np.eye(3))
+        cap = pid.config.force_rate_damp_max_frac * pid.config.max_v_along_m_s
+        self.assertGreaterEqual(diag["v_along_m_s"], -cap - 1e-12)
+        self.assertGreater(diag["v_along_m_s"], 0.0)
+
+    def test_the_spike_threshold_clears_this_rigs_ordinary_variation(self):
+        """0.635 N per 5.18 ms tick is ~123 N/s of perfectly normal spread."""
+        self.assertGreater(ForcePIDConfig().spike_dF_dt_N_s, 123.0)

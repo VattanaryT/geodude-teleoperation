@@ -33,6 +33,25 @@ def _pct(mask):
     return 100.0 * float(np.count_nonzero(mask)) / max(1, mask.size)
 
 
+def _windowed_rate(t, fs, window_s=0.02):
+    """dFs/dt exactly as the spike guard measures it.
+
+    The guard differences against the oldest sample still inside
+    spike_rate_window_s, not against the previous tick. A single-tick estimate
+    overstates it on a noisy signal, which is the number that matters when
+    choosing spike_dF_dt_N_s.
+    """
+    ok = np.isfinite(t) & np.isfinite(fs)
+    t, fs = t[ok], fs[ok]
+    if t.size < 2:
+        return np.zeros(0)
+    j = np.searchsorted(t, t - window_s, side="left")
+    j = np.minimum(j, np.arange(t.size))
+    span = t - t[j]
+    good = span > 1e-9
+    return (fs[good] - fs[j][good]) / span[good]
+
+
 def _band(fs, fd, width):
     ok = np.isfinite(fs) & np.isfinite(fd)
     return _pct(ok & (np.abs(fs - fd) <= width)) if ok.any() else 0.0
@@ -67,14 +86,25 @@ def summarize(path):
           f"  p95={np.nanpercentile(fs, 95):+.2f}N")
     print(f"  |dFs|   median={np.median(np.abs(d)):.3f}N  p95={np.percentile(np.abs(d), 95):.3f}N"
           f"  max={np.max(np.abs(d)):.2f}N   (per tick)")
-    print(f"  implied rate at p95: {np.percentile(np.abs(d), 95) / nominal:.0f} N/s"
-          "   (spike_dF_dt_N_s is 40)")
+    rate = np.abs(_windowed_rate(t, fs))
+    if rate.size:
+        p99 = np.percentile(rate, 99)
+        print(f"  dFs/dt over the guard's 20ms window: median={np.median(rate):.0f}"
+              f"  p95={np.percentile(rate, 95):.0f}  p99={p99:.0f}"
+              f"  max={rate.max():.0f} N/s")
+        print(f"  -> a threshold near {50 * round(p99 * 1.5 / 50):.0f} N/s sits above"
+              f" ordinary variation and below the {rate.max():.0f} N/s peak."
+              "  (default is 250)")
 
     print("\n-- tracking --")
     for w in (0.5, 1.0, 2.0):
         print(f"  |Fs-Fd| <= {w:.1f}N : {_band(fs, fd, w):5.1f}% of ticks")
     print(f"  v_z == 0 exactly  : {_pct(v_z == 0.0):5.1f}%   "
           f"(a held guard, not a settled loop)")
+    auth = np.nanmean(np.abs(v_z)) * 1e3
+    print(f"  mean |v_z|        : {auth:5.2f} mm/s   "
+          "<- normal authority. Compare to how fast you slide laterally: "
+          "the surface has to not recede faster than this.")
     print(f"  gain_scale        : median={np.nanmedian(gain):.2f}"
           f"  at 1.0 for {_pct(gain >= 0.999):.1f}% of ticks")
 

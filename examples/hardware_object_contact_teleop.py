@@ -352,6 +352,19 @@ def build_arg_parser():
         help="let field-follow keep discarding vf.project()'s position, so the "
              "commanded point never re-snaps to the mesh (previous behavior)")
     parser.add_argument(
+        "--press-v-max", type=float, default=0.008, metavar="M_S",
+        help="ceiling on the along-normal seek speed. Raise this only after "
+             "the guards are letting the loop run -- check `spike %%` and "
+             "`v_z == 0` in analyze_contact_log.py first, or you are just "
+             "raising the speed of an impact.")
+    parser.add_argument(
+        "--approach-v", type=float, default=0.005, metavar="M_S",
+        help="soft feed speed while |Fs| is below contact_threshold_N")
+    parser.add_argument(
+        "--spike-rate", type=float, default=None, metavar="N_S",
+        help="override the dtc spike guard's rate threshold (default 250 N/s, "
+             "set from this rig's measured tick-to-tick force spread)")
+    parser.add_argument(
         "--v-slew", type=float, default=0.4, metavar="M_S2",
         help="press-velocity slew limit (m/s^2). At the old 0.05 a reversal "
              "took 0.32s, so the loop kept pressing ~1.3mm after it had "
@@ -552,8 +565,10 @@ def main():
         contact_controller = ContactTeleoperationController(
             vf, contact_config, target_force=args.target_force,
             kp_force=0.001, ki_force=0.0003,
-            v_approach=0.005, max_v_hold=0.008, z_damping=z_damping,
+            v_approach=args.approach_v, max_v_hold=args.press_v_max,
+            z_damping=z_damping,
             v_slew_mps2=args.v_slew, lost_s=1.0, sit_s=2.0,
+            spike_dF_dt_N_s=args.spike_rate,
             force_sign=args.force_sign,
             press_loop=args.press_loop,
             force_tare=args.force_tare,

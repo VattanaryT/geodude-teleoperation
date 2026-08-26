@@ -63,6 +63,22 @@ These are established, not guesses. Trusting the wrong one here moves hardware.
   loops authoritative on the same axis is the fight that produces drift.
 - **Never keep inching into a rigid stop (C153).** At or over target, press
   velocity is 0 or retract. speedJ cannot yield.
+- **The dtc guards must shape the seek, not own it.** Measured on this rig
+  (`contact_20260826_145209.csv`, 9152 ticks): `SPIKE` on 75.4% of ticks, `v_z`
+  exactly 0 on 68.6%, `gain_scale` at 1.0 on 4.3% — about **0.9 mm/s of mean
+  normal authority against a 24 mm/s lateral slide**, so any slope past ~2°
+  outran the loop and the tool left the surface. Three constants, all inherited
+  from the in-contact-dtc rig's F/T sensor, were doing it:
+  `spike_dF_dt_N_s` 40 → **250** (ordinary tick-to-tick spread here is already
+  ~123 N/s; a real impact hit 1260 N/s); the spike gain cut is now
+  **rising-edge only** (re-cutting every tick outpaced `osc_recover_per_s`);
+  and a spike **under** target now clamps to `spike_v_cap_m_s` instead of
+  zeroing, because overshoot/mag_overload/fault are *level* checks on `fs_raw`
+  and far more trustworthy than any rate on this signal.
+- **`force_rate_damp_max_frac` bounds the rate damping at 0.5·`max_v_along`.**
+  Uncapped, `0.00015 m/s per N/s` subtracts 5.6 mm/s at this rig's median rate
+  and 18.5 mm/s at p95, against an 8 mm/s ceiling. Past 1.0× it does not damp
+  the seek, it inverts it — a rising force commands full retract.
 - **`spike_dF_dt_N_s` is a rate over `spike_rate_window_s` (20 ms), not over one
   tick, and only counts while `|Fs| ≥ contact_threshold_N`.** At 200 Hz a
   single-tick difference turns UR's own ±0.3 N of noise into ±120 N/s, well
@@ -76,7 +92,9 @@ These are established, not guesses. Trusting the wrong one here moves hardware.
   nominal. Nominal dt rescales the integral and the LPF pole and inflates the
   spike guard's rate by the same ratio — dividing a real ~32 ms change by a
   nominal 20 ms baseline manufactures trips. `_tick_dt()` measures it and the
-  `dt` column in the contact CSV shows what it actually is.
+  `dt` column in the contact CSV shows what it actually is. **Measured: 5.18 ms
+  median against 5.00 nominal** — worth ~4%, not the 2× that was suspected, so
+  this is correct but was never the cause of anything.
 - **Both seek laws answer a wrong-sign reading the same way.** `Fs` at or below
   `min(−2, −0.5·Fd)` is a bounce or a flipped reading, not more force owed.
   Without that guard the legacy PID reads `fe = Fd − Fs` growing without bound

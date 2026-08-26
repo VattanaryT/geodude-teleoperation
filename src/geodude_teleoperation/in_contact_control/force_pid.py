@@ -68,11 +68,35 @@ class ForcePIDConfig:
     # Active damping on force rate: v -= k_damp * dFs/dt  (cuts bounce)
     # Only applied when force is *rising* (impact), not when force drops.
     force_rate_damp_m_s_per_Nps: float = 0.00015  # stronger bounce damping
-    # Spike: raw Fs *rising* faster than this → retract briefly (impact only).
+    # ...but never let it remove more than this fraction of max_v_along.
+    # Uncapped it is scaled for the rig this loop was ported from: at the
+    # rates measured here it subtracts 5.6 mm/s at the median and 18.5 mm/s at
+    # p95, against an 8 mm/s ceiling. Past 1.0x it does not damp the seek, it
+    # inverts it -- a rising force would command full retract. Damping should
+    # shape the response, not own it, and this bound holds even if the gain is
+    # wrong by 5x for a given surface.
+    force_rate_damp_max_frac: float = 0.5
+    # Spike: raw Fs *rising* faster than this → hold back briefly (impact only).
     # Trips must use fs_raw: 5 Hz LPF hid 400 N/s impacts in contact_motion.csv.
     # Force *drops* must NOT freeze — we need to re-approach quickly.
-    spike_dF_dt_N_s: float = 40.0
+    #
+    # 40 N/s came from the in-contact-dtc rig's F/T sensor. Measured on this
+    # one (contact_20260826_145209.csv, 9152 ticks): ordinary tick-to-tick
+    # |dFs| is 0.19 N median / 0.635 N p95, which is already ~123 N/s — three
+    # times the old threshold — so the guard fired on 75.4% of ticks and held
+    # v_z at exactly 0 for 68.6%. That left ~0.9 mm/s of average normal
+    # authority against a 24 mm/s lateral slide, which is why contact felt
+    # unreactive and dropped off the surface whenever the operator moved.
+    # A genuine impact in the same log peaked at 6.5 N/tick ≈ 1260 N/s, so
+    # there is a wide gap to sit in.
+    spike_dF_dt_N_s: float = 250.0
     spike_hold_s: float = 0.15
+    # While a spike holds and Fs is still *under* target, clamp the seek to
+    # this instead of zeroing it. A fast rise at 3 N with Fd=10 N cannot slam
+    # through anything -- overshoot/mag_overload/fault own that, and they are
+    # level checks on fs_raw, which is far more robust on a noisy signal than
+    # any rate. Freezing there only stops the loop converging.
+    spike_v_cap_m_s: float = 0.002
     # Window the raw rate is measured over. A single 200 Hz tick turns the UR
     # sensor's own ±0.3 N noise into ±120 N/s, permanently above
     # spike_dF_dt_N_s: the guard latched, v_along stayed pinned at 0 and
@@ -294,9 +318,13 @@ class ForcePIDController:
             if (d_fs_raw >= float(c.spike_dF_dt_N_s)
                     and abs(fs_raw) >= float(c.contact_threshold_N)):
                 spike_flag = 1.0
+                if self._spike_timer <= 0.0:
+                    # Rising edge only. Re-cutting on every tick of a sustained
+                    # run pinned gain_scale at 0.5 -- it reached 1.0 on 4.3% of
+                    # ticks -- because osc_recover_per_s could never outpace it.
+                    self._integral = 0.0
+                    self._gain_scale = min(self._gain_scale, 0.5)
                 self._spike_timer = max(self._spike_timer, float(c.spike_hold_s))
-                self._integral = 0.0
-                self._gain_scale = min(self._gain_scale, 0.5)
             if self._spike_timer > 0.0:
                 self._spike_timer = max(0.0, self._spike_timer - dt)
                 spike_flag = 1.0
@@ -366,7 +394,9 @@ class ForcePIDController:
             # Active damping only when force is rising (impact/bounce), not on drop
             k_damp = float(c.force_rate_damp_m_s_per_Nps)
             if d_fs_raw > 0.0:
-                v_along -= k_damp * d_fs_raw
+                damp_cap = abs(float(c.force_rate_damp_max_frac)) * float(
+                    c.max_v_along_m_s)
+                v_along -= min(k_damp * d_fs_raw, damp_cap)
 
             # Soft approach whenever |Fs| is still light, or after wrong-sign exit.
             soft = (
@@ -380,14 +410,15 @@ class ForcePIDController:
                 elif fe < 0 and v_along < -v_app:
                     v_along = -v_app
 
-            # Spike: unload if already above Fd; else hold (don't push through impact)
+            # Spike: unload if already above Fd; else cap (don't freeze).
             if self._spike_timer > 0.0:
                 if fd >= 0.0 and fs_raw > fd:
                     v_along = -unload
                 elif fd < 0.0 and fs_raw < fd:
                     v_along = unload
                 else:
-                    v_along = 0.0
+                    cap = abs(float(c.spike_v_cap_m_s))
+                    v_along = float(np.clip(v_along, -cap, cap))
 
             # Oscillation hold: freeze normal motion briefly after Fe chatter
             if self._osc_hold_timer > 0.0:

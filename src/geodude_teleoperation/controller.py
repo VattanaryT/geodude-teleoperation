@@ -582,7 +582,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                  press_loop="dtc", measured_force_fn=None, force_tare=True,
                  force_tare_samples=20, force_tare_period=0.002,
                  wrong_sign_fs_n=-2.0, wrong_sign_fd_frac=0.5,
-                 unload_v_m_s=0.004):
+                 unload_v_m_s=0.004, spike_dF_dt_N_s=None):
         super().__init__(config)
         self.vf = vf
         self._target_force = abs(float(target_force))
@@ -663,6 +663,8 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                 kd=self._kd_force,
                 wrench_in_tool_frame=True,
             ))
+            if spike_dF_dt_N_s is not None:
+                self._pid.config.spike_dF_dt_N_s = float(spike_dF_dt_N_s)
         # Surface normal (base frame) and tool->base rotation for the dtc loop,
         # pushed in by the field-follow tick. Falls back to the live tool Z.
         self._n_star = None
