@@ -73,6 +73,53 @@ def test_keyboard_teleop_actually_invokes_the_on_button_callback():
         "toggle, are dead. SpaceMouseTeleop does call its on_button.")
 
 
+def test_keyboard_dispatch_routes_the_documented_keys():
+    """Behavioral cover for the same contract the AST check above approximates."""
+    kb = KeyboardTeleop()
+    seen = {"button": [], "twist": 0, "key": [], "quit": 0}
+    kb._on_twist = lambda twist: seen.__setitem__("twist", seen["twist"] + 1)
+    kb._on_button = seen["button"].append
+    kb._interrupt = lambda: seen.__setitem__("quit", seen["quit"] + 1)
+    kb._running.set()
+
+    # No on_key registered: 't'/'v' are the documented buttons 0 and 1.
+    assert kb._dispatch("t") is True
+    assert kb._dispatch("v") is True
+    assert seen["button"] == [0, 1]
+
+    # A movement key still moves; an unmapped key is simply ignored.
+    assert kb._dispatch("w") is True
+    assert kb._dispatch("?") is True
+    assert seen["twist"] == 1
+
+    # 'q' quits via the same KeyboardInterrupt path as Ctrl+C.
+    assert kb._dispatch("q") is False
+    assert seen["quit"] == 1
+    assert not kb._running.is_set()
+
+
+def test_keyboard_on_key_claims_t_only_while_it_wants_it():
+    """Startup align owns 't' while waiting, then hands it back to button 0.
+
+    on_key returns truthy to claim a key. If it always won, `--device keyboard`
+    would lose the approach<->contact toggle again the moment an example
+    registered an on_key handler.
+    """
+    kb = KeyboardTeleop()
+    claimed = {"on": True}
+    buttons = []
+    kb._on_twist = lambda twist: None
+    kb._on_button = buttons.append
+    kb._on_key = lambda key: claimed["on"]
+    kb._running.set()
+
+    kb._dispatch("t")
+    assert buttons == [], "on_key returned truthy but 't' still fell through"
+    claimed["on"] = False  # align finished: apply_terminal_key returns None
+    kb._dispatch("t")
+    assert buttons == [0], "on_key declined 't' but it never reached on_button"
+
+
 def test_spacemouse_teleop_actually_invokes_the_on_button_callback():
     assert _self_attr_calls(PKG / "spacemouse.py", "_on_button") > 0
 
@@ -179,10 +226,15 @@ def test_keyboard_step_maps_to_the_documented_twist_axes():
 
 def test_keyboard_help_text_matches_the_actual_key_map():
     """The help banner advertises 'q: quit'; an operator will press it."""
-    from geodude_teleoperation.keyboard import KEYBOARD_HELP, _KEY_TWIST
+    from geodude_teleoperation.keyboard import (
+        KEYBOARD_HELP, _KEY_BUTTON, _KEY_PASSTHROUGH, _KEY_QUIT, _KEY_TWIST)
 
     advertised = {"t", "v", "q"}
-    handled = set(_KEY_TWIST) | {"t", "T", "\n", "\r"}  # see KeyboardTeleop._run
+    # Derived from the module, not hardcoded: a key added to the banner and to
+    # exactly one of these maps should pass, and one added to the banner alone
+    # should fail. See KeyboardTeleop._run for the dispatch order.
+    handled = (set(_KEY_TWIST) | set(_KEY_BUTTON) | set(_KEY_QUIT)
+               | set(_KEY_PASSTHROUGH))
     unhandled = sorted(k for k in advertised if k in KEYBOARD_HELP
                        and k not in handled)
     assert unhandled == [], (

@@ -21,14 +21,18 @@ from pathlib import Path
 
 import numpy as np
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_T_LEFT = _REPO_ROOT / "assets" / "frames" / "T_left_base_vention.json"
-DEFAULT_T_RIGHT = _REPO_ROOT / "assets" / "frames" / "T_right_base_vention.json"
-DEFAULT_CROP_META = _REPO_ROOT / "assets" / "laser_profilometer" / "crop_meta.json"
+# Package data, not repo assets: these are read by module-scope defaults, so
+# they have to survive `pip install`. `Path(__file__).parent.parent.parent`
+# only lands on the repo's assets/ from a source checkout -- from
+# site-packages the same expression points at the venv's lib dir.
+_DATA = Path(__file__).resolve().parent / "data"
+DEFAULT_T_LEFT = _DATA / "frames" / "T_left_base_vention.json"
+DEFAULT_T_RIGHT = _DATA / "frames" / "T_right_base_vention.json"
+DEFAULT_CROP_META = _DATA / "laser_profilometer" / "crop_meta.json"
 DEFAULT_TAG0_OFFSET = (
-    _REPO_ROOT / "assets" / "laser_profilometer" / "crop_meta.object_offset.json")
+    _DATA / "laser_profilometer" / "crop_meta.object_offset.json")
 DEFAULT_LASER_OFFSET = (
-    _REPO_ROOT / "assets" / "laser_profilometer" / "merged.laser_offset.json")
+    _DATA / "laser_profilometer" / "merged.laser_offset.json")
 
 
 def is_laser_left_base_object(path) -> bool:

@@ -1,3 +1,10 @@
+# Without this table pip falls back to legacy setuptools behaviour, and any
+# setuptools older than 61 (59.6 on the ROS2 Humble boxes) ignores [project]
+# entirely -- the wheel then builds as UNKNOWN-0.0.0 with zero modules in it.
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "geodude-teleoperation"
 version = "0.1.0"
@@ -11,6 +18,7 @@ dependencies = [
     "rtree",
     "pyspacemouse",
     "pymeshlab",
+    "robust-laplacian",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +34,13 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Frames, scan metadata and the chamfer mesh are read by module-scope defaults
+# in laser_frames/ee_viz, so they are library data and must ship in the wheel.
+# The bulk assets under assets/ stay out: they belong to examples/, not to the
+# importable package.
+[tool.setuptools.package-data]
+geodude_teleoperation = ["data/**/*"]
 
 [tool.pytest.ini_options]
 addopts = "-p no:launch_testing -p no:launch_ros -p no:launch_pytest"

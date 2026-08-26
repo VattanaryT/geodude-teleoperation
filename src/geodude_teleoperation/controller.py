@@ -577,7 +577,8 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                  dead_wrench_eps_n=0.05, contact_engage_n=None, contact_release_n=0.4,
                  fz_tau_s=0.03, v_approach=0.005, max_v_hold=0.005, lost_s=1.0,
                  z_damping=200.0, v_slew_mps2=0.05, contact_sign_n=None, sit_s=2.0,
-                 press_loop="dtc", measured_force_fn=None):
+                 press_loop="dtc", measured_force_fn=None, force_tare=True,
+                 force_tare_samples=20, force_tare_period=0.002):
         super().__init__(config)
         self.vf = vf
         self._target_force = abs(float(target_force))
@@ -610,6 +611,19 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._measured_force_fn = measured_force_fn
         self._dead_wrench_abort_s = max(0.0, float(dead_wrench_abort_s))
         self._dead_wrench_eps_n = max(0.0, float(dead_wrench_eps_n))
+
+        # Free-space force offset, tool frame. UR ActualTCPForce is not gravity
+        # compensated unless the payload is configured, and the speedj backend
+        # never issues zero_ftsensor() (only the force_mode URScript does), so a
+        # perfectly live sensor reads several N of tool weight with nothing
+        # touching. Both seek laws subtract this; the dead-feedback abort does
+        # not, because it has to keep telling "live sensor, constant offset"
+        # apart from "get_wrench() is dead" (C153A1).
+        self._force_bias = np.zeros(3)
+        self._force_bias_valid = False
+        self._force_tare = bool(force_tare)
+        self._force_tare_samples = max(1, int(force_tare_samples))
+        self._force_tare_period = max(0.0, float(force_tare_period))
 
         if press_loop not in ("dtc", "legacy"):
             raise ValueError(f"press_loop must be 'dtc' or 'legacy', got {press_loop!r}")
@@ -713,12 +727,53 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
             self._interface.get_state().get_wrench().to_array(), dtype=float).reshape(6)
         return float(wrench[3])
 
-    def _read_force_tool(self):
-        """Tool-frame (fx, fy, fz) in N for the dtc loop; falls back to (0, 0, fz)."""
+    def _read_force_tool_raw(self):
+        """Untared tool-frame (fx, fy, fz) in N; falls back to (0, 0, fz)."""
         if self._measured_force_fn is not None:
             return np.asarray(
                 self._measured_force_fn(), dtype=float).reshape(-1)[:3].copy()
         return np.array([0.0, 0.0, self._read_fz_raw()], dtype=float)
+
+    def _read_force_tool(self):
+        """Tare-corrected tool-frame (fx, fy, fz) in N for the dtc loop."""
+        return self._read_force_tool_raw() - self._force_bias
+
+    def tare_force(self, samples=None, period=None):
+        """Sample the free-space force offset. Tool must be clear of the part.
+
+        Without this the dtc loop trips on the raw payload weight the instant
+        contact latches: at Fd=5 N, ``wrong_sign`` fires at Fs <= -2.5 N and
+        ``mag_overload`` at |Fs| > 6 N, and both command ``-unload_v_m_s``, so
+        the arm retracts at 4 mm/s and never approaches. The legacy loop does
+        not trip on it but regulates the offset instead of the contact force --
+        the same bug with a quieter symptom.
+
+        The bias is a tool-frame constant while the tool's weight is fixed in
+        base, so it is only valid near the orientation it was taken at. Take it
+        close to the press pose, and re-take it after a large wrist move.
+        Returns the bias, or None if there is no force reader.
+        """
+        if self._measured_force_fn is None and self._measured_fz_fn is None:
+            return None
+        n = self._force_tare_samples if samples is None else max(1, int(samples))
+        dt = self._force_tare_period if period is None else max(0.0, float(period))
+        acc = []
+        for i in range(n):
+            try:
+                acc.append(self._read_force_tool_raw())
+            except Exception as exc:
+                print(f"force tare read failed: {exc}", flush=True)
+                return None
+            if dt > 0.0 and i + 1 < n:
+                time.sleep(dt)
+        self._force_bias = np.mean(np.asarray(acc, dtype=float), axis=0)
+        self._force_bias_valid = True
+        return self._force_bias.copy()
+
+    def clear_force_tare(self):
+        """Forget the tare so the next ``start()`` takes a fresh one."""
+        self._force_bias = np.zeros(3)
+        self._force_bias_valid = False
 
     def _press_axis_base(self):
         """Press direction in base frame, and its component along tool Z.
@@ -818,7 +873,10 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
 
     def _compute_force_command(self):
         fz_raw = self._read_fz_raw()
-        fs = self._fs(fz_raw)
+        # Legacy seek regulates the tared reading; the abort below still looks
+        # at fz_raw, since a live sensor sitting on a constant offset must not
+        # read as dead feedback.
+        fs = self._fs(fz_raw - float(self._force_bias[2]))
         now = time.monotonic()
         elapsed = 0.0 if self._t_start is None else now - self._t_start
 
@@ -894,7 +952,8 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                     )
                 print(
                     f"contact force[{src}/{self._press_loop}]: mode={self._z_mode}  "
-                    f"fz_raw={fz_raw:+.2f}N  "
+                    f"fz_raw={fz_raw:+.2f}N  bias_z={self._force_bias[2]:+.2f}N"
+                    f"{'' if self._force_bias_valid else '(untared)'}  "
                     f"Fs={fs:+.2f}N  Fd={self._target_force:.1f}N  "
                     f"v_z={v_z:+.4f}m/s  Fext=0  sign={self._press_sign:+.0f}"
                     f"{'  sit' if sit else ''}{extra}",
@@ -918,7 +977,13 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                 self.set_desired_wrench(desired)
             time.sleep(self._update_period)
 
-    def start(self):
+    def _reset_press_loop(self):
+        """Clear every piece of seek state a contact session accumulates.
+
+        Split out of ``start()`` so it can be asserted on without spawning the
+        200 Hz thread -- that thread used to re-accumulate the integral before
+        the assertion ran, so the reset looked broken when it was not.
+        """
         self._integral = 0.0
         self._prev_error = None
         self._force_aborted = False
@@ -932,13 +997,34 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._prev_v_z = None
         self._external_wrench = np.zeros(6)
         self._last_diag = {}
+        self._t_last_log = None
         if self._pid is not None:
             # Same reason as the legacy integrator reset: a second start() must
             # not inherit windup, LPF state or a cut gain_scale from the
             # previous contact session.
             self._pid.reset()
+
+    def start(self):
+        self._reset_press_loop()
+        # Tare once per session, not per entry: the first contact entry is from
+        # free space by construction (the loop has to approach), while a later
+        # re-entry can happen with the tool already loaded, where taring would
+        # zero out real contact force and press Fd on top of it. Call
+        # clear_force_tare() to force a fresh one.
+        if self._force_tare and not self._force_bias_valid:
+            bias = self.tare_force()
+            if bias is None:
+                print(
+                    "\033[93mforce tare skipped: no force reader\033[0m",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"force tare (tool frame, free space): "
+                    f"fx={bias[0]:+.2f} fy={bias[1]:+.2f} fz={bias[2]:+.2f} N",
+                    flush=True,
+                )
         self._t_start = time.monotonic()
-        self._t_last_log = None
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()

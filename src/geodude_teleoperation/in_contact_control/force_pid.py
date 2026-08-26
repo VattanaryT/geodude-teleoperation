@@ -84,6 +84,13 @@ class ForcePIDConfig:
     # High |Fs| trip: retract-only (never freeze — freeze traps the load).
     fault_abs_fs_N: float = 40.0
     fault_fd_mult: float = 1.35  # trip near |Fd|; was 6.0 (never tripped at Fd=70)
+    # Stop pushing once |Fs| reaches this fraction of |Fd|. This is a hard
+    # backstop on top of the PID (CLAUDE.md: never keep inching into a rigid
+    # stop -- speedJ cannot yield). It was 0.5 when this loop was ported, which
+    # is right for DTC's *approach* phase handing off to the force loop, but
+    # wrong here: this is the loop that has to hold Fd, and at 0.5 the seek
+    # zeroed itself at half the commanded force and could never reach target.
+    push_stop_frac_of_fd: float = 1.0
     # Oscillation: many Fe sign flips → scale down Kp/Ki in real time
     osc_window_s: float = 0.45
     osc_sign_flips_trigger: int = 3
@@ -394,11 +401,12 @@ class ForcePIDController:
                 else:
                     v_along = unload
 
-            # Near / above target: stop pushing into the surface. DualLoop was
+            # At / above target: stop pushing into the surface. DualLoop was
             # still driving approach when Fs jumped 0.6→22 N before DTC handoff.
-            if fd >= 0.0 and fs_raw >= 0.5 * abs(fd) and v_along > 0.0:
+            stop_frac = abs(float(c.push_stop_frac_of_fd))
+            if fd >= 0.0 and fs_raw >= stop_frac * abs(fd) and v_along > 0.0:
                 v_along = 0.0
-            if fd < 0.0 and fs_raw <= 0.5 * fd and v_along < 0.0:
+            if fd < 0.0 and fs_raw <= stop_frac * fd and v_along < 0.0:
                 v_along = 0.0
 
         # Clip along-line speed

@@ -355,18 +355,125 @@ class DtcPressLoopTest(unittest.TestCase):
         ctrl2._compute_force_command()
         self.assertAlmostEqual(seen2[-1], straight * np.cos(a), places=6)
 
-    def test_start_resets_the_ported_loop(self):
+    def test_reset_press_loop_clears_the_ported_loop(self):
         ctrl = self._dtc(measured_force_fn=lambda: (0.0, 0.0, 0.0))
         ctrl._pid._integral = 5.0
         ctrl._pid._gain_scale = 0.2
+        ctrl._reset_press_loop()
+        self.assertEqual(ctrl._pid._integral, 0.0)
+        self.assertEqual(ctrl._pid._gain_scale, 1.0)
+
+    def test_start_resets_the_ported_loop(self):
+        """start() must reset before the seek thread gets going.
+
+        _integral cannot be the witness here: start() spawns the seek thread,
+        which begins integrating immediately, so it is nonzero again by the
+        time stop() returns -- that raced, it never caught a bug.
+        _gain_scale is honest, because recovery is osc_recover_per_s (0.25/s)
+        and a few ms of thread cannot lift a stale 0.2 anywhere near 1.0.
+        See test_reset_press_loop_clears_the_ported_loop for the integral.
+        """
+        ctrl = self._dtc(
+            measured_force_fn=lambda: (0.0, 0.0, 0.0), force_tare=False)
+        ctrl._pid._gain_scale = 0.2
         ctrl.start()
         ctrl.stop()
-        self.assertEqual(ctrl._pid._integral, 0.0)
         self.assertEqual(ctrl._pid._gain_scale, 1.0)
 
     def test_rejects_an_unknown_press_loop(self):
         with self.assertRaises(ValueError):
             _make_controller(press_loop="nope")
+
+
+
+class ForceTareTest(unittest.TestCase):
+    """The free-space force offset has to be subtracted before either seek law.
+
+    UR's ActualTCPForce is not gravity compensated unless the payload is
+    configured, and the speedj backend never issues zero_ftsensor() -- only the
+    force_mode URScript does. So a perfectly live sensor reads the tool's own
+    weight with nothing touching, and the dtc loop's safety trips fire on it the
+    instant contact latches.
+    """
+
+    OFFSET = (0.0, 0.0, 4.0)  # tool-frame payload weight seen in free space
+    FD = 5.0
+
+    def _ctrl(self, **kwargs):
+        params = dict(
+            press_loop="dtc", target_force=self.FD, force_sign=1.0,
+            max_v_hold=0.008, v_approach=0.005, log_period_s=0.0,
+            dead_wrench_abort_s=0.0,
+            measured_force_fn=lambda: self.OFFSET,
+            force_tare_samples=3, force_tare_period=0.0)
+        params.update(kwargs)
+        ctrl = _make_controller(**params)
+        ctrl._R_tool_to_base = np.eye(3)
+        ctrl._t_start = time.monotonic()
+        return ctrl
+
+    def test_untared_offset_retracts_instead_of_approaching(self):
+        # +4 N of tool weight reads Fs = -4 N, past wrong_sign
+        # (min(-2, -0.5*Fd) = -2.5 at Fd=5), and the loop then commands
+        # -unload_v_m_s forever: button 0 walked the arm away from the part.
+        ctrl = self._ctrl(force_tare=False)
+        seen = []
+        ctrl.set_on_vz(seen.append)
+        ctrl._compute_force_command()
+        self.assertLess(seen[-1], 0.0)
+        self.assertTrue(ctrl._last_diag["wrong_sign"])
+
+    def test_tare_turns_the_same_offset_into_an_approach(self):
+        ctrl = self._ctrl()
+        ctrl.tare_force()
+        seen = []
+        ctrl.set_on_vz(seen.append)
+        ctrl._compute_force_command()
+        self.assertGreater(seen[-1], 0.0)
+        self.assertAlmostEqual(ctrl._last_diag["Fs_raw_N"], 0.0, places=9)
+
+    def test_tare_also_corrects_the_legacy_reading(self):
+        # Legacy never tripped on the offset, but it regulated the offset
+        # instead of the contact force -- same bug, quieter symptom.
+        ctrl = self._ctrl(press_loop="legacy", measured_fz_fn=lambda: 4.0)
+        ctrl.tare_force()
+        seen = []
+        ctrl.set_on_vz(seen.append)
+        ctrl._compute_force_command()
+        self.assertGreater(seen[-1], 0.0)
+
+    def test_start_tares_once_per_session(self):
+        ctrl = self._ctrl()
+        ctrl.start()
+        ctrl.stop()
+        self.assertTrue(ctrl._force_bias_valid)
+        np.testing.assert_allclose(ctrl._force_bias, self.OFFSET)
+        first = ctrl._force_bias.copy()
+        # Re-entering contact must not re-tare: by then the tool can already be
+        # loaded, and taring there would zero real contact force and press Fd on
+        # top of it.
+        ctrl._measured_force_fn = lambda: (0.0, 0.0, 99.0)
+        ctrl.start()
+        ctrl.stop()
+        np.testing.assert_allclose(ctrl._force_bias, first)
+        ctrl.clear_force_tare()
+        self.assertFalse(ctrl._force_bias_valid)
+        np.testing.assert_allclose(ctrl._force_bias, np.zeros(3))
+
+    def test_tare_does_not_hide_a_live_sensor_from_the_dead_feedback_guard(self):
+        # The abort reads fz_raw on purpose: a live sensor sitting on a constant
+        # offset must not look dead once the offset is tared out (C153A1).
+        ctrl = self._ctrl(dead_wrench_abort_s=0.05)
+        ctrl.tare_force()
+        ctrl._t_start = time.monotonic() - 1.0
+        ctrl._compute_force_command()
+        self.assertTrue(ctrl._force_feedback_seen)
+        self.assertFalse(ctrl._force_aborted)
+
+    def test_no_force_reader_means_no_tare(self):
+        ctrl = self._ctrl(measured_force_fn=None, measured_fz_fn=None)
+        self.assertIsNone(ctrl.tare_force())
+        self.assertFalse(ctrl._force_bias_valid)
 
 
 if __name__ == "__main__":

@@ -341,6 +341,14 @@ def build_arg_parser():
         action="store_false", default=True,
         help="let field-follow keep discarding vf.project()'s position, so the "
              "commanded point never re-snaps to the mesh (previous behavior)")
+    parser.add_argument(
+        "--no-force-tare", dest="force_tare", action="store_false", default=True,
+        help="do not sample the free-space force offset when contact first "
+             "latches. UR ActualTCPForce is not gravity compensated unless the "
+             "payload is set, and the speedj backend never issues "
+             "zero_ftsensor(), so without the tare the dtc loop trips "
+             "wrong_sign/mag_overload on the tool weight and retracts instead "
+             "of approaching")
     parser.add_argument("--no-viz", action="store_true",
                         help="disable the viser visualization")
     parser.add_argument(
@@ -527,6 +535,7 @@ def main():
             v_slew_mps2=0.05, lost_s=1.0, sit_s=2.0,
             force_sign=args.force_sign,
             press_loop=args.press_loop,
+            force_tare=args.force_tare,
             measured_fz_fn=measured_fz_fn,
             measured_force_fn=measured_force_fn)
         contact_controller.set_task_space(task_space)
@@ -672,6 +681,12 @@ def main():
         threading.Thread(target=_run, daemon=True, name="align-keys").start()
 
     def on_align_key(key):
+        """Return True when startup align claims the key.
+
+        KeyboardTeleop offers 't'/Enter here first and falls through on a
+        falsy return, which is how 't' reaches on_button(0) -- the
+        approach<->contact toggle -- once align has finished with it.
+        """
         msg = apply_terminal_key(key, align=align, sim_teleop=sim_teleop)
         if msg == "sim_on":
             print(
@@ -686,6 +701,7 @@ def main():
             )
         elif msg == "align":
             print("startup align: Enter received", flush=True)
+        return msg is not None
 
     def run_startup_align(T_flange, T_ee):
         if align is None or mode["active"] != "approach":

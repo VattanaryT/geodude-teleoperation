@@ -4,6 +4,7 @@ These tests encode expectations that hold for *any* installable Python package,
 so a failure here is a packaging/cohesion defect rather than a taste question.
 """
 import ast
+import os
 import pathlib
 import subprocess
 import sys
@@ -145,8 +146,13 @@ def test_importing_the_package_has_no_side_effects():
         "assert after == before, f'import started {after - before} thread(s)'\n"
         "print('OK')\n"
     )
-    env = {"PYTHONPATH": str(PKG.parent), "PATH": "/usr/bin:/bin",
-           "HOME": str(REPO)}
+    # Inherit the environment rather than building one: overriding HOME turned
+    # off user site-packages, so gafropy (installed under ~/.local on the
+    # hardware box) vanished and this reported an ImportError as an import side
+    # effect. Only PYTHONPATH needs forcing, for the no-install case.
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(PKG.parent)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
     proc = subprocess.run([sys.executable, "-c", script], capture_output=True,
                           text=True, env=env, timeout=180)
     assert proc.returncode == 0, (
@@ -190,7 +196,18 @@ def test_library_default_asset_paths_live_inside_the_package():
 @pytest.fixture(scope="module")
 def built_wheel(tmp_path_factory):
     """Build the project's own wheel exactly as `pip install .` would."""
-    pytest.importorskip("setuptools")
+    setuptools = pytest.importorskip("setuptools")
+    # --no-build-isolation means pip uses the *installed* setuptools, not the
+    # one [build-system] asks for. Anything older than 61 ignores [project]
+    # entirely and emits an empty UNKNOWN-0.0.0 wheel, which is a fact about
+    # the box (ROS2 Humble ships 59.6), not about this repo.
+    major = int(str(setuptools.__version__).split(".")[0])
+    if major < 64:
+        pytest.skip(
+            f"setuptools {setuptools.__version__} predates PEP 621 support; "
+            "pyproject.toml's [project]/[tool.setuptools] would be ignored and "
+            "the wheel would build as UNKNOWN-0.0.0. `pip install -U "
+            "'setuptools>=64'` to run this check.")
     out = tmp_path_factory.mktemp("wheel")
     proc = subprocess.run(
         [sys.executable, "-m", "pip", "wheel", "--no-deps",

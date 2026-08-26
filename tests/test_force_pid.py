@@ -156,3 +156,30 @@ class PressLoopTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PushStopThresholdTest(unittest.TestCase):
+    """The seek must be able to reach Fd, not stall at half of it.
+
+    The ported guard read ``fs_raw >= 0.5 * abs(fd)``, which is right for DTC's
+    *approach* phase handing off to the force loop but wrong for the loop that
+    has to hold Fd: it zeroed every approach command from half target upwards,
+    so ``--target-force 5`` could only ever settle near 2.5 N.
+    """
+
+    def test_still_pushes_between_half_target_and_target(self):
+        pid = _make()
+        # Reaction of -0.6*Fd is a 0.6*Fd compression: under target, so the
+        # loop still owes the surface some feed.
+        diag = _settle(pid, -0.6 * FD)
+        self.assertGreater(diag["v_along_m_s"], 0.0)
+
+    def test_stops_pushing_at_target(self):
+        pid = _make()
+        diag = _settle(pid, -FD)
+        self.assertLessEqual(diag["v_along_m_s"], 0.0)
+
+    def test_frac_is_configurable_and_restores_the_ported_behavior(self):
+        pid = _make(push_stop_frac_of_fd=0.5)
+        diag = _settle(pid, -0.6 * FD)
+        self.assertEqual(diag["v_along_m_s"], 0.0)

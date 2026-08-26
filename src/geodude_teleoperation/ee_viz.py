@@ -7,8 +7,8 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
 
-_REPO = Path(__file__).resolve().parent.parent.parent
-CHAMFER_MESH = _REPO / "assets" / "robots" / "geodude" / "assets" / "chamfer_ee.stl"
+# Package data, not repo assets -- see laser_frames for why.
+CHAMFER_MESH = Path(__file__).resolve().parent / "data" / "meshes" / "chamfer_ee.stl"
 CHAMFER_MESH_SCALE = 0.001  # stl vertices are mm
 RIGHT_WRIST3 = "right_ur5e/wrist_3_link"
 

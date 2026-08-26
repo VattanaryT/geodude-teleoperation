@@ -14,6 +14,9 @@ from geodude_teleoperation.laser_frames import (
 )
 
 _REPO = Path(__file__).resolve().parents[1]
+# Frames and scan metadata are package data (they ship in the wheel);
+# the bulk meshes/clouds under assets/ are not.
+_DATA = _REPO / "src" / "geodude_teleoperation" / "data"
 _MERGED = _REPO / "assets" / "laser_profilometer" / "merged.ply"
 
 
@@ -30,9 +33,9 @@ class LaserFrameDetectTest(unittest.TestCase):
 
 class LaserPlacementTest(unittest.TestCase):
     def test_left_base_origin_lands_on_left_mount_plus_laser_nudge(self):
-        T_left = load_SE3(_REPO / "assets" / "frames" / "T_left_base_vention.json")
+        T_left = load_SE3(_DATA / "frames" / "T_left_base_vention.json")
         t_laser = load_t_vention(
-            _REPO / "assets" / "laser_profilometer" / "merged.laser_offset.json")
+            _DATA / "laser_profilometer" / "merged.laser_offset.json")
         placed = place_laser_points(
             np.zeros((1, 3)),
             T_left_base_vention=T_left,
@@ -43,10 +46,10 @@ class LaserPlacementTest(unittest.TestCase):
         np.testing.assert_allclose(placed.points_vention[0], expected, atol=1e-9)
 
     def test_tag0_rtde_is_inv_right_times_tag0_vention(self):
-        T_right = load_SE3(_REPO / "assets" / "frames" / "T_right_base_vention.json")
-        T_tag0 = load_SE3(_REPO / "assets" / "laser_profilometer" / "crop_meta.json")
+        T_right = load_SE3(_DATA / "frames" / "T_right_base_vention.json")
+        T_tag0 = load_SE3(_DATA / "laser_profilometer" / "crop_meta.json")
         t_tag0 = load_t_vention(
-            _REPO / "assets" / "laser_profilometer" / "crop_meta.object_offset.json")
+            _DATA / "laser_profilometer" / "crop_meta.object_offset.json")
         placed = place_laser_points(
             np.zeros((1, 3)),
             t_tag0_vention_m=t_tag0,

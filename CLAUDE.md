@@ -28,6 +28,17 @@ These are established, not guesses. Trusting the wrong one here moves hardware.
   already holds it. `connect_tcp_force_reader()` can therefore fail on a
   perfectly healthy robot — treat that as "no force feedback" and refuse to
   press, never as a reason to fall back to open loop.
+- **`getActualTCPForce()` is not gravity compensated** unless the UR payload is
+  configured, and the **speedj backend never issues `zero_ftsensor()`** (only
+  the `force_mode` URScript does). A perfectly live sensor therefore reads
+  several N of tool weight with nothing touching. `ContactTeleoperationController`
+  now tares once per session in `start()` (`tare_force()`, `--no-force-tare` to
+  disable) and both seek laws subtract it; the dead-feedback abort deliberately
+  still reads `fz_raw`, or a tared-to-zero sensor would look dead. Untared, the
+  dtc loop trips `wrong_sign` at `Fs ≤ min(−2, −0.5·Fd)` and commands
+  `−unload_v_m_s` forever — button 0 retracted instead of approaching. The tare
+  is a *tool-frame* constant while the weight is fixed in base, so it is only
+  valid near the orientation it was taken at.
 - **Twist blade order** is `[e12, e13, e23, e1i, e2i, e3i]` = `[angular,
   linear]`, so linear Z is **index 5**. That is the slot `set_desired_wrench`
   and `AdmittanceConfig` use (`spacemouse.py:279`).
@@ -50,6 +61,11 @@ These are established, not guesses. Trusting the wrong one here moves hardware.
   loops authoritative on the same axis is the fight that produces drift.
 - **Never keep inching into a rigid stop (C153).** At or over target, press
   velocity is 0 or retract. speedJ cannot yield.
+- **`push_stop_frac_of_fd` is 1.0, not 0.5.** The ported guard zeroed every
+  approach command from `0.5·Fd` upwards, which is right for DTC's *approach*
+  phase handing off to the force loop but wrong for the loop that has to hold
+  `Fd`: `--target-force 5` could only ever settle near 2.5 N, which reads as
+  under-press and then as lift-off over curvature.
 - **Free along the normal — align never owns the unbound axis, force does.**
   `stiffness[5,5] = 0` frees only the *body Z of the pose error*, which is not
   the surface normal: field-follow slerps tool Z behind the field normal on
@@ -97,6 +113,11 @@ pytest -q               # thereafter, from anywhere in the repo
 `tests/conftest.py` also puts `src/` on the path when the package is not
 installed, so plain `pytest -q` works without the editable install too. Most
 tests need `gafropy` and `scipy`; `tests/test_force_pid.py` needs only numpy.
+
+Library data (`frames/`, laser `crop_meta`/offsets, `chamfer_ee.stl`) lives in
+`src/geodude_teleoperation/data/` and ships in the wheel, because module-scope
+defaults in `laser_frames`/`ee_viz` read it. The bulk meshes and scans stay in
+`assets/`, which belongs to `examples/` and is not packaged.
 
 Hardware entry point is `examples/hardware_object_contact_teleop.py`. Contact
 lift-off fixes are behind three independent flags so a session can bisect them:
