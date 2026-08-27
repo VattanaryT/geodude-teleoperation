@@ -203,6 +203,12 @@ def _draw_speedj_figure(x, qdot, qddot, dt, spring, measured=None, stick=None, *
     return fig
 
 
+# On-screen size of the live window, in inches. The saved PNG stays large --
+# it is read zoomed in, after the fact -- but the live figure sits beside viser
+# on the same screen, where 10x9 covered most of it.
+LIVE_FIGSIZE = (6.4, 4.8)
+
+
 def _enqueue_drop_oldest(sink, sample):
     put = getattr(sink, "put_nowait", None)
     if put is None:
@@ -246,7 +252,8 @@ class SpeedJTrace:
             _enqueue_drop_oldest(self._sink, sample)
         return sample
 
-    def start(self, *, window_s=8.0, port=8081, save_dir="speedj_logs"):
+    def start(self, *, window_s=8.0, port=8081, save_dir="speedj_logs",
+              figsize=LIVE_FIGSIZE):
         try:
             import matplotlib  # noqa: F401
         except ImportError:
@@ -262,7 +269,7 @@ class SpeedJTrace:
         self._session = []
         self._proc = ctx.Process(
             target=_plot_loop,
-            args=(self._sink, float(window_s), int(port)),
+            args=(self._sink, float(window_s), int(port), tuple(figsize)),
             daemon=True,
             name="speedj-plot",
         )
@@ -356,22 +363,22 @@ def _choose_backend(port):
     return "WebAgg"
 
 
-def _plot_loop(in_q, window_s, port):
+def _plot_loop(in_q, window_s, port, figsize=LIVE_FIGSIZE):
     import signal
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
-        _run_plot(in_q, window_s, port)
+        _run_plot(in_q, window_s, port, figsize)
     except Exception as exc:
         print(f"speedj plot: stopped ({exc})", flush=True)
 
 
-def _run_plot(in_q, window_s, port):
+def _run_plot(in_q, window_s, port, figsize=LIVE_FIGSIZE):
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
 
     _choose_backend(port)
 
-    fig, axes = plt.subplots(4, 1, sharex=True, figsize=(10, 9))
+    fig, axes = plt.subplots(4, 1, sharex=True, figsize=figsize)
     try:
         fig.canvas.manager.set_window_title("speedJ command")
     except Exception:

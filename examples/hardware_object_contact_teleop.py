@@ -3,10 +3,11 @@
 Free space: gafropy speedJ + SpaceMouse (approach mode).
 
 Contact (default ``speedj``): same pose-spring speedJ plant as free space.
-Button 0 latches force-hold until button 0 again — no auto-drop to free-space
-approach. The press PID overlays tool-Z; it owns Fd and nothing else does.
+The mode button (``--mode-button``, default 1) latches force-hold until it is
+pressed again — no auto-drop to free-space approach. The press PID overlays
+tool-Z; it owns Fd and nothing else does.
 Stick XY still field-follows (``project()`` rewrites R; stick Z ignored).
-Button 0 must not switch to line admittance.
+It must not switch to line admittance.
 
 Three switches exist for the contact lift-off fixes, so a hardware session can
 bisect which one matters. ``--press-loop legacy --no-free-along-normal
@@ -87,6 +88,7 @@ from geodude_teleoperation.laser_frames import (
     is_laser_left_base_object,
     place_laser_object,
 )
+from geodude_teleoperation.speedj_plot import LIVE_FIGSIZE
 from geodude_teleoperation.mesh_fixture import (
     clip_mesh_to_scan_points,
     orient_surface_toward,
@@ -343,8 +345,9 @@ def build_arg_parser():
              "(ignored for speedj). Use when already touching so preload is not zeroed.",
         )
     parser.add_argument(
-        "--mode-button", type=int, default=0,
-        help="spacemouse button index that toggles between approach and contact mode")
+        "--mode-button", type=int, default=1,
+        help="spacemouse button index that toggles between approach and contact "
+             "mode (with --device keyboard, index 1 is 'v' and index 0 is 't')")
     parser.add_argument(
         "--contact-backend", choices=["speedj", "force_mode"], default="speedj",
         help="contact implementation (default: speedj = pose spring + Z force overlay). "
@@ -451,6 +454,11 @@ def build_arg_parser():
     parser.add_argument(
         "--no-speedj-plot", dest="speedj_plot", action="store_false",
         help="do not open the live speedJ qdot / qddot / Δt plot")
+    parser.add_argument(
+        "--plot-size", type=float, nargs=2, metavar=("W", "H"),
+        default=list(LIVE_FIGSIZE),
+        help="live speedJ plot window size in inches (default %(default)s); it "
+             "shares the screen with viser")
     parser.set_defaults(speedj_plot=True)
     return parser
 
@@ -1001,7 +1009,7 @@ def main():
             from geodude_teleoperation.speedj_plot import SpeedJTrace
             speedj_trace = SpeedJTrace()
             approach_controller.set_command_trace(speedj_trace.record)
-            speedj_trace.start()
+            speedj_trace.start(figsize=tuple(args.plot_size))
         approach_controller.set_input_active(False)
         approach_controller.hold_live_pose()
         interface.control(approach_controller, blocking=False)

@@ -18,6 +18,12 @@ from pathlib import Path
 
 import numpy as np
 
+# FieldFollow's lead clamp in hardware_object_contact_teleop (max_lead_m=0.005).
+# The carrot is held at most this far ahead of the live TCP, so the pose error
+# cannot exceed it -- and sitting at it is the lateral-stall signature. Not a
+# CLI flag there, so it is a constant here; change both together.
+MAX_LEAD_M = 0.005
+
 
 def _col(rows, name):
     out = np.full(len(rows), np.nan)
@@ -177,8 +183,33 @@ def summarize(path):
                   f"  max|e|={np.nanmax(np.abs(e)) * 1e3:6.2f}mm")
         rms = [np.sqrt(np.nanmean(e ** 2)) for e in (ex, ey, ez)]
         worst = "xyz"[int(np.nanargmax(rms))]
+        k_xy = _col(rows, "k_xy")
+        k_note = (f"  (run used K_xy={np.nanmedian(k_xy):.0f} N/m)"
+                  if np.isfinite(k_xy).any() else
+                  "  (run predates the k_xy column; K_xy unknown)")
         print(f"  -> {worst} carries the most error; if the fault is directional "
-              "it should be this axis, and --xy-stiffness is the lever")
+              f"it should be this axis, and --xy-stiffness is the lever.{k_note}")
+        # The follow carrot is held at most --max-lead ahead of the live TCP
+        # (_clamp_lead), so the pose error cannot exceed it. Sitting *at* it is
+        # the signature that matters: the target is at its ceiling and the TCP
+        # is not closing the gap, which is a lateral stall, not a force fault.
+        lead = np.sqrt(ex ** 2 + ey ** 2 + ez ** 2)
+        ceiling = MAX_LEAD_M
+        pinned = _pct(lead >= 0.98 * ceiling)
+        print(f"  |e|     max={np.nanmax(lead) * 1e3:5.2f}mm   "
+              f"{pinned:.1f}% of ticks at >=98% of the "
+              f"{ceiling * 1e3:.0f} mm follow lead clamp")
+        if pinned >= 20.0:
+            push = (np.nanmedian(k_xy) * ceiling
+                    if np.isfinite(k_xy).any() else float("nan"))
+            push_s = f"{push:.1f} N" if np.isfinite(push) else "K_xy * e"
+            print(f"  -> pinned at the field-follow lead clamp ({ceiling * 1e3:.0f} "
+                  "mm): the carrot is at its ceiling and the TCP is not "
+                  "closing it.\n"
+                  f"     That is a lateral stall -- the spring shoves {push_s} "
+                  "sideways for as long as it lasts, and the UR calls the\n"
+                  "     accumulated deviation 'could not follow path'. Look here, "
+                  "not at the force loop.")
 
     print("\n-- oscillation (friction grabs are real on this rig; do not filter) --")
     f_fs, a_fs = _dominant_hz(t, fs)

@@ -35,9 +35,10 @@ _KEY_TWIST = {
     "i": (2, -1.0),  # angular e23 -
 }
 
-# key -> button index handed to ``on_button``. Mirrors SpaceMouseTeleop, whose
-# button 0 is the approach<->contact toggle every example registers; without
-# these `--device keyboard` had no mode toggle at all.
+# key -> button index handed to ``on_button``. Mirrors SpaceMouseTeleop; without
+# these `--device keyboard` had no mode toggle at all. Which index toggles mode
+# is the example's call: hardware_object_contact_teleop takes --mode-button
+# (default 1, i.e. 'v'), and the older examples still register 0 ('t').
 _KEY_BUTTON = {
     "t": 0,
     "T": 0,
@@ -48,7 +49,8 @@ _KEY_BUTTON = {
 # Keys offered to ``on_key`` before the button map sees them, so the startup
 # align (which owns 't' and Enter while it is still waiting) keeps priority.
 # ``on_key`` returns truthy to claim the key; anything it declines falls
-# through, which is how 't' becomes button 0 once align has finished.
+# through, which is how 't' reaches ``on_button`` as index 0 once align has
+# finished.
 _KEY_PASSTHROUGH = ("t", "T", "\n", "\r")
 
 _KEY_QUIT = ("q", "Q")

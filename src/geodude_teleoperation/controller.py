@@ -445,6 +445,10 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
             "err_y": float(self._last_err_lin[1]),
             "err_z": float(self._last_err_lin[2]),
             "vtask_lin": self._last_vtask_lin,
+            # Constant for the run, but per-row: it is the one lever on the
+            # lateral push and a log that does not carry it cannot be compared
+            # against another run's.
+            "k_xy": float(self._stiffness[3, 3]),
         }
 
     def set_contact_normal(self, n_base, R_tool_to_base):
@@ -843,7 +847,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         "Fs_n", "Fs_n_raw", "Fe_n", "dFs_dt", "gain", "v_along", "spike",
         "osc", "wrong_sign", "fault_fs",
         "sigma_min", "clamp_scale", "qdot_max",
-        "err_x", "err_y", "err_z", "vtask_lin",
+        "err_x", "err_y", "err_z", "vtask_lin", "k_xy",
     )
 
     def _open_contact_log(self):
