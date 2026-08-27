@@ -379,7 +379,8 @@ class FieldFollow:
             idle=False, would_overrun_rtde=overrun)
 
 
-def format_follow_lag(live_tcp, cmd_tcp, R_live, R_cmd, spring_on, project_ms=None):
+def format_follow_lag(live_tcp, cmd_tcp, R_live, R_cmd, spring_on,
+                      project_ms=None, actuation=None):
     """One-line orange-vs-live lag for the hardware follow print."""
     live = np.asarray(live_tcp, dtype=float).reshape(3)
     cmd = np.asarray(cmd_tcp, dtype=float).reshape(3)
@@ -391,6 +392,8 @@ def format_follow_lag(live_tcp, cmd_tcp, R_live, R_cmd, spring_on, project_ms=No
         f"R_err={r_deg:.1f}deg spring={spring}")
     if project_ms is not None:
         line += f" project={float(project_ms):.2f}ms"
+    if actuation:
+        line += f" {actuation}"
     return line
 
 

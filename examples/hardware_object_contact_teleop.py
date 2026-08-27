@@ -830,11 +830,22 @@ def main():
             age_ms = (
                 1e9 if not np.isfinite(stick["t"])
                 else (now - float(stick["t"])) * 1000.0)
+            # Under DTC the pose spring can look perfectly healthy while no
+            # torque reaches the joints -- tau = kv * (qdot_cmd - qdot_meas) is
+            # all the authority there is, and it lands below breakaway friction
+            # long before anything above the seam complains. Print it here so a
+            # stalled arm and a healthy one do not read identically.
+            actuation = None
+            if dtc_backend is not None:
+                st = dtc_backend.stats()
+                actuation = (
+                    f"tau_peak={st.get('tau_peak', 0.0):.2f}Nm "
+                    f"sat={st.get('n_saturated', 0)}")
             print(
                 format_follow_lag(
                     p_live, p_cmd, T_flange_viz[:3, :3], R_cmd,
                     approach_controller._input_active,
-                    project_ms=tick.project_ms),
+                    project_ms=tick.project_ms, actuation=actuation),
                 flush=True,
             )
             print(

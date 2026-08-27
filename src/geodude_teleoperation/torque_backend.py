@@ -878,6 +878,12 @@ class DirectTorqueBackend:
             "n_read_fail": self._n_read_fail,
             "holding": self._law.holding,
             "n_saturated": int(np.count_nonzero(self._law.last_saturated)),
+            # The single number that says whether the seam is doing anything.
+            # Joint breakaway friction on a UR5e is several N.m, so a command
+            # that reads healthy above the seam and a peak tau of ~1 N.m means
+            # the arm is simply not being pushed hard enough to move.
+            "tau_peak": float(np.max(np.abs(self._last_tau)))
+                        if self._last_tau.size else 0.0,
             "last_error": self._last_error,
             "latch_path": (
                 None if self._latch_path is None else str(self._latch_path)),
