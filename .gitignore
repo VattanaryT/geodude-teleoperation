@@ -9,3 +9,5 @@ assets/laser_profilometer/merged_full.ply
 
 # speedJ session dumps (png + npz)
 speedj_logs/
+CLAUDE.md
+docs/

@@ -105,6 +105,13 @@ from geodude_teleoperation.tcp_force import (
     force_from_tcp_force,
     fz_from_tcp_force,
 )
+from geodude_teleoperation.direct_torque import print_dtc_rate_verification
+from geodude_teleoperation.torque_backend import (
+    DEFAULT_DTC_HZ,
+    DEFAULT_KV,
+    DEFAULT_TAU_MAX,
+    DirectTorqueBackend,
+)
 from geodude_teleoperation.virtual_fixture import FieldAlignPreview, workstation_field_z_arrows
 
 DEFAULT_OBJECT = str(ROOT / "assets" / "laser_profilometer" / "merged.ply")
@@ -147,10 +154,16 @@ def follow_linear(lin, *, ignore_z):
 
 
 def field_follow_in_mode(mode, backend):
-    """Approach always follows. speedj contact does too; force_mode does not."""
+    """Approach always follows. speedj/dtc contact do too; force_mode does not.
+
+    dtc is deliberately identical to speedj here: everything above the actuation
+    seam -- run_field_follow, OrientationField, StartupAlign -- is byte-identical
+    between the two, so any visible divergence in the field arrows or the EE
+    frame is a bug in the q accessor or the control-group splice, not a gain.
+    """
     if mode == "approach":
         return True
-    return mode == "contact" and backend == "speedj"
+    return mode == "contact" and backend in ("speedj", "dtc")
 
 
 def _dashboard_bring_up(ip: str) -> None:
@@ -359,9 +372,45 @@ def build_arg_parser():
         help="spacemouse button index that toggles between approach and contact "
              "mode (with --device keyboard, index 1 is 'v' and index 0 is 't')")
     parser.add_argument(
-        "--contact-backend", choices=["speedj", "force_mode"], default="speedj",
+        "--contact-backend", choices=["speedj", "force_mode", "dtc"], default="speedj",
         help="contact implementation (default: speedj = pose spring + Z force overlay). "
-             "'force_mode' is UR hybrid force/position, not admittance.")
+             "'force_mode' is UR hybrid force/position, not admittance. 'dtc' runs "
+             "the *same* control law but actuates it with UR Direct Torque Control "
+             "instead of speedJ, so a friction grab saturates tau instead of "
+             "protective-stopping on C153A1.")
+    # --- dtc backend. The law above the seam is unchanged; these only set how
+    # hard it is allowed to push and how often the host refreshes the on-robot
+    # tau latch. Start tau_max low: it is the only thing left bounding a grab
+    # now that the UR's own path supervisor is out of the loop.
+    parser.add_argument(
+        "--dtc-kv", type=float, nargs="+", default=list(DEFAULT_KV),
+        metavar="NM_PER_RADPS",
+        help="dtc joint-velocity gain, scalar or 6 values (default %(default)s)")
+    parser.add_argument(
+        "--dtc-tau-max", type=float, nargs="+", default=list(DEFAULT_TAU_MAX),
+        metavar="NM",
+        help="dtc per-joint torque cap, scalar or 6 values. This cap IS the "
+             "compliance (default %(default)s)")
+    parser.add_argument(
+        "--dtc-hz", type=float, default=DEFAULT_DTC_HZ,
+        help="dtc host control-law rate; the on-robot latch applies tau at the "
+             "UR's own 500 Hz regardless (default %(default)s)")
+    parser.add_argument(
+        "--dtc-payload-mass", type=float, default=None,
+        help="override the pendant's installation payload for dtc (kg). Default "
+             "is to defer to the pendant, which is calibrated on this rig; "
+             "tau=0 only means 'float' if gravity compensation is right, so the "
+             "--dtc-hold-zero banner always says which value is in force.")
+    parser.add_argument(
+        "--dtc-payload-cog", type=float, nargs=3, default=None,
+        metavar=("X", "Y", "Z"),
+        help="centre of gravity for --dtc-payload-mass, in the tool frame (m)")
+    parser.add_argument(
+        "--dtc-hold-zero", action="store_true",
+        help="dtc bring-up gate: upload the latch script, verify the directTorque "
+             "rate and stream tau=0 so the arm floats, with viser fully live. The "
+             "control law still runs and the EE frame must track the real arm; "
+             "nothing actuates.")
     # --- contact lift-off fixes, independently switchable so a hardware run can
     # bisect which one actually matters. All three off reproduces the previous
     # behavior exactly: --press-loop legacy --no-free-along-normal
@@ -523,17 +572,41 @@ def main():
     interface = ri.RobotInterface(ri.Configuration(MODEL, "hardware", args.hardware_config))
     interface.initialize()
 
+    # Built before anything reads kinematics, because DTC's handoff calls
+    # interface.shutdown() and that takes gafropy's System with it. The backend
+    # loads its own driverless System from the model file (no driver, no RTDE
+    # client), so viser, the chamfer visual and every FK below keep working
+    # across the handoff. connect() -- the part that touches RTDE -- happens
+    # later, in start_control_and_device.
+    dtc_backend = None
+    if args.contact_backend == "dtc":
+        dtc_backend = DirectTorqueBackend(
+            robot_ip=robot_ip,
+            model_file=MODEL,
+            task_space_name=args.task_space,
+            kv=args.dtc_kv, tau_max=args.dtc_tau_max,
+            hz=args.dtc_hz, hold_zero=args.dtc_hold_zero,
+            payload_mass=args.dtc_payload_mass,
+            payload_cog=args.dtc_payload_cog,
+        )
+    kin_system = (
+        interface.get_system() if dtc_backend is None else dtc_backend.get_system())
+
     left_vention = args.left_vention_height if args.left_vention_height is not None else args.vention_height
     right_vention = args.right_vention_height if args.right_vention_height is not None else args.vention_height
     print(f"hardware does not report vention rails; drawing them at "
           f"left={left_vention:.3f}m right={right_vention:.3f}m")
 
     def q_with_vention():
+        # `interface` is rebound to the DTC backend at handoff; it duck-types
+        # get_state() so this and every caller below need no branch.
         return apply_vention_heights(
-            interface.get_system(), interface.get_state().get_position(),
+            kin_system, interface.get_state().get_position(),
             left_vention, right_vention)
 
-    task_space = interface.get_task_space(args.task_space)
+    task_space = (
+        interface.get_task_space(args.task_space) if dtc_backend is None
+        else dtc_backend.get_task_space(args.task_space))
     if task_space is None:
         raise RuntimeError(f"task space '{args.task_space}' not found in {MODEL}")
 
@@ -600,13 +673,15 @@ def main():
         xy_stiffness=args.xy_stiffness,
         ang_stiffness=args.ang_stiffness)
 
-    # --- speedj contact: stay on gafropy (default). force_mode is opt-in. ---
+    # --- speedj/dtc contact: the same pose spring + Z overlay. Only the
+    # actuation seam under it differs, so the contact controller, the force
+    # reader and the contact CSV are built identically for both. ---
     contact_controller = None
     measured_fz_fn = None
     safety_mode_fn = None
     measured_force_fn = None
     close_tcp_force = None
-    if args.contact_backend == "speedj":
+    if args.contact_backend in ("speedj", "dtc"):
         contact_stiffness = np.diag([400.0] * 5 + [0.0])
         z_damping = 200.0
         contact_damping = np.diag([40.0] * 5 + [z_damping])
@@ -623,11 +698,20 @@ def main():
             # it needs all three linear components.
             measured_force_fn = lambda: force_from_tcp_force(read_tcp_force())
             safety_mode_fn = getattr(read_tcp_force, "safety_mode", None)
+            if dtc_backend is not None:
+                # Losing speedJ loses the UR's path supervisor, so this gate is
+                # the only thing left that stops torque during a protective stop.
+                dtc_backend.set_safety_mode_fn(safety_mode_fn)
+                # Share this one receive socket rather than opening a second on
+                # 30004: most controllers allow a single RTDE client, and DTC
+                # already needs the control client on 30003.
+                dtc_backend.set_receive(getattr(read_tcp_force, "receive", None))
             print(f"contact FT: RTDE ActualTCPForce from {robot_ip}", flush=True)
         except Exception as exc:
             print(
                 f"\033[93mWARNING: cannot open RTDE ActualTCPForce on {robot_ip} "
-                f"({exc}). speedj contact will refuse without Fz.\033[0m",
+                f"({exc}). {args.contact_backend} contact will refuse without Fz, "
+                "and DTC loses its safety-mode gate.\033[0m",
                 flush=True,
             )
         contact_controller = ContactTeleoperationController(
@@ -681,7 +765,7 @@ def main():
         return task_space.compute_ee_motor(position)
 
     def chamfer_flange_from_q(q):
-        fk = interface.get_system().compute_forward_kinematics(np.asarray(q, dtype=float))
+        fk = kin_system.compute_forward_kinematics(np.asarray(q, dtype=float))
         T_wrist = np.asarray(
             fk.get_link_pose("right_ur5e/wrist_3_link").to_transformation_matrix())
         return chamfer_world_from_wrist3(T_wrist)
@@ -994,7 +1078,7 @@ def main():
                 interface=interface,
             )
             print(
-                f"-> contact mode (speedj): latched until button {args.mode_button}; "
+                f"-> contact mode ({args.contact_backend}): latched until button {args.mode_button}; "
                 f"field-follow tangent XY, PID holds Fd ≤2mm/s to {args.target_force:.1f}N",
                 flush=True,
             )
@@ -1022,6 +1106,38 @@ def main():
             return
         toggle_contact_mode()
 
+    def enter_direct_torque():
+        """gafropy -> ur_rtde directTorque. Replaces interface.control(...).
+
+        After this, `interface` is the DTC backend: it duck-types get_state() /
+        get_system() / get_task_space(), so hold_live_pose, update_command,
+        run_field_follow and the viser tick keep working through the same calls.
+        The approach controller object itself is *not* rebuilt -- rebuilding it
+        would drop the speedJ trace and re-derive gains, and a bisect against a
+        speedj run needs the two to be the same object with the same tuning.
+        """
+        nonlocal interface
+        # RTDE reports six joints; everything else in get_position() -- the other
+        # arm, the grippers, both rails -- has to be captured while gafropy
+        # still has it.
+        dtc_backend.seed_from_interface(interface)
+        print("-> dtc handoff: settling gafropy, then taking the RTDE control "
+              "client...", flush=True)
+        shutdown_gafropy_for_handoff(interface, settle_s=0.35)
+        dtc_backend.connect()
+        if args.dtc_hold_zero:
+            # Prove the host can hold the robot's clock *before* anything is
+            # allowed to actuate. Must run before the tau streamer starts: they
+            # share one directTorque channel.
+            print_dtc_rate_verification(dtc_backend.verify_rate(duration_s=2.0))
+        interface = dtc_backend
+        approach_controller.set_interface(dtc_backend)
+        if contact_controller is not None:
+            contact_controller.set_interface(dtc_backend)
+        approach_controller.set_input_active(False)
+        approach_controller.hold_live_pose()
+        dtc_backend.start(approach_controller)
+
     def start_control_and_device():
         nonlocal device, speedj_trace
         # Start frozen: no speedJ until a non-idle SpaceMouse reading arrives.
@@ -1032,7 +1148,10 @@ def main():
             speedj_trace.start(figsize=tuple(args.plot_size))
         approach_controller.set_input_active(False)
         approach_controller.hold_live_pose()
-        interface.control(approach_controller, blocking=False)
+        if dtc_backend is None:
+            interface.control(approach_controller, blocking=False)
+        else:
+            enter_direct_torque()
         device = KeyboardTeleop(
             step=0.0025) if args.device == "keyboard" else SpaceMouseTeleop(
                 # Slow enough that the 20 Hz field carrot stays inside the 2 cm
@@ -1062,11 +1181,14 @@ def main():
             )
 
     try:
-        backend_note = (
-            "speedj contact (pose spring + Z overlay)"
-            if args.contact_backend == "speedj"
-            else "force_mode contact (not admittance)"
-        )
+        backend_note = {
+            "speedj": "speedj contact (pose spring + Z overlay)",
+            "force_mode": "force_mode contact (not admittance)",
+            "dtc": (
+                "dtc contact (same pose spring + Z overlay, actuated by "
+                "directTorque)" + (" [HOLD-ZERO]" if args.dtc_hold_zero else "")
+            ),
+        }[args.contact_backend]
         if args.no_viz:
             print(f"Teleoperating '{args.task_space}' on real geodude (headless) "
                   f"-- {backend_note}; button {args.mode_button} toggles. Ctrl+C to quit.")
@@ -1092,15 +1214,15 @@ def main():
             print(f"viser running at http://localhost:{viz.port} -- "
                   "holding pose; open the page before moving the spacemouse.")
 
-            robot_viz = viz.add_robot(interface.get_system(),
+            robot_viz = viz.add_robot(kin_system,
                                       name="geodude", joint_sliders=False)
             robot_viz.update(q_with_vention())
             n_hidden = hide_gripper_visuals(robot_viz)
             update_chamfer = add_right_chamfer_visual(
-                viz, interface.get_system(), q=q_with_vention())
+                viz, kin_system, q=q_with_vention())
             update_ghost = add_ghost_chamfer_visual(viz, visible=True)
             q0 = q_with_vention()
-            fk0 = interface.get_system().compute_forward_kinematics(q0)
+            fk0 = kin_system.compute_forward_kinematics(q0)
             T_wrist0 = np.asarray(
                 fk0.get_link_pose("right_ur5e/wrist_3_link").to_transformation_matrix())
             T_live0 = chamfer_world_from_wrist3(T_wrist0)
@@ -1185,7 +1307,7 @@ def main():
                 q = q_with_vention()
                 robot_viz.update(q)
                 update_chamfer(q)
-                fk = interface.get_system().compute_forward_kinematics(q)
+                fk = kin_system.compute_forward_kinematics(q)
                 T_wrist = np.asarray(
                     fk.get_link_pose("right_ur5e/wrist_3_link").to_transformation_matrix())
                 T_live_flange = chamfer_world_from_wrist3(T_wrist)
@@ -1254,9 +1376,17 @@ def main():
         if close_tcp_force is not None:
             close_tcp_force()
         try:
+            # Under dtc `interface` *is* the backend and shutdown() is its stop():
+            # zero tau, leave torque mode, stopScript, disconnect both clients.
             interface.shutdown()
         except Exception:
             pass
+        if dtc_backend is not None and dtc_backend is not interface:
+            # Handoff never happened (or failed): the backend may still hold RTDE.
+            try:
+                dtc_backend.stop()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

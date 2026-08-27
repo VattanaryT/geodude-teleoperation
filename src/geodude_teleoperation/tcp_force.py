@@ -88,6 +88,11 @@ def connect_tcp_force_reader(robot_ip: str):
             return None
 
     read.safety_mode = safety_mode
+    # The live interface itself, for callers that need more than force and
+    # safety mode off this one socket -- DTC reads getActualQ/getActualQd here
+    # rather than opening a *second* client on 30004. Only one RTDE client is
+    # allowed on most controllers, so sharing this is not an optimization.
+    read.receive = receive
 
     # Smoke-read once so a dead/contested RTDE socket fails at connect time.
     _ = read()
