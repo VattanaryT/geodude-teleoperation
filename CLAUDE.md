@@ -179,6 +179,13 @@ These are established, not guesses. Trusting the wrong one here moves hardware.
   the class defaults.** It passes `stiffness=2000, max_joint_velocity=0.8`; the
   class defaults are 3000/1.0 and `hardware_free_teleop.py` uses those. A stale
   comment claimed the two matched — they never did.
+- **Lateral stiffness is the cheapest contact compliance we have.** The pose
+  spring delivers `v_task = dt·K/M · e`, so at K=2000 and the 4 mm `max_step_m`
+  cap the lateral command tops out at 8 mm/s and shoves with 8 N into a tool
+  held by friction — which is what the UR reports as "could not follow path".
+  `--xy-stiffness` softens only blade indices 3 and 4 (tool X/Y), leaving
+  angular and the force-owned Z alone. Max lateral speed scales with it: 8 mm/s
+  at 2000, 2 mm/s at 500.
 - **`exp/in-contact-dtc` called `speedJ` with an explicit `accel=0.5 rad/s²`.**
   On this branch that argument lives inside gafropy's urcl backend and nothing
   here controls it. `max_qddot` bounds *our commanded qdot* rate; it does not

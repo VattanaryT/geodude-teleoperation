@@ -176,7 +176,7 @@ def _dashboard_bring_up(ip: str) -> None:
 
 def _make_approach_controller(interface, task_space, home_ee_motor,
                               free_along_normal=True, dls_damping=0.05,
-                              per_joint_velocity=True):
+                              per_joint_velocity=True, xy_stiffness=None):
     # These are NOT hardware_free_teleop's defaults, despite what this comment
     # used to claim -- that file constructs AdmittanceTeleoperationController()
     # with no arguments, so it runs the class defaults (stiffness 3000,
@@ -186,10 +186,19 @@ def _make_approach_controller(interface, task_space, home_ee_motor,
     # have never been validated against this cell.
     # Do NOT attach OrientationField here: vf.project() every stick sample snaps
     # orientation and makes speedJ feel discontinuous vs the SpaceMouse.
+    # Blade order is [angular, linear], so 3 and 4 are the lateral (tool X/Y)
+    # axes. Softening only those is the cheapest form of contact compliance: a
+    # stuck tool then generates a smaller commanded path, which is what the UR
+    # was refusing to follow. It costs lateral tracking speed in proportion --
+    # the spring delivers dt*K/M * error, so at the 4 mm max_step_m cap, K=2000
+    # gives 8 mm/s and K=500 gives 2 mm/s.
+    k = [2000.0] * 6
+    if xy_stiffness is not None:
+        k[3] = k[4] = float(xy_stiffness)
     approach = AdmittanceTeleoperationController(
         inertia=np.diag([1.0] * 6),
         damping=np.diag([20.0] * 6),
-        stiffness=np.diag([2000.0] * 6),
+        stiffness=np.diag(k),
         dt=0.001,
         max_joint_velocity=0.8,
         twist_linear_scale=1.0,
@@ -360,6 +369,13 @@ def build_arg_parser():
         action="store_false", default=True,
         help="let field-follow keep discarding vf.project()'s position, so the "
              "commanded point never re-snaps to the mesh (previous behavior)")
+    parser.add_argument(
+        "--xy-stiffness", type=float, default=None, metavar="N_M",
+        help="pose-spring stiffness on the lateral (tool X/Y) axes only; "
+             "default is the same 2000 N/m as every other axis. Lowering it "
+             "softens the shove into a tool held by friction, which is what "
+             "the UR reports as 'could not follow path'. Max lateral speed "
+             "scales with it: 8 mm/s at 2000, 2 mm/s at 500.")
     parser.add_argument(
         "--dls-damping", type=float, default=0.05, metavar="LAMBDA",
         help="damped-least-squares lambda for the jacobian inverse. Was a "
@@ -554,7 +570,8 @@ def main():
         interface, task_space, home_ee_motor,
         free_along_normal=args.free_along_normal,
         dls_damping=args.dls_damping,
-        per_joint_velocity=args.per_joint_velocity)
+        per_joint_velocity=args.per_joint_velocity,
+        xy_stiffness=args.xy_stiffness)
 
     # --- speedj contact: stay on gafropy (default). force_mode is opt-in. ---
     contact_controller = None
@@ -816,7 +833,8 @@ def main():
             interface, task_space, ee,
             free_along_normal=args.free_along_normal,
             dls_damping=args.dls_damping,
-            per_joint_velocity=args.per_joint_velocity)
+            per_joint_velocity=args.per_joint_velocity,
+            xy_stiffness=args.xy_stiffness)
         if contact_controller is not None:
             contact_controller.set_conditioning_fn(approach_controller.conditioning)
         if robot_viz is not None:

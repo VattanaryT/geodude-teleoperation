@@ -225,6 +225,10 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         self._last_sigma_min = float("nan")
         self._last_clamp_scale = 1.0
         self._last_qdot_max = 0.0
+        # Linear pose error per axis, so a log can answer which direction is
+        # prone to the fault instead of leaving it to the operator's memory.
+        self._last_err_lin = np.zeros(3)
+        self._last_vtask_lin = 0.0
         self._n_joints_seen = None
         self._t_cond_warn = None
         self._n_body = None
@@ -350,6 +354,9 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
             bias = jacobian_derivative @ qdot_task
 
             v_task = self._dt * (task_acceleration - bias)
+            # Blade order is [angular, linear], so 3:6 is the linear block.
+            self._last_err_lin = np.asarray(error, dtype=float).reshape(-1)[3:6].copy()
+            self._last_vtask_lin = float(np.linalg.norm(v_task[3:6]))
             if (self._z_compliant and self._free_along_normal
                     and self._n_body is not None):
                 # Align never owns the unbound axis -- force does. Same
@@ -434,6 +441,10 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
             "sigma_min": self._last_sigma_min,
             "clamp_scale": self._last_clamp_scale,
             "qdot_max": self._last_qdot_max,
+            "err_x": float(self._last_err_lin[0]),
+            "err_y": float(self._last_err_lin[1]),
+            "err_z": float(self._last_err_lin[2]),
+            "vtask_lin": self._last_vtask_lin,
         }
 
     def set_contact_normal(self, n_base, R_tool_to_base):
@@ -832,6 +843,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         "Fs_n", "Fs_n_raw", "Fe_n", "dFs_dt", "gain", "v_along", "spike",
         "osc", "wrong_sign", "fault_fs",
         "sigma_min", "clamp_scale", "qdot_max",
+        "err_x", "err_y", "err_z", "vtask_lin",
     )
 
     def _open_contact_log(self):

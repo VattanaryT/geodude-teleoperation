@@ -154,6 +154,32 @@ def summarize(path):
     print(f"  gain_scale        : median={np.nanmedian(gain):.2f}"
           f"  at 1.0 for {_pct(gain >= 0.999):.1f}% of ticks")
 
+    sig = _col(rows, "sigma_min")
+    if np.isfinite(sig).any():
+        clamp = _col(rows, "clamp_scale")
+        qmax = _col(rows, "qdot_max")
+        print("\n-- joint space (where C153 'could not follow path' lives) --")
+        print(f"  sigma_min   median={np.nanmedian(sig):.4f}  p5={np.nanpercentile(sig, 5):.4f}"
+              f"  min={np.nanmin(sig):.4f}"
+              f"   ({_pct(sig < 0.02):.1f}% of ticks below 0.02)")
+        print(f"  clamp_scale median={np.nanmedian(clamp):.3f}"
+              f"   saturated (<1.0) on {_pct(clamp < 0.999):.1f}% of ticks"
+              "   <- the press is scaled by this too, invisibly")
+        print(f"  |qdot| max  median={np.nanmedian(qmax):.3f} rad/s"
+              f"  p95={np.nanpercentile(qmax, 95):.3f}  max={np.nanmax(qmax):.3f}")
+
+    ex, ey, ez = (_col(rows, k) for k in ("err_x", "err_y", "err_z"))
+    if np.isfinite(ex).any():
+        print("\n-- lateral pose error, per axis (which direction is prone?) --")
+        for name, e in (("x", ex), ("y", ey), ("z", ez)):
+            print(f"  err_{name}  rms={np.sqrt(np.nanmean(e ** 2)) * 1e3:6.2f}mm"
+                  f"  p95|e|={np.nanpercentile(np.abs(e), 95) * 1e3:6.2f}mm"
+                  f"  max|e|={np.nanmax(np.abs(e)) * 1e3:6.2f}mm")
+        rms = [np.sqrt(np.nanmean(e ** 2)) for e in (ex, ey, ez)]
+        worst = "xyz"[int(np.nanargmax(rms))]
+        print(f"  -> {worst} carries the most error; if the fault is directional "
+              "it should be this axis, and --xy-stiffness is the lever")
+
     print("\n-- oscillation (friction grabs are real on this rig; do not filter) --")
     f_fs, a_fs = _dominant_hz(t, fs)
     f_vz, a_vz = _dominant_hz(t, v_z)
