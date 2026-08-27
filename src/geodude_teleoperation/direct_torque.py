@@ -34,6 +34,11 @@ DEFAULT_COULOMB_SCALE = (0.8, 0.8, 0.7, 0.8, 0.8, 0.8)
 # Marker embedded in patched URScript (idempotency + diagnostics).
 DTC_LATCH_MARKER = "# geodude DTC latch (on-robot 500 Hz thread)"
 
+# How often the publisher may repeat the stale-tau warning. Long enough that
+# a startup hiccup stays a single line, short enough that a loop which cannot
+# hold its period says so while you are still watching.
+STALE_REPORT_WINDOW_S = 5.0
+
 # Module-scope defaults read these, so they are library data and ship in the
 # wheel (pyproject packages ``data/**/*``). assets/ belongs to examples/ and is
 # not packaged, which is where these lived on exp/in-contact-dtc.
@@ -432,6 +437,8 @@ class HostDirectTorqueStreamer:
         self._tau_t = time.perf_counter()
         self._n_stale = 0
         self._stale_logged = False
+        self._stale_report_t = 0.0
+        self._stale_report_n = 0
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -500,6 +507,8 @@ class HostDirectTorqueStreamer:
         self._rate_warn_logged = False
         self._n_stale = 0
         self._stale_logged = False
+        self._stale_report_t = 0.0
+        self._stale_report_n = 0
         with self._lock:
             self._tau_t = time.perf_counter()
         thr_name = (
@@ -570,13 +579,33 @@ class HostDirectTorqueStreamer:
             if self._stale_tau_s is not None and age > self._stale_tau_s:
                 tau = np.zeros(6, dtype=float)
                 self._n_stale += 1
+                # Deliberately NOT a one-shot latch. A single warning at startup
+                # (viser and the SpaceMouse coming up behind the control thread)
+                # and a control loop that cannot hold its period print exactly
+                # the same line, and only recurrence tells them apart -- so
+                # re-report on a window, carrying the count since the last one.
+                # A true one-shot still prints once and then stays quiet.
                 if not self._stale_logged:
                     self._stale_logged = True
+                    self._stale_report_t = t0
+                    self._stale_report_n = self._n_stale
                     print(
                         "\033[93mWARNING: DTC τ stale by "
                         f"{age * 1e3:.0f} ms (> {self._stale_tau_s * 1e3:.0f} ms); "
                         "publishing zero torque until the control loop catches up."
                         "\033[0m",
+                        flush=True,
+                    )
+                elif t0 - self._stale_report_t >= STALE_REPORT_WINDOW_S:
+                    dn = self._n_stale - self._stale_report_n
+                    self._stale_report_t = t0
+                    self._stale_report_n = self._n_stale
+                    print(
+                        "\033[93mWARNING: DTC τ stale again -- "
+                        f"{dn} zeroed publishes in the last "
+                        f"{STALE_REPORT_WINDOW_S:.0f} s "
+                        f"({self._n_stale} total), age now {age * 1e3:.0f} ms. "
+                        "The control loop is not holding its period.\033[0m",
                         flush=True,
                     )
             try:
