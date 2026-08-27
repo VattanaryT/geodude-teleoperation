@@ -274,6 +274,28 @@ def install_dtc_latch_control_script(
     return out_path
 
 
+_DTC_SIGNATURE_LOGGED = False
+
+
+def _log_dtc_signature(signature: str, friction_comp: bool) -> None:
+    """Say once which directTorque binding took, and whether friction comp is on.
+
+    The two paths are not equivalent and the fallback is silent: the bool path
+    sets input int register 1, which is what the on-robot latch reads into
+    ``dtc_friction_comp``; the scale path does not. Joint breakaway friction on
+    a UR5e is several N.m, comparable to the whole command at small commanded
+    velocities, so "which path bound" decides whether the arm moves at all.
+    """
+    global _DTC_SIGNATURE_LOGGED
+    if _DTC_SIGNATURE_LOGGED:
+        return
+    _DTC_SIGNATURE_LOGGED = True
+    print(
+        f"dtc: bound {signature}, friction_comp={bool(friction_comp)}",
+        flush=True,
+    )
+
+
 def call_direct_torque(
     control: Any,
     tau: Sequence[float],
@@ -299,6 +321,7 @@ def call_direct_torque(
     # Bool friction_comp matches ur_rtde control script cmd==66 on ≥5.23.
     try:
         ok = direct(tau6, bool(friction_comp))
+        _log_dtc_signature("directTorque(tau, friction_comp: bool)", friction_comp)
         return ok is not False
     except TypeError:
         pass
@@ -317,6 +340,7 @@ def call_direct_torque(
         vs = [0.0] * 6
         cs = [0.0] * 6
     ok = direct(tau6, vs, cs)
+    _log_dtc_signature("directTorque(tau, viscous_scale, coulomb_scale)", friction_comp)
     return ok is not False
 
 
