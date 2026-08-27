@@ -4,66 +4,90 @@ Rewritten by the main agent before a `/clear`. Read it at the start of every
 session. Keep it short — this is the state of play, not a changelog. Anything
 that is permanently true belongs in `CLAUDE.md` instead.
 
-**Last updated:** 2026-08-26 · branch `exp/hw-field-follow`
+**Last updated:** 2026-08-26 · branch `exp/hw-field-follow` · head `2fb363f`
 
 ---
 
-## In flight
+## Where we are
 
-Contact-mode lift-off fix. **Implemented, uncommitted, and not yet run on
-hardware or against the full test suite.**
+**The contact force loop works.** Best run so far (`contact_20260826_165503.csv`,
+49 s): `Fs` median 7.94 N against `Fd` 10, guards nearly silent (spike 0.5%,
+wrong_sign 0.0%, fault 0.5%), `gain_scale` at 1.0 for 94.4% of ticks, mean
+normal authority 2.80 mm/s. Peak fault force 12.3 N, down from 81.6 N earlier
+in the day. Stationary holds sit at 9–10 N with `v_z` hunting ±3 mm/s.
 
-Three changes, each behind its own flag so they can be bisected on the robot:
+**What still fails: the UR protective-stops.** Pendant text is
+`C153A1 — "robot could not follow path; either there was a collision, or a
+setting was incorrect"`, and it named the **shoulder joint**. Suggested checks:
+objects in path, payload, centre of gravity, acceleration settings. The operator
+reports the arm pose looks fine at the trips, and that **one lateral direction
+trips it far more than the other**.
 
-| flag | default | what it does |
-|---|---|---|
-| `--press-loop {dtc,legacy}` | `dtc` | `dtc` delegates the press seek to `ForcePIDController`, ported from `exp/in-contact-dtc`. `legacy` is the previous bare PID on fz alone. |
-| `--no-free-along-normal` | on | projects the pose spring's task velocity off the surface normal while in contact |
-| `--no-snap-follow-to-surface` | on | takes the along-normal component of the commanded point from `vf.project()` |
+Critically: at the instant of one stop the force loop was perfectly healthy
+(`Fs=+9.67 N`, `v_z=+0.0005`, no guards). **The fault is kinematic/lateral, not
+force.** Stop looking for it in the force diagnostics.
 
-All three off reproduces the pre-fix behavior exactly.
+## Leading hypothesis
 
-Touched: `src/geodude_teleoperation/in_contact_control/` (new),
-`controller.py`, `field_follow.py`, `tcp_force.py`,
-`examples/hardware_object_contact_teleop.py`, four test files.
+A friction grab *is* the "collision" the pendant names. The lateral axes are
+pure position control: the pose spring delivers `v_task = dt·K/M · e`, so at
+K=2000 with the 4 mm `max_step_m` cap it shoves ~8 N into a tool held by
+friction, the arm cannot follow, and the UR calls that path deviation. Nothing
+in the loop knows the tool is stuck — `fx`/`fy` are read from the wrist F/T
+sensor every tick and thrown away.
 
-## Next
+## Ranked, with the next action for each
 
-1. `pytest -q` on the hardware PC. This machine has neither `gafropy` nor
-   `scipy` (and its `pytest` is itself broken), so only
-   `tests/test_force_pid.py` (11 passing, run via `unittest`) has actually been
-   exercised. Everything else is compile-checked only.
-2. Hardware run: `--contact-backend speedj`, button 0 to latch contact. Success
-   is `Fs` holding near `Fd` **while sliding laterally across curvature** — that
-   is where it currently lifts off. The 0.5 s log line now reports the loop and
-   the along-normal force: `contact force[rtde/dtc]: … Fs_n=+14.8N gain=1.00`.
-3. Split into three commits (one per change) if the hardware run is good.
+1. **Lateral compliance.** `--xy-stiffness` (new, `2fb363f`) softens only blade
+   indices 3/4. Try 1000, then 500. Cost is proportional lateral speed: 8 mm/s
+   at 2000, 2 mm/s at 500. If this fixes it, the durable answer is real lateral
+   admittance using the `fx`/`fy` we already measure (~30 lines in the pose
+   spring), or extending `--contact-backend force_mode`, which is Z-compliant
+   only today.
+2. **Payload / CoG precision.** Named by the pendant. TCP is calibrated but the
+   operator is unsure how precisely. Re-run the UR payload wizard with the
+   chamfer EE mounted. No code.
+3. **speedJ acceleration.** Named by the pendant. `exp/in-contact-dtc` set it
+   explicitly to `accel=0.5 rad/s²`; on this branch it lives inside gafropy's
+   urcl backend and nothing here controls it. `max_qddot` bounds *our commanded
+   qdot* rate, not the acceleration the UR plans its ramp with. Unverified.
+4. **Near-singular amplification.** Already fixed in `1222d57` (DLS λ
+   0.001 → 0.05, per-joint clamp). "Pose looks fine" makes this less likely to
+   have been the cause, but it was a real 500× amplifier. `sigma_min` in the
+   contact CSV now settles it objectively.
 
-## Ruled out — do not re-run these
+## Ruled out — do not re-investigate
 
-- **The regression is not force-output vs velocity-output.** All three contact
-  loops with hardware hours behind them are velocity output, including
-  `in_contact_control/force_pid.py` on `exp/in-contact-dtc`, which is the most
-  mature. The only force-output paths are `7f303ae`'s `set_desired_wrench` (dead
-  gafropy path) and UR native `force_mode`.
-- **`hardware_free_teleop.py` never had a contact mode.** Comments elsewhere
-  saying "same plant as hardware_free_teleop" refer to reusing its pose-spring
-  math, not a force loop.
-- **`541028e` ("Fs holds Fd well and moves tangentially") was already velocity
-  output.** What `8f6d3c5` changed was the *plant*: it deleted the `_z_compliant`
-  Cartesian branch (`qdot = J# @ merged_contact_twist(vz)`, pose spring off) and
-  put the K=400 pose spring back underneath the press. `merged_contact_twist`,
-  `contact_slide_twist` and `slew_slide` are now vestigial.
+- **Loop timing.** `dt` median 5.19 ms against 5.00 nominal. The fix in `6a28a5e`
+  was worth ~4%, not the 2× suspected. Never the cause of anything.
+- **Sensor noise as the source of the big excursions.** Tick-to-tick `|dFs|` is
+  0.19–0.23 N median. The ±10 N swings seen in the console were 0.5 s aliasing.
+  The UR5e has a real 6-axis wrist F/T sensor and the grabs are physically real —
+  the operator has observed them. Do not filter them.
+- **The force loop as the cause of the protective stops.** See above.
 
-## Open questions
+## Tools built for this (use them, do not re-derive)
 
-- **`Wrench.to_array()` blade order is unverified.** The
-  `[fx, fy, tz, fz, ty, tx]` comment in `controller.py` came from commit
-  `7f303ae`, not from gafropy. Settle with
-  `ga.Wrench(tx=0,ty=0,tz=0,fx=0,fy=0,fz=1.0).to_array()`, then fix or delete
-  the comment. Moot while RTDE is the force source.
-- The overlay downstream of the press loop is still a scalar tool-Z speed, so a
-  press axis tilted off tool Z is delivered scaled by `cos²θ`. That is a bounded
-  positive gain inside a closed force loop — it costs response, not steady
-  state — with a fallback if the axis approaches perpendicular. Revisit only if
-  the hardware run shows a slow approach.
+- `python examples/analyze_contact_log.py` — newest `speedj_logs/contact_*.csv`
+  by default. Loop period, force spread and the rate it implies against
+  `spike_dF_dt_N_s`, tracking, guard duty cycles, safety-halt windows,
+  `sigma_min`/`clamp_scale`/`|qdot|`, per-axis lateral error, dominant
+  oscillation frequency of `Fs` vs `v_z`, and worst events with timestamps.
+  **~25 lines instead of pasting a terminal.**
+- `python examples/plot_contact_spectrum.py [--column v_z]` — the same data as
+  four plots, including what the Hann window is doing.
+- The contact CSV streams to disk and survives a Ctrl+C or a protective stop;
+  the speedJ `.npz` only lands on a clean exit.
+
+## Next run
+
+```bash
+git pull
+python examples/hardware_object_contact_teleop.py --contact-backend speedj --target-force 10
+python examples/analyze_contact_log.py
+```
+
+Paste the analyzer output, not the terminal. Two things wanted from the
+console: the `jacobian: 6xN sigma_min=... dls_lambda=...` line at startup (the
+operator believes the vention rail is *not* in the jacobian — this confirms it),
+and any `near-singular pose:` warnings.
