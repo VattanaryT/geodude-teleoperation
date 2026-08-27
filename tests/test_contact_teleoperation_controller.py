@@ -167,9 +167,13 @@ class ContactForceLoopTest(unittest.TestCase):
         finally:
             ctrl.stop()
 
-    def test_fs_sign_flip_stays_contact_and_pids(self):
-        # Sliding can flip Fz. Stay in contact and keep PID (≤ max_v_hold), do not
-        # retract into free space or re-arm DualLoop approach.
+    def test_fs_sign_flip_stays_contact_and_does_not_press(self):
+        # Sliding can flip Fz. Stay in contact and do not re-arm DualLoop
+        # approach. The second sample is 17 N against a 15 N target, so the
+        # command must not be a press: at or over target the answer is 0 or
+        # retract, and the wrong-sign guard answers a bounce the same way.
+        # This asserted `vz > 0` when the loop still PID'd through an
+        # overshoot; that is the behavior the C153 work removed.
         samples = iter([-15.0, 17.0])
         ctrl = _make_controller(
             measured_fz_fn=lambda: next(samples), force_sign=1.0, sit_s=0.0,
@@ -179,8 +183,9 @@ class ContactForceLoopTest(unittest.TestCase):
         second = ctrl._compute_force_command()
         self.assertEqual(ctrl._z_mode, "contact")
         vz = _vz(ctrl, second)
-        self.assertGreater(vz, 0.0)
-        self.assertLessEqual(vz, 0.002 + 1e-9)
+        self.assertLessEqual(vz, 0.0)
+        # unload_v_m_s is a floor on the escape speed, not a ceiling, so a
+        # retract is allowed to exceed max_v_hold -- only a press is not.
 
     def test_under_target_after_light_contact_still_pids(self):
         # Fs dip / sign noise must not retract off the part (free-space drift).

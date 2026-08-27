@@ -383,7 +383,12 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         ctrl.set_tool_z_velocity(0.005)
         qdot = ctrl.compute_control_command(
             _VelState(), _ObjState(np.zeros(6)), _TaskState())
-        self.assertAlmostEqual(float(qdot[5]), 0.005, places=6)
+        # The overlay goes through the DLS inverse, so dls_damping attenuates
+        # it by 1/(1+lambda^2): 0.25% at the 0.05 this runs on hardware, vs the
+        # exact pass-through the old 1e-3 gave. Assert the overlay arrives
+        # essentially intact rather than bit-exact, or this test just pins the
+        # regularizer the C153 work deliberately changed.
+        self.assertAlmostEqual(float(qdot[5]), 0.005, delta=0.005 * 0.01)
         np.testing.assert_allclose(qdot[:5], 0.0, atol=1e-9)
 
     def test_z_compliant_update_is_pose_step_like_free_teleop(self):

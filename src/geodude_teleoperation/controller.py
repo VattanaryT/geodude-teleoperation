@@ -228,6 +228,12 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         # Linear pose error per axis, so a log can answer which direction is
         # prone to the fault instead of leaving it to the operator's memory.
         self._last_err_lin = np.zeros(3)
+        # ...and the angular half. Nothing recorded it, so "the tool rotates
+        # instead of sliding" was an operator observation with no number behind
+        # it. In contact the stick only ever writes xyz; every bit of commanded
+        # rotation comes from the field, so this is the channel to measure when
+        # the motion does not match the input.
+        self._last_err_ang = np.zeros(3)
         self._last_vtask_lin = 0.0
         self._n_joints_seen = None
         self._t_cond_warn = None
@@ -355,7 +361,9 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
 
             v_task = self._dt * (task_acceleration - bias)
             # Blade order is [angular, linear], so 3:6 is the linear block.
-            self._last_err_lin = np.asarray(error, dtype=float).reshape(-1)[3:6].copy()
+            err_flat = np.asarray(error, dtype=float).reshape(-1)
+            self._last_err_lin = err_flat[3:6].copy()
+            self._last_err_ang = err_flat[0:3].copy()
             self._last_vtask_lin = float(np.linalg.norm(v_task[3:6]))
             if (self._z_compliant and self._free_along_normal
                     and self._n_body is not None):
@@ -445,10 +453,15 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
             "err_y": float(self._last_err_lin[1]),
             "err_z": float(self._last_err_lin[2]),
             "vtask_lin": self._last_vtask_lin,
-            # Constant for the run, but per-row: it is the one lever on the
-            # lateral push and a log that does not carry it cannot be compared
+            "err_rx": float(self._last_err_ang[0]),
+            "err_ry": float(self._last_err_ang[1]),
+            "err_rz": float(self._last_err_ang[2]),
+            # Constant for the run, but per-row: these are the two levers on
+            # how the pose spring splits its authority between sliding and
+            # turning, and a log that does not carry them cannot be compared
             # against another run's.
             "k_xy": float(self._stiffness[3, 3]),
+            "k_ang": float(self._stiffness[0, 0]),
         }
 
     def set_contact_normal(self, n_base, R_tool_to_base):
@@ -847,7 +860,8 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         "Fs_n", "Fs_n_raw", "Fe_n", "dFs_dt", "gain", "v_along", "spike",
         "osc", "wrong_sign", "fault_fs",
         "sigma_min", "clamp_scale", "qdot_max",
-        "err_x", "err_y", "err_z", "vtask_lin", "k_xy",
+        "err_x", "err_y", "err_z", "vtask_lin",
+        "err_rx", "err_ry", "err_rz", "k_xy", "k_ang",
     )
 
     def _open_contact_log(self):

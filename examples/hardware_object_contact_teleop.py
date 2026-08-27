@@ -178,7 +178,8 @@ def _dashboard_bring_up(ip: str) -> None:
 
 def _make_approach_controller(interface, task_space, home_ee_motor,
                               free_along_normal=True, dls_damping=0.05,
-                              per_joint_velocity=True, xy_stiffness=None):
+                              per_joint_velocity=True, xy_stiffness=None,
+                              ang_stiffness=None):
     # These are NOT hardware_free_teleop's defaults, despite what this comment
     # used to claim -- that file constructs AdmittanceTeleoperationController()
     # with no arguments, so it runs the class defaults (stiffness 3000,
@@ -194,9 +195,18 @@ def _make_approach_controller(interface, task_space, home_ee_motor,
     # was refusing to follow. It costs lateral tracking speed in proportion --
     # the spring delivers dt*K/M * error, so at the 4 mm max_step_m cap, K=2000
     # gives 8 mm/s and K=500 gives 2 mm/s.
+    # Blade indices 0..2 are angular. In contact the stick writes xyz only, so
+    # every bit of commanded rotation comes from the field's R -- which means
+    # lowering k[3:5] alone changes the *ratio* of sliding to turning, not just
+    # the shove. At K_xy=500 the spring commands 2.5 mm/s of slide against
+    # 0.04 rad/s of turn, which is 4 mm/s at the tool tip on a 10 cm lever: the
+    # arm visibly rotates toward the field instead of sliding, whichever way
+    # the stick is pushed. --ang-stiffness is the other half of that ratio.
     k = [2000.0] * 6
     if xy_stiffness is not None:
         k[3] = k[4] = float(xy_stiffness)
+    if ang_stiffness is not None:
+        k[0] = k[1] = k[2] = float(ang_stiffness)
     approach = AdmittanceTeleoperationController(
         inertia=np.diag([1.0] * 6),
         damping=np.diag([20.0] * 6),
@@ -372,6 +382,14 @@ def build_arg_parser():
         action="store_false", default=True,
         help="let field-follow keep discarding vf.project()'s position, so the "
              "commanded point never re-snaps to the mesh (previous behavior)")
+    parser.add_argument(
+        "--ang-stiffness", type=float, default=None, metavar="N_M",
+        help="pose-spring stiffness on the three angular axes; default is the "
+             "same 2000 as every other axis. In contact the stick writes xyz "
+             "only, so this alone decides how fast the tool turns toward the "
+             "field: 2000 with the 0.02 rad --max-dR cap is 2.3 deg/s, which "
+             "outruns a softened --xy-stiffness slide. Lower it to keep the "
+             "two in proportion.")
     parser.add_argument(
         "--xy-stiffness", type=float, default=None, metavar="N_M",
         help="pose-spring stiffness on the lateral (tool X/Y) axes only; "
@@ -579,7 +597,8 @@ def main():
         free_along_normal=args.free_along_normal,
         dls_damping=args.dls_damping,
         per_joint_velocity=args.per_joint_velocity,
-        xy_stiffness=args.xy_stiffness)
+        xy_stiffness=args.xy_stiffness,
+        ang_stiffness=args.ang_stiffness)
 
     # --- speedj contact: stay on gafropy (default). force_mode is opt-in. ---
     contact_controller = None
@@ -842,7 +861,8 @@ def main():
             free_along_normal=args.free_along_normal,
             dls_damping=args.dls_damping,
             per_joint_velocity=args.per_joint_velocity,
-            xy_stiffness=args.xy_stiffness)
+            xy_stiffness=args.xy_stiffness,
+            ang_stiffness=args.ang_stiffness)
         if contact_controller is not None:
             contact_controller.set_conditioning_fn(approach_controller.conditioning)
         if robot_viz is not None:

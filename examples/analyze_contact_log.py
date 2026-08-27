@@ -58,6 +58,48 @@ def _windowed_rate(t, fs, window_s=0.02):
     return (fs[good] - fs[j][good]) / span[good]
 
 
+def _angular_authority(rows, lead, k_xy):
+    """Slide vs turn, in the same units, from the same spring.
+
+    The pose spring commands ``v = dt*K/M * e`` on every axis (dt=0.001, M=1),
+    so a 5 mm lateral error at K=500 is 2.5 mm/s while a 0.02 rad angular error
+    at K=2000 is 0.04 rad/s -- 4 mm/s at the tool tip on a 10 cm lever. In
+    contact the stick only writes xyz, so all of that rotation comes from the
+    field: when turning outruns sliding the arm goes one way no matter which
+    way the stick is pushed. Nothing printed the comparison, so it read as a
+    bug rather than as a gain ratio.
+    """
+    erx, ery, erz = (_col(rows, k) for k in ("err_rx", "err_ry", "err_rz"))
+    if not np.isfinite(erx).any():
+        print("  (no err_r* columns: run predates angular-error logging)")
+        return
+    k_ang = _col(rows, "k_ang")
+    ang = np.sqrt(erx ** 2 + ery ** 2 + erz ** 2)
+    print("\n-- slide vs turn (contact stick writes xyz only; all turn is the field) --")
+    print(f"  |e_ang|  median={np.degrees(np.nanmedian(ang)):5.2f}deg"
+          f"  p95={np.degrees(np.nanpercentile(ang, 95)):5.2f}deg"
+          f"  max={np.degrees(np.nanmax(ang)):5.2f}deg")
+    if not (np.isfinite(k_ang).any() and np.isfinite(k_xy).any()):
+        print("  (no k_xy/k_ang columns: cannot compare the two authorities)")
+        return
+    dt_m = 0.001  # AdmittanceTeleoperationController(dt=...), inertia = I
+    kx, ka = np.nanmedian(k_xy), np.nanmedian(k_ang)
+    v_lin = dt_m * kx * np.nanmedian(np.abs(lead))
+    w = dt_m * ka * np.nanmedian(ang)
+    print(f"  commanded slide  {v_lin * 1e3:5.2f} mm/s   (K_xy={kx:.0f} x "
+          f"{np.nanmedian(np.abs(lead)) * 1e3:.2f}mm)")
+    print(f"  commanded turn   {np.degrees(w):5.2f} deg/s  (K_ang={ka:.0f} x "
+          f"{np.degrees(np.nanmedian(ang)):.2f}deg)"
+          f"  = {w * 0.10 * 1e3:5.2f} mm/s at a 10 cm lever")
+    tip = w * 0.10
+    if tip > v_lin and v_lin > 0:
+        print(f"  -> turning outruns sliding {tip / v_lin:.1f}x at that lever. "
+              "The direction is the field's, not the stick's,\n"
+              "     so the arm turns one way whichever axis is pushed. "
+              "--ang-stiffness is the lever; keep it in\n"
+              f"     proportion to --xy-stiffness ({ka:.0f}/{kx:.0f} today).")
+
+
 def _dominant_hz(t, x, lo=0.2, hi=30.0):
     """Peak frequency of x, and its amplitude, over [lo, hi] Hz.
 
@@ -210,6 +252,7 @@ def summarize(path):
                   "sideways for as long as it lasts, and the UR calls the\n"
                   "     accumulated deviation 'could not follow path'. Look here, "
                   "not at the force loop.")
+        _angular_authority(rows, lead, k_xy)
 
     print("\n-- oscillation (friction grabs are real on this rig; do not filter) --")
     f_fs, a_fs = _dominant_hz(t, fs)
