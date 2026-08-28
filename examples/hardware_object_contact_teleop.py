@@ -108,6 +108,8 @@ from geodude_teleoperation.tcp_force import (
 from geodude_teleoperation.direct_torque import print_dtc_rate_verification
 from geodude_teleoperation.torque_backend import (
     DEFAULT_DTC_HZ,
+    DEFAULT_I_MAX,
+    DEFAULT_KI,
     DEFAULT_KV,
     DEFAULT_TAU_MAX,
     DirectTorqueBackend,
@@ -387,6 +389,21 @@ def build_arg_parser():
         metavar="NM_PER_RADPS",
         help="dtc joint-velocity gain, scalar or 6 values (default %(default)s)")
     parser.add_argument(
+        "--dtc-ki", type=float, nargs="+", default=list(DEFAULT_KI),
+        metavar="NM_PER_RAD",
+        help="dtc integral gain on velocity error, scalar or 6 values. Off by "
+             "default. kv alone cannot break static friction here -- the pose "
+             "spring commands ~0.02 rad/s, so kv=60 yields only ~1.5-2.6 N.m "
+             "against a UR5e breakaway of several N.m, and raising kv shakes "
+             "the arm instead of moving it. Try 800 800 800 250 250 250 "
+             "(default %(default)s)")
+    parser.add_argument(
+        "--dtc-i-max", type=float, nargs="+", default=list(DEFAULT_I_MAX),
+        metavar="NM",
+        help="cap on the --dtc-ki contribution, scalar or 6 values. Keep it "
+             "well under --dtc-tau-max so a stuck joint pushes hard but "
+             "bounded (default %(default)s)")
+    parser.add_argument(
         "--dtc-tau-max", type=float, nargs="+", default=list(DEFAULT_TAU_MAX),
         metavar="NM",
         help="dtc per-joint torque cap, scalar or 6 values. This cap IS the "
@@ -585,6 +602,7 @@ def main():
             model_file=MODEL,
             task_space_name=args.task_space,
             kv=args.dtc_kv, tau_max=args.dtc_tau_max,
+            ki=args.dtc_ki, i_max=args.dtc_i_max,
             hz=args.dtc_hz, hold_zero=args.dtc_hold_zero,
             payload_mass=args.dtc_payload_mass,
             payload_cog=args.dtc_payload_cog,
@@ -840,6 +858,7 @@ def main():
                 st = dtc_backend.stats()
                 actuation = (
                     f"tau_peak={st.get('tau_peak', 0.0):.2f}Nm "
+                    f"i={st.get('i_peak', 0.0):.2f}Nm "
                     f"sat={st.get('n_saturated', 0)}")
             print(
                 format_follow_lag(

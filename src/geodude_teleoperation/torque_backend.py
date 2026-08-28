@@ -48,6 +48,16 @@ DEFAULT_KV = (60.0, 60.0, 60.0, 20.0, 20.0, 20.0)
 # term is needed at all.
 DEFAULT_KP_HOLD = (200.0, 200.0, 200.0, 60.0, 60.0, 60.0)
 
+# N.m per (rad/s * s) of accumulated velocity error, and the cap on what that
+# accumulation may contribute. Off by default: the integral changes what the
+# arm does under load, so it is opt-in per session like every other contact fix
+# in this repo. Measured starting point on this rig -- the pose spring commands
+# ~0.02 rad/s, breakaway friction is several N.m, and kv=60 delivers only
+# ~1.5-2.6 N.m -- is ki=(800,800,800,250,250,250) with i_max=(8,8,8,3,3,3),
+# which reaches breakaway in ~0.3 s of persistent error.
+DEFAULT_KI = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+DEFAULT_I_MAX = (8.0, 8.0, 8.0, 3.0, 3.0, 3.0)
+
 
 def _as_vec(value, n: int, name: str) -> np.ndarray:
     arr = np.asarray(value, dtype=float).reshape(-1)
@@ -81,13 +91,32 @@ class JointVelocityTorqueLaw:
     ``kp_hold * (q_hold - q)``; any non-idle command releases the latch. This is
     a hold, not a target the arm chases, so it does not reintroduce the
     displacement behavior -- while moving, ``kp_hold`` contributes nothing.
+
+    **The integral.** ``kv`` alone cannot break static friction here. The pose
+    spring tops out near 8 mm/s, which is ~0.02 rad/s of joint command, so
+    ``kv * err`` is ~1-2 N.m against a UR5e breakaway of several N.m -- and
+    raising ``kv`` to cover the gap destabilizes the loop (``qdot_meas`` returns
+    over RTDE with latency; measured on hardware, 5x kv shook the arm violently
+    without moving it any better). ``ki`` accumulates the *same* error into
+    torque that does not scale with loop gain: it ramps until the joint breaks
+    loose, then settles holding exactly the torque that sustains motion against
+    kinetic friction, and unwinds only when the joint overruns the command
+    (``qdot_meas > qdot_cmd``, so the error goes negative). Bounded by ``i_max``
+    well under ``tau_max`` so a genuinely stuck joint pushes hard but not
+    without limit, frozen while the output is saturated (anti-windup), and
+    dropped whenever the command is idle so the hold latch owns standstill
+    alone.
     """
 
     def __init__(self, *, n_joints: int = 6, kv=DEFAULT_KV,
                  tau_max=DEFAULT_TAU_MAX, kp_hold=DEFAULT_KP_HOLD,
+                 ki=DEFAULT_KI, i_max=DEFAULT_I_MAX,
                  idle_radps: float = 1e-4, hold_max_rad: float = 0.05):
         self._n = int(n_joints)
         self._kv = _as_vec(kv, self._n, "kv")
+        self._ki = np.abs(_as_vec(ki, self._n, "ki"))
+        self._i_max = np.abs(_as_vec(i_max, self._n, "i_max"))
+        self._integ = np.zeros(self._n, dtype=float)
         self._tau_max = np.abs(_as_vec(tau_max, self._n, "tau_max"))
         self._kp_hold = _as_vec(kp_hold, self._n, "kp_hold")
         self._idle_radps = float(idle_radps)
@@ -114,17 +143,44 @@ class JointVelocityTorqueLaw:
     def last_saturated(self) -> np.ndarray:
         return self._last_saturated.copy()
 
+    @property
+    def integral(self) -> np.ndarray:
+        return self._integ.copy()
+
     def reset(self) -> None:
         self._q_hold = None
+        self._integ = np.zeros(self._n, dtype=float)
         self._last_saturated = np.zeros(self._n, dtype=bool)
 
-    def step(self, qdot_cmd, qdot_meas, q=None) -> np.ndarray:
-        """Return the torque for one tick. ``q`` may be omitted to skip the hold."""
+    def step(self, qdot_cmd, qdot_meas, q=None, dt: float | None = None) -> np.ndarray:
+        """Return the torque for one tick. ``q`` may be omitted to skip the hold.
+
+        ``dt`` is the measured tick period; omitted, the nominal host period is
+        used. It only scales the integral -- the same reason the contact loop
+        integrates on ``_tick_dt()`` rather than on ``update_period``.
+        """
         cmd = _as_vec(qdot_cmd, self._n, "qdot_cmd")
         meas = _as_vec(qdot_meas, self._n, "qdot_meas")
 
         idle = bool(np.all(np.abs(cmd) <= self._idle_radps))
-        tau = self._kv * (cmd - meas)
+        err = cmd - meas
+        tau = self._kv * err
+
+        if idle:
+            # Standstill belongs to the hold latch alone. Leaving the integral
+            # charged here would hand it a shove the moment the latch forms.
+            self._integ = np.zeros(self._n, dtype=float)
+        elif np.any(self._ki > 0.0):
+            step_dt = 1.0 / DEFAULT_DTC_HZ if dt is None else max(float(dt), 0.0)
+            candidate = np.clip(
+                self._integ + self._ki * err * step_dt, -self._i_max, self._i_max)
+            # Anti-windup: while the output is already saturated, only let the
+            # integral shrink. Otherwise a joint held by friction charges it to
+            # the cap and keeps pushing after the obstruction is gone.
+            winding = np.abs(candidate) > np.abs(self._integ)
+            frozen = winding & self._last_saturated
+            self._integ = np.where(frozen, self._integ, candidate)
+            tau = tau + self._integ
 
         if q is None:
             self._q_hold = None
@@ -287,6 +343,8 @@ class DirectTorqueBackend:
         kv=DEFAULT_KV,
         tau_max=DEFAULT_TAU_MAX,
         kp_hold=DEFAULT_KP_HOLD,
+        ki=DEFAULT_KI,
+        i_max=DEFAULT_I_MAX,
         law: "JointVelocityTorqueLaw | None" = None,
         hz: float = DEFAULT_DTC_HZ,
         hold_zero: bool = False,
@@ -355,7 +413,8 @@ class DirectTorqueBackend:
         self._ur_global = self._joint_indices[np.asarray(self._ur_slots, dtype=int)]
 
         self._law = law if law is not None else JointVelocityTorqueLaw(
-            n_joints=self._n, kv=kv, tau_max=tau_max, kp_hold=kp_hold)
+            n_joints=self._n, kv=kv, tau_max=tau_max, kp_hold=kp_hold,
+            ki=ki, i_max=i_max)
         if self._law.n_joints != self._n:
             raise ValueError(
                 f"law has {self._law.n_joints} joints, the control group drives "
@@ -386,6 +445,7 @@ class DirectTorqueBackend:
         self._n_ticks = 0
         self._n_stale = 0
         self._n_gated = 0
+        self._t_tick: float | None = None
         self._n_read_fail = 0
         self._last_error: str | None = None
         self._gated_now = False
@@ -846,8 +906,13 @@ class DirectTorqueBackend:
                 # it cannot latch an idle hold either.
                 tau = np.zeros(self._n, dtype=float)
             else:
-                tau = self._law.step(cmd, qdot_last, q_last)
+                # Measured period, not nominal: the tick does a blocking RTDE
+                # read, so the real dt runs longer than 1/hz and a nominal one
+                # would under-integrate by that ratio.
+                dt_tick = None if self._t_tick is None else now - self._t_tick
+                tau = self._law.step(cmd, qdot_last, q_last, dt=dt_tick)
 
+        self._t_tick = now
         with self._lock:
             self._last_tau = np.asarray(tau, dtype=float).reshape(-1).copy()
         if self._streamer is not None:
@@ -884,6 +949,7 @@ class DirectTorqueBackend:
             # the arm is simply not being pushed hard enough to move.
             "tau_peak": float(np.max(np.abs(self._last_tau)))
                         if self._last_tau.size else 0.0,
+            "i_peak": float(np.max(np.abs(self._law.integral))),
             "last_error": self._last_error,
             "latch_path": (
                 None if self._latch_path is None else str(self._latch_path)),
@@ -896,6 +962,8 @@ class DirectTorqueBackend:
 __all__ = [
     "DEFAULT_DTC_HZ",
     "DEFAULT_KP_HOLD",
+    "DEFAULT_KI",
+    "DEFAULT_I_MAX",
     "DEFAULT_KV",
     "DEFAULT_STALE_AFTER_S",
     "DEFAULT_TAU_MAX",
