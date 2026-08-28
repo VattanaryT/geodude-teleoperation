@@ -533,5 +533,64 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         np.testing.assert_allclose(probe.step(np.eye(3)), [0.0, 0.0, 1.05])
 
 
+class WrenchLawWiringTest(unittest.TestCase):
+    """--dtc-law wrench must reach *both* _make_approach_controller call sites.
+
+    There are two: startup, and the rebuild after StartupAlign. The second is
+    the one that actually flies, so a flag wired only to the first would run
+    the whole session on speedj gains and read as "the wrench law does not
+    slide".
+    """
+
+    def _args(self, argv):
+        return _load_example().build_arg_parser().parse_args(argv)
+
+    def test_speedj_gets_no_wrench_kwargs_at_all(self):
+        mod = _load_example()
+        self.assertEqual(mod._wrench_law_kwargs(self._args([])), {})
+
+    def test_velocity_law_gets_no_wrench_kwargs_either(self):
+        mod = _load_example()
+        args = self._args(["--contact-backend", "dtc"])
+        self.assertEqual(args.dtc_law, "velocity")
+        self.assertEqual(mod._wrench_law_kwargs(args), {})
+
+    def test_wrench_law_carries_the_split_gains(self):
+        mod = _load_example()
+        kw = mod._wrench_law_kwargs(
+            self._args(["--contact-backend", "dtc", "--dtc-law", "wrench"]))
+        self.assertTrue(kw["wrench_law"])
+        self.assertAlmostEqual(kw["k_lin"], 3000.0)
+        self.assertAlmostEqual(kw["k_ang"], 50.0)
+        self.assertAlmostEqual(kw["err_clip_lin"], 0.01)
+
+    def test_both_call_sites_pass_them(self):
+        source = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertEqual(source.count("**_wrench_law_kwargs(args)"), 2)
+
+    def test_the_factory_splits_the_units_and_damps_critically(self):
+        """K_ang on blades 0..2 (N.m/rad), K_lin on 3..5 (N/m), D = 2*sqrt(K)*zeta.
+
+        A flat 2000 across both -- what speedj runs -- is a velocity gain, not
+        a stiffness, and is violent on the angular half under tau = J.T @ W.
+        """
+        import math
+
+        k_lin, k_ang, zeta = 3000.0, 50.0, 1.0
+        k = [k_ang] * 3 + [k_lin] * 3
+        d = [2.0 * math.sqrt(ki) * zeta for ki in k]
+        self.assertAlmostEqual(d[0], 2.0 * math.sqrt(50.0))
+        self.assertAlmostEqual(d[3], 2.0 * math.sqrt(3000.0))
+        # 5 mm of field-follow lead is the sliding force this buys.
+        self.assertAlmostEqual(k[3] * 0.005, 15.0)
+
+    def test_contact_is_refused_under_the_wrench_law(self):
+        """The press reaches the arm through set_tool_z_velocity, which the
+        wrench law does not read. Entering contact would hover and log a
+        healthy zero force -- refuse until set_press_wrench is wired (A2)."""
+        source = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn('refusing contact under --dtc-law wrench', source)
+
+
 if __name__ == "__main__":
     unittest.main()

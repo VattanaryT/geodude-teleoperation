@@ -346,6 +346,7 @@ class DirectTorqueBackend:
         ki=DEFAULT_KI,
         i_max=DEFAULT_I_MAX,
         law: "JointVelocityTorqueLaw | None" = None,
+        law_kind: str = "velocity",
         hz: float = DEFAULT_DTC_HZ,
         hold_zero: bool = False,
         friction_comp: bool = True,
@@ -370,6 +371,17 @@ class DirectTorqueBackend:
         self._robot_ip = None if robot_ip is None else str(robot_ip)
         self._hz = float(hz)
         self._hold_zero = bool(hold_zero)
+        # "velocity": tau = kv * (qdot_cmd - qdot_meas), the first DTC port --
+        # it swaps only the actuator and keeps the whole speedJ velocity
+        # pipeline (inertia, dt, DLS inverse, joint clamps) in front of it.
+        # "wrench": tau = J.T @ W straight off the pose spring. The velocity
+        # path's caps exist to protect a position servo and are what starve the
+        # torque law; see AdmittanceTeleoperationController.compute_control_wrench.
+        law_kind = str(law_kind)
+        if law_kind not in ("velocity", "wrench"):
+            raise ValueError(
+                f"law_kind must be 'velocity' or 'wrench', got {law_kind!r}")
+        self._law_kind = law_kind
         self._friction_comp = bool(friction_comp)
         self._safety_mode_fn = safety_mode_fn
         self._stale_after_s = float(stale_after_s)
@@ -450,6 +462,8 @@ class DirectTorqueBackend:
         self._last_error: str | None = None
         self._gated_now = False
         self._cmd_fail_logged = False
+        self._n_tau_clipped = 0
+        self._last_wrench = np.zeros(6, dtype=float)
 
     # -- RobotInterface duck-type ------------------------------------------
 
@@ -702,7 +716,7 @@ class DirectTorqueBackend:
             target=self._run, name="dtc-control-law", daemon=True)
         self._thread.start()
         print(
-            f"\033[93mdtc: control law at {self._hz:g} Hz, tau_max="
+            f"\033[93mdtc: {self._law_kind} law at {self._hz:g} Hz, tau_max="
             f"{np.max(self._law.tau_max):g} N.m, payload={self._payload_note}, "
             f"latch={self._latch_path}"
             f"{'  [HOLD-ZERO: no actuation -- the arm must FLOAT]' if self._hold_zero else ''}"
@@ -794,10 +808,13 @@ class DirectTorqueBackend:
         return (splice_ur(base, q6, self._ur_slots),
                 splice_ur(np.zeros(base.size), qd6, self._ur_slots))
 
-    def _compute_qdot(self):
-        """One tick of the *unchanged* control law, off gafropy's C++ loop."""
-        if self._qdot_cmd_fn is not None:
-            return self._qdot_cmd_fn()
+    def _control_states(self):
+        """``(controller, robot_state, objective_state, task_space_state)``.
+
+        The state gafropy's C++ loop would have built before calling the control
+        law, rebuilt here because we took its RTDE client. Shared by both laws
+        so they cannot drift apart in how they see the arm.
+        """
         if self._controller is None:
             return None      # no command source yet: a pure damped hold
         state = self.control_group_state()
@@ -813,6 +830,52 @@ class DirectTorqueBackend:
         task_space = controller.get_task_space()
         tss = task_space.compute_state(q_ctrl, qd_ctrl)
         objective_state = controller.get_objective().compute_state(robot_state, tss)
+        return controller, robot_state, objective_state, tss
+
+    def _compute_wrench(self):
+        """One tick of the wrench law: ``tau = clip(J.T @ W, +/-tau_max)``.
+
+        ``JointVelocityTorqueLaw`` is bypassed entirely on this path -- no
+        ``kv``, no integral, no idle hold latch. The pose spring *is* the hold
+        under torque, and two things holding one axis is the fight that
+        produces drift. Only ``tau_max`` is reused from the law object, and only
+        as a configured vector, so the clamp cannot diverge between the two
+        paths.
+        """
+        states = self._control_states()
+        if states is None:
+            return None
+        controller, robot_state, objective_state, tss = states
+        wrench = np.asarray(
+            controller.compute_control_wrench(robot_state, objective_state, tss),
+            dtype=float).reshape(-1)
+        if wrench.size != 6:
+            raise RuntimeError(
+                f"control law returned a {wrench.size}-wrench, expected 6")
+        jacobian = np.asarray(tss.get_jacobian(), dtype=float)
+        if jacobian.shape[1] != self._n:
+            # 6x6 on this rig: the vention rail is in get_joint_indices() but
+            # not in the jacobian, which is why the slots are resolved from the
+            # model rather than assumed.
+            raise RuntimeError(
+                f"jacobian has {jacobian.shape[1]} columns, the control group "
+                f"drives {self._n}")
+        self._last_wrench = wrench.copy()
+        tau_max = self._law.tau_max
+        tau = jacobian.T @ wrench
+        clipped = np.clip(tau, -tau_max, tau_max)
+        if np.any(clipped != tau):
+            self._n_tau_clipped += 1
+        return clipped
+
+    def _compute_qdot(self):
+        """One tick of the *unchanged* control law, off gafropy's C++ loop."""
+        if self._qdot_cmd_fn is not None:
+            return self._qdot_cmd_fn()
+        states = self._control_states()
+        if states is None:
+            return None
+        controller, robot_state, objective_state, tss = states
         qdot = np.asarray(
             controller.compute_control_command(robot_state, objective_state, tss),
             dtype=float).reshape(-1)
@@ -852,6 +915,21 @@ class DirectTorqueBackend:
         except ValueError as exc:
             self._last_error = f"qdot_cmd: {exc}"
             return np.zeros(self._n, dtype=float)
+
+    def _read_tau_wrench(self) -> np.ndarray:
+        try:
+            tau = self._compute_wrench()
+        except Exception as exc:
+            self._last_error = f"wrench: {type(exc).__name__}: {exc}"
+            if not self._cmd_fail_logged:
+                self._cmd_fail_logged = True
+                print(
+                    f"\033[91mdtc: wrench law failed ({exc}); tau held at "
+                    f"zero\033[0m", flush=True)
+            return np.zeros(self._n, dtype=float)
+        if tau is None:
+            return np.zeros(self._n, dtype=float)
+        return _as_vec(tau, self._n, "tau")
 
     # -- the loop -----------------------------------------------------------
 
@@ -896,7 +974,16 @@ class DirectTorqueBackend:
                 print(
                     f"\033[92mrobot safety cleared ({safety_mode_name(mode)}); "
                     f"DTC resumes\033[0m", flush=True)
-            cmd = self._read_qdot_cmd()
+            # Both laws run every tick even under hold_zero -- the speedJ
+            # trace, the field-follow path and the viser EE frame stay live,
+            # which is the whole point of watching the arm float in viser
+            # rather than reading a console report.
+            if self._law_kind == "wrench":
+                tau_wrench = self._read_tau_wrench()
+                cmd = None
+            else:
+                tau_wrench = None
+                cmd = self._read_qdot_cmd()
             if self._hold_zero:
                 # Bring-up gate. The law above the seam still runs every tick --
                 # the speedJ trace, the field-follow path and the viser EE frame
@@ -905,6 +992,10 @@ class DirectTorqueBackend:
                 # nothing reaches the robot, and the torque law is not stepped so
                 # it cannot latch an idle hold either.
                 tau = np.zeros(self._n, dtype=float)
+            elif tau_wrench is not None:
+                # tau = J.T @ W, already clamped. The velocity law is bypassed
+                # entirely here: no kv, no integral, no idle hold latch.
+                tau = tau_wrench
             else:
                 # Measured period, not nominal: the tick does a blocking RTDE
                 # read, so the real dt runs longer than 1/hz and a nominal one
@@ -950,6 +1041,15 @@ class DirectTorqueBackend:
             "tau_peak": float(np.max(np.abs(self._last_tau)))
                         if self._last_tau.size else 0.0,
             "i_peak": float(np.max(np.abs(self._law.integral))),
+            "law": self._law_kind,
+            # Wrench law only. |W_lin| is the commanded lateral force in N, and
+            # it is the number to read against tau_peak: a healthy slide is a
+            # sane |W_lin| with tau_peak well under tau_max. n_tau_clipped
+            # rising means the wrench is asking for more than tau_max allows,
+            # i.e. the clamp -- not the spring -- is deciding the motion.
+            "w_lin": float(np.linalg.norm(self._last_wrench[3:6])),
+            "w_ang": float(np.linalg.norm(self._last_wrench[0:3])),
+            "n_tau_clipped": self._n_tau_clipped,
             "last_error": self._last_error,
             "latch_path": (
                 None if self._latch_path is None else str(self._latch_path)),

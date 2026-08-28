@@ -174,7 +174,8 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
                  max_joint_velocity=1.0, min_twist_scaling_factor=1.0,
                  max_twist_scaling_factor=10.0, twist_linear_scale=2.0,
                  max_qddot=5.0, stick_hz=50.0, free_along_normal=True,
-                 dls_damping=0.05, per_joint_velocity=True):
+                 dls_damping=0.05, per_joint_velocity=True,
+                 err_clip_lin=0.01, err_clip_rot=0.2):
         super().__init__()
         self._inertia = np.diag([1.0] * 6) if inertia is None else inertia
         self._damping = np.diag([20.0] * 6) if damping is None else damping
@@ -249,6 +250,32 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         self._qdot_cmd = None
         self._qdot_des = None
         self._qdot_cmd_t = None
+        # --- wrench law (compute_control_wrench / tau = J.T @ W) ---
+        # Bound on the pose error *before* it becomes force -- this is the
+        # wrench law's shove cap, and it replaces field-follow's max_step_m,
+        # which bounded the speedJ shove by capping the target step instead.
+        # Without it a large error (a re-target, a stall, clearing a protective
+        # stop against a stale target) commands a large force.
+        #
+        # It must be sized against K, not copied: the cap in newtons is
+        # K_lin * err_clip_lin. At K_lin=3000 N/m, 0.01 m is 30 N -- above the
+        # ~15 N a slide needs (5 mm of field-follow lead x 3000) so ordinary
+        # sliding stays proportional, and still backstopped by tau_max. The
+        # reference UR OSC loop uses 0.05 m, but with K=1000 N/m and a
+        # different task; at our K that would be 150 N.
+        # Angular: K_ang=50 N.m/rad x 0.2 rad = 10 N.m, at the wrist tau_max.
+        self._err_clip_lin = float(err_clip_lin)
+        self._err_clip_rot = float(err_clip_rot)
+        # Press force in the *body* frame, as a 3-vector. Deliberately not a
+        # scalar on blade 5: free_along_normal has already removed the field
+        # normal from the spring's linear block, and tool Z is not that normal
+        # (field-follow slerps tool Z behind it on purpose), so writing blade 5
+        # would mix axes. The caller owns the sign -- see
+        # ContactTeleoperationController._press_axis_base, where the
+        # --force-sign hemisphere convention lives.
+        self._press_wrench_body = np.zeros(3)
+        self._last_wrench_lin = 0.0
+        self._last_wrench_ang = 0.0
 
     def set_command_trace(self, fn):
         """Optional callback(qdot, measured=, spring=, stick=) after each speedJ command."""
@@ -304,6 +331,24 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
     def set_tool_z_velocity(self, vz):
         """Overlay tool-Z speed (m/s) on top of the pose spring. DualLoop press axis."""
         self._tool_z_velocity = float(vz)
+
+    def set_press_wrench(self, w_body):
+        """Press force (N) in the *body* frame, for the wrench law.
+
+        The counterpart of ``set_tool_z_velocity`` on the ``tau = J.T @ W``
+        path, and a 3-vector rather than a scalar for a reason: the press is
+        along the *contact normal*, which is not tool Z (field-follow leads tool
+        Z behind the field normal by design), and ``free_along_normal`` has
+        already emptied that axis of spring. Pass the already-signed axis times
+        the commanded magnitude -- ``ContactTeleoperationController`` owns the
+        ``--force-sign`` hemisphere convention and is the only place that should
+        resolve it. ``None`` or zeros means no press.
+        """
+        if w_body is None:
+            self._press_wrench_body = np.zeros(3)
+            return
+        self._press_wrench_body = np.asarray(
+            w_body, dtype=float).reshape(3).copy()
 
     def set_z_compliant(self, compliant):
         """Zero pose-spring Kz so a Z overlay is not fought. Stick Z is ignored."""
@@ -411,6 +456,88 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
                 stick=self._stick_linear)
         return qdot
 
+    def _control_group_qdot(self, robot_state, n_joints):
+        """The measured joint velocity for this task space, from the *control-group*
+        slice. See compute_control_command: get_joint_indices() are system-global
+        and must not index this vector."""
+        velocity = np.asarray(robot_state.get_velocity(), dtype=float).reshape(-1)
+        if velocity.size == n_joints:
+            return velocity
+        if velocity.size > n_joints:
+            return velocity[-n_joints:]
+        raise RuntimeError(
+            f"robot_state velocity length {velocity.size} < task joints {n_joints}")
+
+    def compute_control_wrench(self, robot_state, objective_state, task_space_state):
+        """Task-space wrench for the direct-torque law: ``tau = J.T @ W``.
+
+        The velocity sibling above computes this *same spring* and then spends
+        it: ``/inertia``, ``*dt``, DLS inverse, norm and per-joint clamps, LPF,
+        slew -- all of which exist to keep a position servo from over-shoving.
+        Under direct torque they are exactly what starves the arm: a 4 mm error
+        becomes ~8 mm/s becomes ~0.02 rad/s becomes ~1 N.m of ``kv * qdot_err``
+        against a UR5e breakaway of several N.m. Here ``K`` is a real stiffness
+        (N/m on the linear blades, N.m/rad on the angular ones) and the wrench
+        is the commanded force, so lateral authority is set on purpose rather
+        than arrived at through five conversions.
+
+        **Reduction to the working case.** Both laws read the same
+        ``objective_state.get_error()`` and the same
+        ``task_space_state.get_jacobian()``, and the velocity law's own output
+        is ``(J.T J + lambda^2 I)^-1 J.T * (dt/M) * wrench_net``. The frames and
+        signs are therefore shared by construction -- this method stops at
+        ``wrench_net`` instead of inverting it, and introduces no new
+        convention.
+
+        Two deliberate differences from ``compute_control_command``'s
+        ``wrench_net``, neither of which may leak back into it (speedJ must stay
+        bit-identical):
+
+        - **Damping on the measured EE velocity ``J @ qdot``**, not on
+          ``get_error_derivative()``. Both are ``d(error)/dt`` and carry the
+          same sign, but the latter also contains *target* motion, so it fights
+          the SpaceMouse; a pure damper does not kick when the target moves.
+          Same choice as the reference UR OSC loop.
+        - **The pose error is clipped before it becomes force.** ``max_step_m``
+          bounded the shove on the speedJ path by capping the target step;
+          nothing bounds it here.
+        """
+        jacobian = np.asarray(task_space_state.get_jacobian())
+        n_joints = int(jacobian.shape[1])
+        qdot_meas = self._control_group_qdot(robot_state, n_joints)
+        self._note_conditioning(jacobian)
+
+        # Blade order is [angular, linear]: 0:3 angular, 3:6 linear.
+        error = np.asarray(
+            objective_state.get_error(), dtype=float).reshape(-1).copy()
+        self._last_err_ang = error[0:3].copy()
+        self._last_err_lin = error[3:6].copy()
+        # Note there is no `_input_active` gate here. Under speedJ, hands-off
+        # streams zero qdot or residual pose error keeps the arm creeping.
+        # Under torque the spring *is* the hold, and zeroing it would let the
+        # arm sag -- hold_live_pose keeps the target on the live pose, so the
+        # error is already near zero and there is nothing to gate.
+        error[0:3] = np.clip(error[0:3], -self._err_clip_rot, self._err_clip_rot)
+        error[3:6] = np.clip(error[3:6], -self._err_clip_lin, self._err_clip_lin)
+
+        ee_velocity = jacobian @ qdot_meas
+        wrench = -self._stiffness @ error - self._damping @ ee_velocity
+
+        if (self._z_compliant and self._free_along_normal
+                and self._n_body is not None):
+            # Align never owns the unbound axis -- force does. Identical to the
+            # projection the velocity law applies to v_task[3:6]; the wrench is
+            # the same vector one conversion earlier.
+            n = self._n_body
+            lin = wrench[3:6]
+            wrench[3:6] = lin - float(lin @ n) * n
+
+        wrench[3:6] = wrench[3:6] + self._press_wrench_body
+
+        self._last_wrench_lin = float(np.linalg.norm(wrench[3:6]))
+        self._last_wrench_ang = float(np.linalg.norm(wrench[0:3]))
+        return wrench
+
     def _note_conditioning(self, jacobian):
         """Record how close this pose is to singular, and shout once if it is.
 
@@ -432,6 +559,12 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
             self._last_sigma_min = float("nan")
         if self._n_joints_seen is None:
             self._n_joints_seen = tuple(jacobian.shape)
+            # sigma_min still matters under the wrench law -- a near-singular
+            # pose makes J.T tiny in some direction, so the same wrench buys
+            # almost no torque there. dls_lambda does not: it belongs to the
+            # inverse, which only the velocity law takes. It is printed anyway
+            # rather than branched on, because the controller does not know
+            # which law the backend will call.
             print(f"jacobian: {jacobian.shape[0]}x{jacobian.shape[1]}"
                   f"  sigma_min={self._last_sigma_min:.4f}"
                   f"  dls_lambda={self._dls_damping:g}", flush=True)
@@ -453,6 +586,8 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
             "err_y": float(self._last_err_lin[1]),
             "err_z": float(self._last_err_lin[2]),
             "vtask_lin": self._last_vtask_lin,
+            "w_lin": self._last_wrench_lin,
+            "w_ang": self._last_wrench_ang,
             "err_rx": float(self._last_err_ang[0]),
             "err_ry": float(self._last_err_ang[1]),
             "err_rz": float(self._last_err_ang[2]),

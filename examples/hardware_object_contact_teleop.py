@@ -28,6 +28,7 @@ bisect which one matters. ``--press-loop legacy --no-free-along-normal
 from __future__ import annotations
 
 import argparse
+import math
 import pathlib
 import select
 import socket
@@ -194,7 +195,9 @@ def _dashboard_bring_up(ip: str) -> None:
 def _make_approach_controller(interface, task_space, home_ee_motor,
                               free_along_normal=True, dls_damping=0.05,
                               per_joint_velocity=True, xy_stiffness=None,
-                              ang_stiffness=None):
+                              ang_stiffness=None, wrench_law=False,
+                              k_lin=3000.0, k_ang=50.0, damping_ratio=1.0,
+                              err_clip_lin=0.01, err_clip_rot=0.2):
     # These are NOT hardware_free_teleop's defaults, despite what this comment
     # used to claim -- that file constructs AdmittanceTeleoperationController()
     # with no arguments, so it runs the class defaults (stiffness 3000,
@@ -218,13 +221,31 @@ def _make_approach_controller(interface, task_space, home_ee_motor,
     # arm visibly rotates toward the field instead of sliding, whichever way
     # the stick is pushed. --ang-stiffness is the other half of that ratio.
     k = [2000.0] * 6
+    d = [20.0] * 6
+    if wrench_law:
+        # Under tau = J.T @ W these are *real* gains -- N.m/rad on the angular
+        # blades (0..2) and N/m on the linear ones (3..5) -- not the velocity
+        # gain the number above is. A flat 2000 is violent on the angular half,
+        # so split them the way the reference UR OSC loop does (osc_kp_pos 1000
+        # / osc_kp_rot 50, a 20:1 ratio) and take the damping from
+        # D = 2*sqrt(K)*zeta rather than leaving the flat 20, which is heavily
+        # under-damped at these stiffnesses.
+        #
+        # k_lin is where lateral authority comes from, and it is deliberately
+        # the knob rather than field-follow's lead: the lead is the path
+        # contract that must stay comparable with speedj for the A/B, so more
+        # newtons come from K, not from letting the tool lag further behind the
+        # target. At 5 mm of lead, k_lin=3000 is ~15 N of slide -- past the
+        # breakaway that kv*qdot could not reach.
+        k = [float(k_ang)] * 3 + [float(k_lin)] * 3
+        d = [2.0 * math.sqrt(ki) * float(damping_ratio) for ki in k]
     if xy_stiffness is not None:
         k[3] = k[4] = float(xy_stiffness)
     if ang_stiffness is not None:
         k[0] = k[1] = k[2] = float(ang_stiffness)
     approach = AdmittanceTeleoperationController(
         inertia=np.diag([1.0] * 6),
-        damping=np.diag([20.0] * 6),
+        damping=np.diag(d),
         stiffness=np.diag(k),
         dt=0.001,
         max_joint_velocity=0.8,
@@ -233,11 +254,32 @@ def _make_approach_controller(interface, task_space, home_ee_motor,
         free_along_normal=free_along_normal,
         dls_damping=dls_damping,
         per_joint_velocity=per_joint_velocity,
+        err_clip_lin=err_clip_lin,
+        err_clip_rot=err_clip_rot,
     )
     approach.set_task_space(task_space)
     approach.set_interface(interface)
     approach.set_objective(ga.control.SingleArmMotorControlObjective(home_ee_motor))
     return approach
+
+
+def _wrench_law_kwargs(args):
+    """Pose-spring gains for --dtc-law wrench, or nothing at all otherwise.
+
+    Kept in one place so the two _make_approach_controller call sites (startup
+    and the post-align rebuild) cannot end up with different stiffness -- the
+    second one is what actually flies.
+    """
+    if getattr(args, "contact_backend", None) != "dtc" or args.dtc_law != "wrench":
+        return {}
+    return dict(
+        wrench_law=True,
+        k_lin=args.dtc_k_lin,
+        k_ang=args.dtc_k_ang,
+        damping_ratio=args.dtc_damping_ratio,
+        err_clip_lin=args.dtc_err_clip_lin,
+        err_clip_rot=args.dtc_err_clip_rot,
+    )
 
 
 def route_spacemouse_twist(twist, *, sim_probe, on_hardware):
@@ -385,9 +427,56 @@ def build_arg_parser():
     # tau latch. Start tau_max low: it is the only thing left bounding a grab
     # now that the UR's own path supervisor is out of the loop.
     parser.add_argument(
+        "--dtc-law", choices=["velocity", "wrench"], default="velocity",
+        help="dtc control law. 'velocity' is the first port: it keeps the whole "
+             "speedJ velocity pipeline (inertia, dt, DLS inverse, joint clamps) "
+             "and closes tau = kv*(qdot_cmd - qdot_meas) under it. Those caps "
+             "exist to protect a position servo and are what starve the torque "
+             "law -- they turn a 4 mm error into ~0.02 rad/s into ~1 N.m, "
+             "against a UR5e breakaway of several N.m. 'wrench' skips all of "
+             "it and sends tau = clip(J.T @ W, +/-tau_max) straight off the "
+             "pose spring, so lateral force is set on purpose as K*e in "
+             "newtons. --dtc-kv/--dtc-ki are ignored under 'wrench'; the gains "
+             "that matter are --dtc-k-lin/--dtc-k-ang (default %(default)s)")
+    parser.add_argument(
+        "--dtc-k-lin", type=float, default=3000.0, metavar="N_PER_M",
+        help="--dtc-law wrench: linear stiffness (N/m) on blades 3..5. This is "
+             "where lateral authority comes from -- at field-follow's 5 mm "
+             "lead, 3000 N/m is ~15 N of slide. Raise this, not --max-lead-m: "
+             "the lead is the path contract that has to stay comparable with "
+             "speedj for the A/B (default %(default)s)")
+    parser.add_argument(
+        "--dtc-k-ang", type=float, default=50.0, metavar="NM_PER_RAD",
+        help="--dtc-law wrench: angular stiffness (N.m/rad) on blades 0..2. A "
+             "different unit from --dtc-k-lin, hence the 20:1 split the "
+             "reference UR OSC loop uses; a flat 3000 here is violent "
+             "(default %(default)s)")
+    parser.add_argument(
+        "--dtc-damping-ratio", type=float, default=1.0, metavar="ZETA",
+        help="--dtc-law wrench: damping as D = 2*sqrt(K)*zeta, per blade. 1.0 "
+             "is critically damped (default %(default)s)")
+    parser.add_argument(
+        "--dtc-err-clip-lin", type=float, default=0.01, metavar="M",
+        help="--dtc-law wrench: pose error clip (m) before it becomes force. "
+             "This is the shove cap, replacing max_step_m; the bound in newtons "
+             "is --dtc-k-lin times this (default %(default)s)")
+    parser.add_argument(
+        "--dtc-err-clip-rot", type=float, default=0.2, metavar="RAD",
+        help="--dtc-law wrench: angular pose error clip (rad) "
+             "(default %(default)s)")
+    parser.add_argument(
+        "--dtc-friction-comp", dest="dtc_friction_comp",
+        action=argparse.BooleanOptionalAction, default=True,
+        help="ask the UR for its own joint friction feedforward. The reference "
+             "UR OSC loop runs with it off; we default it on because breakaway "
+             "is the thing that stalled the velocity law. Under --dtc-law "
+             "wrench the spring already makes real breakaway force, so this is "
+             "worth A/B-ing (default: on)")
+    parser.add_argument(
         "--dtc-kv", type=float, nargs="+", default=list(DEFAULT_KV),
         metavar="NM_PER_RADPS",
-        help="dtc joint-velocity gain, scalar or 6 values (default %(default)s)")
+        help="--dtc-law velocity only: joint-velocity gain, scalar or 6 values "
+             "(default %(default)s)")
     parser.add_argument(
         "--dtc-ki", type=float, nargs="+", default=list(DEFAULT_KI),
         metavar="NM_PER_RAD",
@@ -603,6 +692,8 @@ def main():
             task_space_name=args.task_space,
             kv=args.dtc_kv, tau_max=args.dtc_tau_max,
             ki=args.dtc_ki, i_max=args.dtc_i_max,
+            law_kind=args.dtc_law,
+            friction_comp=args.dtc_friction_comp,
             hz=args.dtc_hz, hold_zero=args.dtc_hold_zero,
             payload_mass=args.dtc_payload_mass,
             payload_cog=args.dtc_payload_cog,
@@ -689,7 +780,8 @@ def main():
         dls_damping=args.dls_damping,
         per_joint_velocity=args.per_joint_velocity,
         xy_stiffness=args.xy_stiffness,
-        ang_stiffness=args.ang_stiffness)
+        ang_stiffness=args.ang_stiffness,
+        **_wrench_law_kwargs(args))
 
     # --- speedj/dtc contact: the same pose spring + Z overlay. Only the
     # actuation seam under it differs, so the contact controller, the force
@@ -856,10 +948,16 @@ def main():
             actuation = None
             if dtc_backend is not None:
                 st = dtc_backend.stats()
-                actuation = (
-                    f"tau_peak={st.get('tau_peak', 0.0):.2f}Nm "
-                    f"i={st.get('i_peak', 0.0):.2f}Nm "
-                    f"sat={st.get('n_saturated', 0)}")
+                if st.get("law") == "wrench":
+                    actuation = (
+                        f"|W|={st.get('w_lin', 0.0):.1f}N "
+                        f"tau_peak={st.get('tau_peak', 0.0):.2f}Nm "
+                        f"clip={st.get('n_tau_clipped', 0)}")
+                else:
+                    actuation = (
+                        f"tau_peak={st.get('tau_peak', 0.0):.2f}Nm "
+                        f"i={st.get('i_peak', 0.0):.2f}Nm "
+                        f"sat={st.get('n_saturated', 0)}")
             print(
                 format_follow_lag(
                     p_live, p_cmd, T_flange_viz[:3, :3], R_cmd,
@@ -976,7 +1074,8 @@ def main():
             dls_damping=args.dls_damping,
             per_joint_velocity=args.per_joint_velocity,
             xy_stiffness=args.xy_stiffness,
-            ang_stiffness=args.ang_stiffness)
+            ang_stiffness=args.ang_stiffness,
+            **_wrench_law_kwargs(args))
         if contact_controller is not None:
             contact_controller.set_conditioning_fn(approach_controller.conditioning)
         if robot_viz is not None:
@@ -1097,6 +1196,22 @@ def main():
             if measured_fz_fn is None:
                 print(
                     "\033[91mrefusing speedj contact: no ActualTCPForce reader\033[0m",
+                    flush=True,
+                )
+                return
+            if args.contact_backend == "dtc" and args.dtc_law == "wrench":
+                # The press reaches the arm through set_tool_z_velocity, which
+                # is read by compute_control_command -- the wrench law does not
+                # look at it. Entering contact here would zero Kz and free the
+                # normal and then never press: the tool would hover, and the
+                # force log would read a healthy zero. Refuse loudly rather
+                # than let a session mistake that for a working press.
+                # A2 wires set_press_wrench; until then --dtc-law wrench is
+                # free space only.
+                print(
+                    "\033[91mrefusing contact under --dtc-law wrench: the press "
+                    "is not wired to the wrench law yet (set_press_wrench). Run "
+                    "free-space only, or use --dtc-law velocity.\033[0m",
                     flush=True,
                 )
                 return

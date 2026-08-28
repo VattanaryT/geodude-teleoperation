@@ -627,3 +627,144 @@ def test_payload_override_without_a_cog_is_the_flange_origin():
     backend, control = _connected(state_fn=FakeState(), payload_mass=1.25)
     backend.connect()
     assert control.payload == (1.25, [0.0, 0.0, 0.0])
+
+
+# --- the wrench law: tau = clip(J.T @ W, +/-tau_max) -------------------------
+#
+# `law_kind="wrench"` bypasses JointVelocityTorqueLaw entirely -- no kv, no
+# integral, no idle hold latch -- because under torque the pose spring *is* the
+# hold, and two things holding one axis is the fight that produces drift. Only
+# `tau_max` is reused, and only as a configured vector, so the clamp cannot
+# diverge between the two paths.
+
+
+class FakeWrenchController:
+    """Stands in for AdmittanceTeleoperationController on the seam.
+
+    The backend only ever asks it for a wrench and asks the task-space state
+    for a jacobian; everything else lives above the seam and is covered in
+    tests/test_wrench_law.py.
+    """
+
+    def __init__(self, wrench, jacobian=None, size=6):
+        self.wrench = np.asarray(wrench, dtype=float)
+        self.jacobian = np.eye(6) if jacobian is None else np.asarray(
+            jacobian, dtype=float)
+        self.size = size
+        self.calls = 0
+
+    def get_jacobian(self):
+        return self.jacobian
+
+    def compute_control_wrench(self, robot_state, objective_state, tss):
+        self.calls += 1
+        return self.wrench
+
+
+def _wrench_backend(controller, **kwargs):
+    """A wrench-law backend whose gafropy state building is stubbed out."""
+    backend, state, held = _backend(law_kind="wrench", **kwargs)
+    backend._control_states = lambda: (controller, None, None, controller)
+    return backend, state, held
+
+
+def test_law_kind_is_validated():
+    with pytest.raises(ValueError, match="law_kind"):
+        _backend(law_kind="admittance")
+
+
+def test_wrench_becomes_torque_through_the_jacobian_transpose():
+    # Identity jacobian: tau is the wrench itself, so the mapping is readable.
+    # Stay under DEFAULT_TAU_MAX's wrist entry (10 N.m) so this reads the
+    # mapping and not the clamp -- the clamp has its own test below.
+    ctrl = FakeWrenchController([0.0, 0.0, 0.0, 8.0, 0.0, 0.0])
+    backend, _s, _h = _wrench_backend(ctrl)
+    assert np.allclose(backend._compute_wrench(), [0, 0, 0, 8, 0, 0])
+
+
+def test_the_jacobian_transpose_is_not_the_jacobian():
+    """A transposed-J bug is silent on the identity fixture and wrong on hardware."""
+    j = np.zeros((6, 6))
+    j[0, 1] = 2.0          # task blade 0 driven by joint 1
+    ctrl = FakeWrenchController([4.0, 0, 0, 0, 0, 0], jacobian=j)
+    backend, _s, _h = _wrench_backend(ctrl)
+    tau = backend._compute_wrench()
+    assert np.allclose(tau, [0.0, 8.0, 0.0, 0.0, 0.0, 0.0])
+
+
+def test_torque_is_clamped_to_tau_max_and_counted():
+    ctrl = FakeWrenchController([0.0, 0.0, 0.0, 500.0, 0.0, 0.0])
+    backend, _s, _h = _wrench_backend(ctrl, tau_max=[30.0] * 6)
+    assert np.allclose(backend._compute_wrench(), [0, 0, 0, 30, 0, 0])
+    assert backend.stats()["n_tau_clipped"] == 1
+
+
+def test_a_wrench_inside_tau_max_is_not_counted_as_clipped():
+    ctrl = FakeWrenchController([0.0, 0.0, 0.0, 5.0, 0.0, 0.0])
+    backend, _s, _h = _wrench_backend(ctrl, tau_max=[30.0] * 6)
+    backend._compute_wrench()
+    assert backend.stats()["n_tau_clipped"] == 0
+
+
+def test_the_velocity_law_is_never_stepped_on_the_wrench_path():
+    """No kv, no integral, no idle hold latch -- the spring is the hold."""
+    class Tripwire(JointVelocityTorqueLaw):
+        def step(self, *a, **kw):        # pragma: no cover - must not run
+            raise AssertionError("wrench path stepped the velocity law")
+
+    ctrl = FakeWrenchController([0.0, 0.0, 0.0, 4.0, 0.0, 0.0])
+    backend, _s, _h = _wrench_backend(ctrl, law=Tripwire(n_joints=6))
+    tau = backend.tick()
+    assert np.allclose(tau, [0, 0, 0, 4, 0, 0])
+    assert not backend.law.holding
+
+
+def test_hold_zero_runs_the_wrench_law_but_sends_nothing():
+    """The bring-up gate: the field path and the viser frame stay live while
+    the arm floats, which is the point of watching it in viser."""
+    ctrl = FakeWrenchController([0.0, 0.0, 0.0, 9.0, 0.0, 0.0])
+    backend, _s, _h = _wrench_backend(ctrl, hold_zero=True)
+
+    assert np.allclose(backend.tick(), 0.0)
+    assert ctrl.calls == 1
+    assert backend.stats()["w_lin"] == pytest.approx(9.0)
+
+
+def test_a_safety_stop_zeroes_the_wrench_torque():
+    ctrl = FakeWrenchController([0.0, 0.0, 0.0, 6.0, 0.0, 0.0])
+    mode = {"m": 1}
+    backend, _s, _h = _wrench_backend(
+        ctrl, safety_mode_fn=lambda: mode["m"])
+    assert np.allclose(backend.tick(), [0, 0, 0, 6, 0, 0])
+    mode["m"] = 3          # PROTECTIVE_STOP
+    assert np.allclose(backend.tick(), 0.0)
+    mode["m"] = 1          # cleared: the spring resumes, it does not lunge
+    assert np.allclose(backend.tick(), [0, 0, 0, 6, 0, 0])
+
+
+def test_a_failing_wrench_law_holds_tau_at_zero_rather_than_the_last_value():
+    class Boom(FakeWrenchController):
+        def compute_control_wrench(self, *a):
+            raise RuntimeError("objective not set")
+
+    backend, _s, _h = _wrench_backend(Boom([0.0] * 6))
+    assert np.allclose(backend.tick(), 0.0)
+    assert "objective not set" in backend.stats()["last_error"]
+
+
+def test_a_wrong_sized_jacobian_refuses_rather_than_broadcasting():
+    """6 task DOF, 6 driven joints: the vention rail is in get_joint_indices()
+    but not in the jacobian. Silently broadcasting here is the "index 15 on
+    size 7" crash wearing a different hat."""
+    ctrl = FakeWrenchController([0.0] * 6, jacobian=np.eye(6)[:, :5])
+    backend, _s, _h = _wrench_backend(ctrl)
+    assert np.allclose(backend.tick(), 0.0)
+    assert "jacobian has 5 columns" in backend.stats()["last_error"]
+
+
+def test_stats_name_the_active_law():
+    backend, _s, _h = _backend()
+    assert backend.stats()["law"] == "velocity"
+    ctrl = FakeWrenchController([0.0] * 6)
+    wb, _s2, _h2 = _wrench_backend(ctrl)
+    assert wb.stats()["law"] == "wrench"
