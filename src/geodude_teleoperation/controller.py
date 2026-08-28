@@ -325,8 +325,28 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         task_space = self.get_task_space()
         joint_indices = np.asarray(task_space.get_joint_indices())
         position = self._interface.get_state().get_position()[joint_indices]
-        ee = task_space.compute_ee_motor(position)
+        self.hold_pose_at(position)
+
+    def hold_pose_at(self, q_control_group) -> None:
+        """``hold_live_pose`` for a caller that already has the control-group q.
+
+        Same snap, no state read. This exists because *how often* the snap runs
+        is a control gain, not bookkeeping: the target becomes ``pose(t - T)``,
+        so the spring contributes ``K * T/2`` of delay-based damping on top of
+        the explicit ``D``. Called from run_field_follow at --follow-hz 20 that
+        is 3000 * 0.025 = 75 N.s/m of *uncounted* damping -- 70% again on top of
+        the 109.5 the damping ratio asks for, and delayed by 50 ms rather than
+        one control period, which is the half that destabilizes. The dtc loop
+        calls this every tick instead so the term stays small and current.
+        """
+        ee = self.get_task_space().compute_ee_motor(
+            np.asarray(q_control_group, dtype=float))
         self.get_objective().set_target(ee)
+
+    @property
+    def input_active(self) -> bool:
+        """Whether a command source is driving the target (stick or follow)."""
+        return bool(self._input_active)
 
     def set_tool_z_velocity(self, vz):
         """Overlay tool-Z speed (m/s) on top of the pose spring. DualLoop press axis."""

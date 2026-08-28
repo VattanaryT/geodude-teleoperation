@@ -768,3 +768,77 @@ def test_stats_name_the_active_law():
     ctrl = FakeWrenchController([0.0] * 6)
     wb, _s2, _h2 = _wrench_backend(ctrl)
     assert wb.stats()["law"] == "wrench"
+
+
+# --- the idle pose snap is a control gain, not bookkeeping --------------------
+#
+# The objective target becomes pose(t - T), so the spring contributes K * T/2 of
+# delay-based damping on top of the explicit D. Left to run_field_follow at
+# --follow-hz 20 that was 3000 * 0.025 = 75 N.s/m of uncounted damping, 70%
+# again on top of the 109.5 the damping ratio asks for, and delayed by 50 ms
+# rather than one control period -- which is the half that destabilizes.
+
+
+class FakeHoldController:
+    """Just the two attributes ``_maybe_hold`` reads, plus a call log."""
+
+    def __init__(self, input_active=False, has_hold=True):
+        self.input_active = input_active
+        self.held = []
+        if not has_hold:
+            self.hold_pose_at = None
+
+    def hold_pose_at(self, q):
+        self.held.append(np.asarray(q, dtype=float).copy())
+
+
+def test_the_idle_snap_runs_every_tick_under_the_wrench_law():
+    backend, _s, _h = _backend(law_kind="wrench")
+    ctrl = FakeHoldController()
+    q = np.arange(7.0)
+    assert backend._maybe_hold(ctrl, q) is True
+    assert np.allclose(ctrl.held[0], q)
+
+
+def test_a_command_source_owning_the_target_is_never_overwritten():
+    """Snapping while the stick or field-follow drives would erase the command."""
+    backend, _s, _h = _backend(law_kind="wrench")
+    ctrl = FakeHoldController(input_active=True)
+    assert backend._maybe_hold(ctrl, np.zeros(7)) is False
+    assert ctrl.held == []
+
+
+def test_the_velocity_law_keeps_its_own_idle_latch():
+    """JointVelocityTorqueLaw already holds; two holds on one axis is drift."""
+    backend, _s, _h = _backend(law_kind="velocity")
+    ctrl = FakeHoldController()
+    assert backend._maybe_hold(ctrl, np.zeros(7)) is False
+    assert ctrl.held == []
+
+
+def test_hold_at_tick_can_be_turned_off_to_reproduce_the_old_behavior():
+    backend, _s, _h = _backend(law_kind="wrench", hold_at_tick=False)
+    ctrl = FakeHoldController()
+    assert backend._maybe_hold(ctrl, np.zeros(7)) is False
+
+
+def test_a_controller_without_the_hook_is_not_an_error():
+    backend, _s, _h = _backend(law_kind="wrench")
+    ctrl = FakeHoldController(has_hold=False)
+    assert backend._maybe_hold(ctrl, np.zeros(7)) is False
+
+
+def test_the_loop_reports_the_period_it_actually_held():
+    """(D/M)*T decides whether the damper shakes the arm, and nothing reported T.
+
+    The run that ended in ROBOT_EMERGENCY_STOP was at ~23 ms against an 8 ms
+    nominal; the only hint was the stale-tau warnings.
+    """
+    backend, _s, _h = _backend(hz=125.0)
+    assert backend.stats()["hz_meas"] == 0.0        # no second tick yet
+    backend.tick(now=1.000)
+    backend.tick(now=1.040)                          # a 40 ms tick
+    st = backend.stats()
+    assert st["hz"] == 125.0
+    assert 24.0 < st["hz_meas"] < 26.0
+    assert 39.0 < st["dt_max_ms"] < 41.0

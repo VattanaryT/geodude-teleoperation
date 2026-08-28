@@ -563,26 +563,72 @@ class WrenchLawWiringTest(unittest.TestCase):
         self.assertAlmostEqual(kw["k_lin"], 3000.0)
         self.assertAlmostEqual(kw["k_ang"], 50.0)
         self.assertAlmostEqual(kw["err_clip_lin"], 0.01)
+        # Split, not one number: the formula's assumed M differs by ~60x
+        # between the blades, so one zeta cannot be right for both.
+        self.assertAlmostEqual(kw["damping_ratio"], 0.3)
+        self.assertAlmostEqual(kw["damping_ratio_ang"], 0.1)
 
     def test_both_call_sites_pass_them(self):
         source = _EXAMPLE.read_text(encoding="utf-8")
         self.assertEqual(source.count("**_wrench_law_kwargs(args)"), 2)
 
-    def test_the_factory_splits_the_units_and_damps_critically(self):
-        """K_ang on blades 0..2 (N.m/rad), K_lin on 3..5 (N/m), D = 2*sqrt(K)*zeta.
+    def test_the_factory_splits_the_units_and_the_damping_ratio(self):
+        """K_ang on blades 0..2 (N.m/rad), K_lin on 3..5 (N/m), each with its
+        own zeta.
 
         A flat 2000 across both -- what speedj runs -- is a velocity gain, not
         a stiffness, and is violent on the angular half under tau = J.T @ W.
+        A flat *zeta* is the same mistake one level down: D = 2*sqrt(K)*zeta is
+        critical damping for M = 1, and M is ~3 kg linear against ~0.05 kg.m^2
+        at the wrist.
         """
         import math
 
-        k_lin, k_ang, zeta = 3000.0, 50.0, 1.0
-        k = [k_ang] * 3 + [k_lin] * 3
-        d = [2.0 * math.sqrt(ki) * zeta for ki in k]
-        self.assertAlmostEqual(d[0], 2.0 * math.sqrt(50.0))
-        self.assertAlmostEqual(d[3], 2.0 * math.sqrt(3000.0))
+        mod = _load_example()
+        got = {}
+
+        class _Spy:
+            def __init__(self, **kw):
+                got.update(kw)
+
+            def __getattr__(self, name):
+                return lambda *a, **k: None
+
+        real = mod.AdmittanceTeleoperationController
+        mod.AdmittanceTeleoperationController = _Spy
+        try:
+            mod._make_approach_controller(
+                None, None, None, wrench_law=True)
+        finally:
+            mod.AdmittanceTeleoperationController = real
+
+        k = np.diag(got["stiffness"])
+        d = np.diag(got["damping"])
+        self.assertAlmostEqual(k[0], 50.0)
+        self.assertAlmostEqual(k[3], 3000.0)
+        self.assertAlmostEqual(d[0], 2.0 * math.sqrt(50.0) * 0.1)
+        self.assertAlmostEqual(d[3], 2.0 * math.sqrt(3000.0) * 0.3)
         # 5 mm of field-follow lead is the sliding force this buys.
         self.assertAlmostEqual(k[3] * 0.005, 15.0)
+
+    def test_the_damping_survives_a_delayed_feedback_at_the_worst_seen_period(self):
+        """(D/M)*T is what decides whether a delayed damper shakes the arm.
+
+        The run that ended in ROBOT_EMERGENCY_STOP was measured at a 23 ms tick
+        against an 8 ms nominal, and zeta=1 put the angular product at 6.5 --
+        a delayed damper diverges past ~1. Both blades must stay under 1 there.
+        """
+        import math
+
+        mod = _load_example()
+        t_worst = 0.023
+        for zeta, k, m, blade in (
+                (0.3, 3000.0, 3.0, "linear"),
+                (0.1, 50.0, 0.05, "angular")):
+            d = 2.0 * math.sqrt(k) * zeta
+            self.assertLess(d / m * t_worst, 1.0, blade)
+        self.assertAlmostEqual(
+            mod.build_arg_parser().parse_args([]).dtc_damping_ratio_ang, 0.1)
 
     def test_contact_is_refused_under_the_wrench_law(self):
         """The press reaches the arm through set_tool_z_velocity, which the

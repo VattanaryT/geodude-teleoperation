@@ -196,7 +196,8 @@ def _make_approach_controller(interface, task_space, home_ee_motor,
                               free_along_normal=True, dls_damping=0.05,
                               per_joint_velocity=True, xy_stiffness=None,
                               ang_stiffness=None, wrench_law=False,
-                              k_lin=3000.0, k_ang=50.0, damping_ratio=1.0,
+                              k_lin=3000.0, k_ang=50.0, damping_ratio=0.3,
+                              damping_ratio_ang=0.1,
                               err_clip_lin=0.01, err_clip_rot=0.2):
     # These are NOT hardware_free_teleop's defaults, despite what this comment
     # used to claim -- that file constructs AdmittanceTeleoperationController()
@@ -237,8 +238,25 @@ def _make_approach_controller(interface, task_space, home_ee_motor,
         # newtons come from K, not from letting the tool lag further behind the
         # target. At 5 mm of lead, k_lin=3000 is ~15 N of slide -- past the
         # breakaway that kv*qdot could not reach.
+        #
+        # D = 2*sqrt(K)*zeta is the critical-damping formula for **M = 1**, and
+        # the two blades do not have the same M: ~3 kg of apparent end-point
+        # mass on the linear axes, but ~0.05 kg.m^2 on the wrist. At zeta = 1
+        # that made D_ang = 14.1 N.m.s/rad against 0.05 kg.m^2, and a damper fed
+        # back through a delay T goes unstable around (D/M)*T ~ 1: 2.3 at the
+        # nominal 8 ms tick and 6.5 at the 23 ms this loop was measured holding.
+        # That is what drove tau to the +/-30 N.m rail 89 times and ended in an
+        # emergency stop, with the stick already quiet -- a damper needs no
+        # input to pump energy, it feeds on the motion it made.
+        #
+        # So the ratio is split, and both halves are sized against the real M:
+        # zeta_lin 0.3 -> D_lin 33, (D/M)*T = 0.25 even at 23 ms; zeta_ang 0.1
+        # -> D_ang 1.4, 0.65 at 23 ms. --dtc-damping-ratio 1.0
+        # --dtc-damping-ratio-ang 1.0 restores the pre-fix values.
         k = [float(k_ang)] * 3 + [float(k_lin)] * 3
-        d = [2.0 * math.sqrt(ki) * float(damping_ratio) for ki in k]
+        zeta_blade = (
+            [float(damping_ratio_ang)] * 3 + [float(damping_ratio)] * 3)
+        d = [2.0 * math.sqrt(ki) * zi for ki, zi in zip(k, zeta_blade)]
     if xy_stiffness is not None:
         k[3] = k[4] = float(xy_stiffness)
     if ang_stiffness is not None:
@@ -277,6 +295,7 @@ def _wrench_law_kwargs(args):
         k_lin=args.dtc_k_lin,
         k_ang=args.dtc_k_ang,
         damping_ratio=args.dtc_damping_ratio,
+        damping_ratio_ang=args.dtc_damping_ratio_ang,
         err_clip_lin=args.dtc_err_clip_lin,
         err_clip_rot=args.dtc_err_clip_rot,
     )
@@ -452,9 +471,25 @@ def build_arg_parser():
              "reference UR OSC loop uses; a flat 3000 here is violent "
              "(default %(default)s)")
     parser.add_argument(
-        "--dtc-damping-ratio", type=float, default=1.0, metavar="ZETA",
-        help="--dtc-law wrench: damping as D = 2*sqrt(K)*zeta, per blade. 1.0 "
-             "is critically damped (default %(default)s)")
+        "--dtc-damping-ratio", type=float, default=0.3, metavar="ZETA",
+        help="--dtc-law wrench: LINEAR damping as D = 2*sqrt(K_lin)*zeta. The "
+             "formula is critical damping for M=1 kg; apparent end-point mass "
+             "here is ~3 kg, so 1.0 is over-damped and unstable once the loop "
+             "delay is counted (default %(default)s)")
+    parser.add_argument(
+        "--dtc-damping-ratio-ang", type=float, default=0.1, metavar="ZETA",
+        help="--dtc-law wrench: ANGULAR damping as D = 2*sqrt(K_ang)*zeta. "
+             "Separate from --dtc-damping-ratio because the M the formula "
+             "assumes is 1 kg.m^2 while the wrist is ~0.05: at zeta=1 the "
+             "delayed-damper product (D/M)*T reached 6.5 and shook the arm into "
+             "an emergency stop (default %(default)s)")
+    parser.add_argument(
+        "--no-dtc-hold-at-tick", dest="dtc_hold_at_tick",
+        action="store_false", default=True,
+        help="--dtc-law wrench: re-snap the idle pose target in the dtc loop "
+             "rather than at --follow-hz. The snap period is a control gain -- "
+             "target = pose(t-T) adds K*T/2 of delayed damping, 75 N.s/m at "
+             "20 Hz -- so this off restores the pre-fix behavior")
     parser.add_argument(
         "--dtc-err-clip-lin", type=float, default=0.01, metavar="M",
         help="--dtc-law wrench: pose error clip (m) before it becomes force. "
@@ -695,6 +730,7 @@ def main():
             law_kind=args.dtc_law,
             friction_comp=args.dtc_friction_comp,
             hz=args.dtc_hz, hold_zero=args.dtc_hold_zero,
+            hold_at_tick=args.dtc_hold_at_tick,
             payload_mass=args.dtc_payload_mass,
             payload_cog=args.dtc_payload_cog,
         )
@@ -949,10 +985,20 @@ def main():
             if dtc_backend is not None:
                 st = dtc_backend.stats()
                 if st.get("law") == "wrench":
+                    # w_ang and hz_meas are here because the console line
+                    # without them read as healthy through the run that ended in
+                    # an emergency stop: |W_lin| was 5.8 N while tau railed at
+                    # 30 N.m, and the loop was at a third of its nominal rate,
+                    # which is the delay the damping term is fed back through.
                     actuation = (
                         f"|W|={st.get('w_lin', 0.0):.1f}N "
+                        f"|Wa|={st.get('w_ang', 0.0):.2f}Nm "
                         f"tau_peak={st.get('tau_peak', 0.0):.2f}Nm "
-                        f"clip={st.get('n_tau_clipped', 0)}")
+                        f"clip={st.get('n_tau_clipped', 0)} "
+                        f"hz={st.get('hz_meas', 0.0):.0f}/"
+                        f"{st.get('hz', 0.0):.0f} "
+                        f"dtmax={st.get('dt_max_ms', 0.0):.0f}ms "
+                        f"stale={st.get('n_stale', 0)}")
                 else:
                     actuation = (
                         f"tau_peak={st.get('tau_peak', 0.0):.2f}Nm "

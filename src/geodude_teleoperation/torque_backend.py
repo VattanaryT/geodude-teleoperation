@@ -349,6 +349,7 @@ class DirectTorqueBackend:
         law_kind: str = "velocity",
         hz: float = DEFAULT_DTC_HZ,
         hold_zero: bool = False,
+        hold_at_tick: bool = True,
         friction_comp: bool = True,
         safety_mode_fn: Callable[[], Any] | None = None,
         stale_after_s: float = DEFAULT_STALE_AFTER_S,
@@ -382,6 +383,13 @@ class DirectTorqueBackend:
             raise ValueError(
                 f"law_kind must be 'velocity' or 'wrench', got {law_kind!r}")
         self._law_kind = law_kind
+        # Wrench law only. Re-snap the objective onto the live pose here, at the
+        # control rate, instead of leaving it to run_field_follow at --follow-hz.
+        # The snap period is a control gain -- see
+        # AdmittanceTeleoperationController.hold_pose_at -- and at 20 Hz it was
+        # worth 75 N.s/m of delayed damping nobody had counted, on top of the
+        # 109.5 the damping ratio asks for. False restores the old behavior.
+        self._hold_at_tick = bool(hold_at_tick)
         self._friction_comp = bool(friction_comp)
         self._safety_mode_fn = safety_mode_fn
         self._stale_after_s = float(stale_after_s)
@@ -464,6 +472,12 @@ class DirectTorqueBackend:
         self._cmd_fail_logged = False
         self._n_tau_clipped = 0
         self._last_wrench = np.zeros(6, dtype=float)
+        # Measured loop period. The damping term's stability product is
+        # (D / M) * T, so a loop that quietly runs at a third of its nominal
+        # rate triples the number that decides whether the arm shakes. Nothing
+        # reported T before; the stale-tau warnings were the only hint.
+        self._dt_ewma: float | None = None
+        self._dt_max = 0.0
 
     # -- RobotInterface duck-type ------------------------------------------
 
@@ -828,9 +842,32 @@ class DirectTorqueBackend:
         robot_state.set_position(q_ctrl)
         robot_state.set_velocity(qd_ctrl)
         task_space = controller.get_task_space()
+        self._maybe_hold(controller, q_ctrl)
         tss = task_space.compute_state(q_ctrl, qd_ctrl)
         objective_state = controller.get_objective().compute_state(robot_state, tss)
         return controller, robot_state, objective_state, tss
+
+    def _maybe_hold(self, controller, q_ctrl) -> bool:
+        """Re-snap the idle pose target onto the live q, at the control rate.
+
+        Called from ``_control_states`` *before* the objective state is built,
+        or the tick's error is still measured against the previous target.
+
+        Idle only: while a command source owns the target -- the stick, or
+        field-follow -- moving it here would erase the command. Wrench law only:
+        the velocity law has its own idle hold latch inside
+        ``JointVelocityTorqueLaw``, and two things holding one axis is the fight
+        that produces drift.
+        """
+        if not (self._hold_at_tick and self._law_kind == "wrench"):
+            return False
+        if getattr(controller, "input_active", False):
+            return False
+        hold = getattr(controller, "hold_pose_at", None)
+        if hold is None:
+            return False
+        hold(q_ctrl)
+        return True
 
     def _compute_wrench(self):
         """One tick of the wrench law: ``tau = clip(J.T @ W, +/-tau_max)``.
@@ -1003,6 +1040,12 @@ class DirectTorqueBackend:
                 dt_tick = None if self._t_tick is None else now - self._t_tick
                 tau = self._law.step(cmd, qdot_last, q_last, dt=dt_tick)
 
+        if self._t_tick is not None:
+            dt_meas = now - self._t_tick
+            self._dt_ewma = (
+                dt_meas if self._dt_ewma is None
+                else 0.98 * self._dt_ewma + 0.02 * dt_meas)
+            self._dt_max = max(self._dt_max, dt_meas)
         self._t_tick = now
         with self._lock:
             self._last_tau = np.asarray(tau, dtype=float).reshape(-1).copy()
@@ -1050,6 +1093,12 @@ class DirectTorqueBackend:
             "w_lin": float(np.linalg.norm(self._last_wrench[3:6])),
             "w_ang": float(np.linalg.norm(self._last_wrench[0:3])),
             "n_tau_clipped": self._n_tau_clipped,
+            # Nominal vs achieved. hz_meas well under hz means the damping term
+            # is being fed back through a longer delay than it was tuned for,
+            # which is the failure this seam actually has.
+            "hz": self._hz,
+            "hz_meas": (0.0 if not self._dt_ewma else 1.0 / self._dt_ewma),
+            "dt_max_ms": 1000.0 * self._dt_max,
             "last_error": self._last_error,
             "latch_path": (
                 None if self._latch_path is None else str(self._latch_path)),
