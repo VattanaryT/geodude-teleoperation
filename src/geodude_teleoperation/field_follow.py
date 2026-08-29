@@ -138,7 +138,8 @@ class FieldFollow:
 
     def __init__(self, vf, *, hz=20.0, zero_smoothing_after_first=True,
                  project_in_process=False, mesh=None, max_lead_m=0.02,
-                 max_dR_rad=0.12, max_step_m=0.0, snap_to_surface=True):
+                 max_dR_rad=0.12, max_step_m=0.0, snap_to_surface=True,
+                 rebase_on_live=True):
         hz = float(hz)
         if hz <= 0.0:
             raise ValueError(f"hz must be positive, got {hz}")
@@ -148,6 +149,16 @@ class FieldFollow:
         self._max_dR_rad = float(max_dR_rad)
         self._max_step_m = float(max_step_m)
         self._snap_to_surface = bool(snap_to_surface)
+        # Where each stick step starts from. True (speedJ) re-bases the carrot
+        # on the live TCP every tick, so the command is only ever one drained
+        # step ahead: that is a *velocity* command, which is exactly what a
+        # position servo wants. Under the direct-torque wrench law the same
+        # carrot becomes force = k_lin * (one step) -- force proportional to
+        # stick *speed*, capped at k_lin * max_step_m and zero when the stick
+        # is held still against a stalled arm. False accumulates instead, so a
+        # held stick builds error up to max_lead_m and the spring makes a real,
+        # sustained push that decays on its own once the arm catches up.
+        self._rebase_on_live = bool(rebase_on_live)
         self._zero_smoothing_after_first = bool(zero_smoothing_after_first)
         self._proc = None
         self._in_q = None
@@ -326,7 +337,8 @@ class FieldFollow:
             self.last_target,
         )
         base = self._xyz
-        if live_xyz is not None and _is_finite_xyz(live_xyz):
+        if (self._rebase_on_live and live_xyz is not None
+                and _is_finite_xyz(live_xyz)):
             base = np.asarray(live_xyz, dtype=float).reshape(3)
         # Stick in the live tool frame. Slerp field R from live R so the carrot
         # cannot run ahead and dump leftover wrist error into TCP (chamfer lever).

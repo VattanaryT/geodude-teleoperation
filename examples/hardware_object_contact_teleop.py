@@ -658,6 +658,22 @@ def build_arg_parser():
         help="after align, project() rate for stick field-follow (15–50 Hz). "
              "Not the RTDE/speedJ rate.")
     parser.add_argument(
+        "--follow-rebase-on-live", dest="follow_rebase_on_live",
+        action=argparse.BooleanOptionalAction, default=None,
+        help="where each field-follow stick step starts from. On (the speedJ "
+             "default) re-bases the carrot on the live TCP every tick, so the "
+             "command is one drained step ahead -- a velocity command, which "
+             "is what the position servo underneath speedJ wants. Under "
+             "--dtc-law wrench that same carrot is force = --dtc-k-lin times "
+             "one step: force proportional to stick *speed*, hard-capped at "
+             "k_lin * max_step_m (12 N at the defaults) and zero when you hold "
+             "the stick still against a stalled arm, which no gain can fix -- "
+             "raising k_lin scales free-space speed by the same factor. Off "
+             "accumulates instead, so a held stick builds error up to "
+             "--max-lead-m and the spring makes a real sustained push that "
+             "decays on its own as the arm catches up. Defaults off under "
+             "--dtc-law wrench, on everywhere else")
+    parser.add_argument(
         "--max-lead-m", type=float, default=0.005, metavar="M",
         help="how far the field-follow carrot may run ahead of the live TCP. "
              "Under speedJ this is a path contract and 5 mm is right. Under "
@@ -834,7 +850,17 @@ def main():
     follow = FieldFollow(
         vf, hz=args.follow_hz, project_in_process=True, mesh=object_surface,
         max_lead_m=args.max_lead_m, max_step_m=0.004, max_dR_rad=0.02,
-        snap_to_surface=args.snap_follow_to_surface)
+        snap_to_surface=args.snap_follow_to_surface,
+        # speedJ keeps the re-based carrot: it is a velocity command and the
+        # position servo underneath wants exactly that. The wrench law turns
+        # the same carrot into force = k_lin * (one drained step), which is
+        # force proportional to stick *speed* and capped at
+        # k_lin * max_step_m = 12 N at the defaults -- measured max 14.4 N on
+        # dtc_20260828_182701.csv with --max-lead-m 0.02, which never bound.
+        rebase_on_live=(args.follow_rebase_on_live
+                        if args.follow_rebase_on_live is not None
+                        else not (args.contact_backend == "dtc"
+                                  and args.dtc_law == "wrench")))
     follow_log_t = {"t": float("-inf")}
     stick = {
         "t": float("-inf"), "t_nz": float("-inf"),

@@ -697,3 +697,68 @@ class HardwareFollowRoutingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RebaseOnLiveTest(unittest.TestCase):
+    """Where a stick step starts from decides whether force can build at all.
+
+    speedJ re-bases the carrot on the live TCP every tick, so the command is
+    only ever one drained step ahead. That is a velocity command, which is what
+    the position servo underneath speedJ wants. Under the direct-torque wrench
+    law the same carrot becomes ``force = k_lin * (one step)`` -- force
+    proportional to stick *speed*, hard-capped at ``k_lin * max_step_m`` (12 N
+    at the shipped 3000 N/m and 4 mm) and *zero* while the stick is held still
+    against a stalled arm. Measured on dtc_20260828_182701.csv: |W_lin| max
+    14.4 N with --max-lead-m 0.02, which therefore never bound.
+    """
+
+    def _held_stick(self, follow, n_ticks, live=(0.0, 0.0, 1.0)):
+        """A stalled arm and a stick held down: live never moves."""
+        live = np.asarray(live, dtype=float)
+        for i in range(n_ticks):
+            follow.add_body_linear(np.array([0.004, 0.0, 0.0]))
+            follow.tick(0.1 * (i + 1), _motor_at(live), live_xyz=live,
+                        live_R=np.eye(3))
+        T = np.asarray(follow.last_target.to_transformation_matrix())
+        return float(np.linalg.norm(T[:3, 3] - live))
+
+    def test_rebasing_pins_the_error_at_one_step_however_long_you_push(self):
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=1000.0, max_step_m=0.004, max_lead_m=0.02,
+                             snap_to_surface=False)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        self.assertAlmostEqual(self._held_stick(follow, 8), 0.004, places=9)
+
+    def test_accumulating_builds_error_up_to_the_lead(self):
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=1000.0, max_step_m=0.004, max_lead_m=0.02,
+                             snap_to_surface=False, rebase_on_live=False)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        # Eight 4 mm steps want 32 mm; _clamp_lead trims to max_lead_m, which
+        # is what makes --max-lead-m the force ceiling it was documented to be.
+        self.assertAlmostEqual(self._held_stick(follow, 8), 0.02, places=9)
+
+    def test_accumulating_still_decays_once_the_arm_catches_up(self):
+        """A spring, not a latch: the push falls off on its own when live moves."""
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=1000.0, max_step_m=0.004, max_lead_m=0.02,
+                             snap_to_surface=False, rebase_on_live=False)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        self._held_stick(follow, 8)
+        caught_up = np.array([0.02, 0.0, 1.0])
+        follow.tick(2.0, _motor_at(caught_up), live_xyz=caught_up,
+                    live_R=np.eye(3))
+        T = np.asarray(follow.last_target.to_transformation_matrix())
+        self.assertLess(float(np.linalg.norm(T[:3, 3] - caught_up)), 0.02)
+
+    def test_rebasing_is_the_default_so_speedj_is_untouched(self):
+        follow = FieldFollow(FakeVf(), hz=1000.0)
+        self.assertTrue(follow._rebase_on_live)
+
+    def test_the_lead_clamp_still_bounds_the_accumulated_carrot(self):
+        """Without _clamp_lead, accumulating would run away with the stick."""
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=1000.0, max_step_m=0.004, max_lead_m=0.006,
+                             snap_to_surface=False, rebase_on_live=False)
+        follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
+        self.assertAlmostEqual(self._held_stick(follow, 20), 0.006, places=9)
