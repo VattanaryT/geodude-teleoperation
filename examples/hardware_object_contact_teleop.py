@@ -198,7 +198,8 @@ def _make_approach_controller(interface, task_space, home_ee_motor,
                               ang_stiffness=None, wrench_law=False,
                               k_lin=3000.0, k_ang=50.0, damping_ratio=0.3,
                               damping_ratio_ang=0.1,
-                              err_clip_lin=0.01, err_clip_rot=0.2):
+                              err_clip_lin=0.01, err_clip_rot=0.2,
+                              use_lambda=False, fn_lin=2.0, fn_ang=2.0):
     # These are NOT hardware_free_teleop's defaults, despite what this comment
     # used to claim -- that file constructs AdmittanceTeleoperationController()
     # with no arguments, so it runs the class defaults (stiffness 3000,
@@ -256,6 +257,25 @@ def _make_approach_controller(interface, task_space, home_ee_motor,
         k = [float(k_ang)] * 3 + [float(k_lin)] * 3
         zeta_blade = (
             [float(damping_ratio_ang)] * 3 + [float(damping_ratio)] * 3)
+        if use_lambda:
+            # Under tau = J.T @ (Lambda @ a) the spring output is an
+            # acceleration, so K is 1/s^2 and K = omega_n^2 -- a *frequency*,
+            # which is the whole reason to shape: it is the same number at every
+            # pose, where N/m is only right at the pose it was tuned at.
+            #
+            # The 20:1 lin/ang split disappears with it. That ratio existed only
+            # to paper over the two blades having different apparent M (~3 kg vs
+            # ~0.05 kg.m^2); Lambda carries that difference exactly, so both
+            # blades take the same natural frequency.
+            #
+            # Sizing: a sampled PD loop wants omega_n well under the control
+            # rate. This loop measures 124 Hz median with 29 ms outliers, and it
+            # limit-cycled at 5.9 Hz when k_lin=6000 put omega_n at 7.1 Hz
+            # (dtc_20260828_195146.csv). 2 Hz leaves a factor of ~60.
+            k = [(2.0 * math.pi * float(fn_ang)) ** 2] * 3 + \
+                [(2.0 * math.pi * float(fn_lin)) ** 2] * 3
+        # D = 2*zeta*sqrt(K) is 2*zeta*omega_n when K = omega_n^2, so this line
+        # is correct in both domains and deliberately not branched.
         d = [2.0 * math.sqrt(ki) * zi for ki, zi in zip(k, zeta_blade)]
     if xy_stiffness is not None:
         k[3] = k[4] = float(xy_stiffness)
@@ -298,6 +318,9 @@ def _wrench_law_kwargs(args):
         damping_ratio_ang=args.dtc_damping_ratio_ang,
         err_clip_lin=args.dtc_err_clip_lin,
         err_clip_rot=args.dtc_err_clip_rot,
+        use_lambda=args.dtc_lambda,
+        fn_lin=args.dtc_fn_lin,
+        fn_ang=args.dtc_fn_ang,
     )
 
 
@@ -497,6 +520,32 @@ def build_arg_parser():
         help="--dtc-law wrench: pose error clip (m) before it becomes force. "
              "This is the shove cap, replacing max_step_m; the bound in newtons "
              "is --dtc-k-lin times this (default %(default)s)")
+    parser.add_argument(
+        "--dtc-lambda", dest="dtc_lambda",
+        action=argparse.BooleanOptionalAction, default=False,
+        help="--dtc-law wrench: inertia shaping. tau = J.T @ (Lambda @ a) with "
+             "Lambda = (J M^-1 J.T)^-1, instead of tau = J.T @ W. Without it "
+             "one wrench is handed to joints whose measured mobility spans 78x "
+             "on this arm (examples/analyze_dtc_mobility.py), so the wrist "
+             "takes the motion and the shoulder takes the force -- which is why "
+             "align (a rotation, done by the mobile joints) worked while "
+             "tracking (a translation, done by the stiff ones) did not. Lambda "
+             "makes the EE a unit mass in every direction, so a gain is correct "
+             "at more than one pose. Changes what K means, hence opt-in: "
+             "--dtc-k-lin/--dtc-k-ang are ignored and --dtc-fn-lin/--dtc-fn-ang "
+             "take over (default: off)")
+    parser.add_argument(
+        "--dtc-fn-lin", type=float, default=2.0, metavar="HZ",
+        help="--dtc-lambda: linear closed-loop natural frequency (Hz). K = "
+             "(2*pi*f)^2 in 1/s^2. Must sit well under the control rate; this "
+             "loop holds ~124 Hz and limit-cycled at 5.9 Hz when omega_n was "
+             "7.1 Hz (default %(default)s)")
+    parser.add_argument(
+        "--dtc-fn-ang", type=float, default=2.0, metavar="HZ",
+        help="--dtc-lambda: angular natural frequency (Hz). Same number as the "
+             "linear one is correct under Lambda -- the 20:1 split existed only "
+             "because the two blades had different apparent M, which Lambda now "
+             "carries exactly (default %(default)s)")
     parser.add_argument(
         "--dtc-err-clip-rot", type=float, default=0.2, metavar="RAD",
         help="--dtc-law wrench: angular pose error clip (rad) "
@@ -772,6 +821,7 @@ def main():
             ki=args.dtc_ki, i_max=args.dtc_i_max,
             law_kind=args.dtc_law,
             friction_comp=args.dtc_friction_comp,
+            use_lambda=args.dtc_lambda,
             hz=args.dtc_hz, hold_zero=args.dtc_hold_zero,
             hold_at_tick=args.dtc_hold_at_tick,
             stale_tau_s=(

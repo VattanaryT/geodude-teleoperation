@@ -497,7 +497,8 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         raise RuntimeError(
             f"robot_state velocity length {velocity.size} < task joints {n_joints}")
 
-    def compute_control_wrench(self, robot_state, objective_state, task_space_state):
+    def compute_control_wrench(self, robot_state, objective_state,
+                               task_space_state, inertia=None):
         """Task-space wrench for the direct-torque law: ``tau = J.T @ W``.
 
         The velocity sibling above computes this *same spring* and then spends
@@ -550,13 +551,37 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         error[3:6] = np.clip(error[3:6], -self._err_clip_lin, self._err_clip_lin)
 
         ee_velocity = jacobian @ qdot_meas
+        # With ``inertia=None`` this IS the wrench and the law is unchanged --
+        # that is the reduction to the previously-working case, and it is exact,
+        # because Lambda = I is the only difference between the two branches.
+        #
+        # With Lambda given, the spring output is an *acceleration* command and
+        # Lambda = (J M^-1 J.T)^-1 converts it to the force that actually
+        # produces that acceleration at the EE. Without it, tau = J.T @ W hands
+        # the same wrench to joints whose mobility spans 78x on this arm
+        # (examples/analyze_dtc_mobility.py), so the wrist takes the motion and
+        # the shoulder takes the force. Lambda is what makes the EE behave like
+        # a unit mass in every direction, which is also what makes one gain
+        # correct at more than one pose.
+        #
+        # Units change with it: K is N/m without Lambda and 1/s^2 with it, so
+        # the caller owns re-deriving the gains (omega_n = sqrt(K)). Nothing
+        # here can detect a stale N/m gain, hence --dtc-lambda is opt-in.
         wrench = -self._stiffness @ error - self._damping @ ee_velocity
+        if inertia is not None:
+            wrench = np.asarray(inertia, dtype=float).reshape(6, 6) @ wrench
 
         if (self._z_compliant and self._free_along_normal
                 and self._n_body is not None):
             # Align never owns the unbound axis -- force does. Identical to the
             # projection the velocity law applies to v_task[3:6]; the wrench is
             # the same vector one conversion earlier.
+            #
+            # This runs *after* Lambda deliberately: Lambda is not diagonal, so
+            # projecting the acceleration command first would let the coupling
+            # write a normal component straight back into the force. Project
+            # what is actually commanded, then add the press -- the other order
+            # deletes the press.
             n = self._n_body
             lin = wrench[3:6]
             wrench[3:6] = lin - float(lin @ n) * n

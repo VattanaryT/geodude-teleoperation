@@ -216,6 +216,11 @@ DEFAULT_STALE_AFTER_S = 0.1
 # Floor on the publish-side staleness bound, independent of --dtc-hz. Below the
 # period the host loop can actually hold, this bound does not protect against a
 # stalled loop, it chops a live one. See DirectTorqueBackend.__init__.
+# Physical bounds on Lambda's diagonal for a UR5e-class arm. Past these the
+# inverse has blown up (the built-in was seen at ~1e14) and the value must not
+# reach the robot. Generous on purpose: this is a sanity gate, not a tuning knob.
+LAMBDA_MAX_LIN_KG = 200.0
+LAMBDA_MAX_ANG_KGM2 = 50.0
 DEFAULT_STALE_TAU_MIN_S = 0.04
 
 
@@ -357,6 +362,7 @@ class DirectTorqueBackend:
         hold_zero: bool = False,
         hold_at_tick: bool = True,
         friction_comp: bool = True,
+        use_lambda: bool = False,
         safety_mode_fn: Callable[[], Any] | None = None,
         stale_after_s: float = DEFAULT_STALE_AFTER_S,
         stale_tau_s: float | None = None,
@@ -398,6 +404,12 @@ class DirectTorqueBackend:
         # 109.5 the damping ratio asks for. False restores the old behavior.
         self._hold_at_tick = bool(hold_at_tick)
         self._friction_comp = bool(friction_comp)
+        # Inertia shaping: tau = J.T @ (Lambda @ a) instead of J.T @ W.
+        # Opt-in because it changes what K means (N/m -> 1/s^2) and nothing
+        # here can detect a gain left over from the un-shaped law.
+        self._use_lambda = bool(use_lambda)
+        self._n_lambda_reject = 0
+        self._lambda_logged = False
         self._safety_mode_fn = safety_mode_fn
         self._stale_after_s = float(stale_after_s)
         # The on-robot latch holds the last tau forever if this host loop stalls,
@@ -940,6 +952,53 @@ class DirectTorqueBackend:
                       flush=True)
             self._command_trace = None
 
+    def _task_inertia(self, jacobian):
+        """``Lambda = (J M^-1 J.T)^-1``, or None if it does not look like an arm.
+
+        Hand-rolled from ``System.compute_mass_matrix`` rather than
+        ``TaskSpace.compute_task_space_inertia_matrix``: the built-in was
+        measured returning ~1e14 on the diagonal at a crude pose on this model,
+        while this construction gave the physical ~3-8 kg linear and
+        ~0.05-0.5 kg.m^2 angular. A near-singular pose makes ``J M^-1 J.T``
+        near-singular too, and its inverse then multiplies the command by an
+        arbitrarily large number in that direction.
+
+        So the result is *gated*, not trusted: anything non-finite or outside a
+        physically possible range falls back to None, which is exactly the
+        un-shaped law. Refusing to shape is a mild degradation; feeding a 1e14
+        gain to a torque loop is not.
+        """
+        q_ctrl = self.control_group_state()
+        if q_ctrl is None:
+            return None
+        try:
+            q_full = self._q_seed.copy()
+            q_full[self._joint_indices] = q_ctrl[0]
+            mass = np.asarray(
+                self._system.compute_mass_matrix(q_full), dtype=float)
+            idx = np.asarray(self._ur_global, dtype=int)
+            m_inv = np.linalg.inv(mass[np.ix_(idx, idx)])
+            lam = np.linalg.inv(jacobian @ m_inv @ jacobian.T)
+        except Exception as exc:
+            self._n_lambda_reject += 1
+            self._last_error = f"lambda: {type(exc).__name__}: {exc}"
+            return None
+        lam = 0.5 * (lam + lam.T)
+        diag = np.abs(np.diag(lam))
+        ok = (np.all(np.isfinite(lam))
+              and np.all(diag[3:] < LAMBDA_MAX_LIN_KG)
+              and np.all(diag[:3] < LAMBDA_MAX_ANG_KGM2)
+              and np.all(diag > 1e-6))
+        if not ok:
+            self._n_lambda_reject += 1
+            return None
+        if not self._lambda_logged:
+            self._lambda_logged = True
+            print(f"dtc: inertia shaping on -- apparent mass "
+                  f"lin={np.round(diag[3:], 2)} kg  "
+                  f"ang={np.round(diag[:3], 4)} kg.m^2", flush=True)
+        return lam
+
     def _compute_wrench(self):
         """One tick of the wrench law: ``tau = clip(J.T @ W, +/-tau_max)``.
 
@@ -954,13 +1013,16 @@ class DirectTorqueBackend:
         if states is None:
             return None
         controller, robot_state, objective_state, tss = states
+        jacobian = np.asarray(tss.get_jacobian(), dtype=float)
+        # Read the jacobian before the law, because Lambda is built from it.
+        lam = self._task_inertia(jacobian) if self._use_lambda else None
         wrench = np.asarray(
-            controller.compute_control_wrench(robot_state, objective_state, tss),
+            controller.compute_control_wrench(
+                robot_state, objective_state, tss, inertia=lam),
             dtype=float).reshape(-1)
         if wrench.size != 6:
             raise RuntimeError(
                 f"control law returned a {wrench.size}-wrench, expected 6")
-        jacobian = np.asarray(tss.get_jacobian(), dtype=float)
         if jacobian.shape[1] != self._n:
             # 6x6 on this rig: the vention rail is in get_joint_indices() but
             # not in the jacobian, which is why the slots are resolved from the
@@ -1226,6 +1288,7 @@ class DirectTorqueBackend:
                         if self._last_tau.size else 0.0,
             "i_peak": float(np.max(np.abs(self._law.integral))),
             "law": self._law_kind,
+            "n_lambda_reject": self._n_lambda_reject,
             # Wrench law only. |W_lin| is the commanded lateral force in N, and
             # it is the number to read against tau_peak: a healthy slide is a
             # sane |W_lin| with tau_peak well under tau_max. n_tau_clipped

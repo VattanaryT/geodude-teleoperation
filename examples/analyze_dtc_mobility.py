@@ -86,9 +86,13 @@ def section2_alignment(w, tau, q, qd, n, task_space_name, model):
     system = gafropy.SystemSerialization.load(model)
     ts = system.get_task_space(task_space_name)
     ji = list(ts.get_joint_indices())
+    # .values(): vention_dof_indices is name -> index, and resolve_ wants the
+    # indices. Same call the backend makes (torque_backend.py:444).
     ur_slots, _ = resolve_control_group_slots(
-        ji, vention_dof_indices(system), ts.get_controlled_joint_indices())
+        ji, vention_dof_indices(system).values(),
+        ts.get_controlled_joint_indices())
     base = np.zeros(len(ji))
+    ur_global = np.asarray(ji, dtype=int)[np.asarray(ur_slots, dtype=int)]
 
     cos_lin, ang_frac_cmd, ang_frac_got, tau_lin, tau_ang = [], [], [], [], []
     for k in range(0, len(q), max(1, len(q) // 4000)):
@@ -133,6 +137,59 @@ def section2_alignment(w, tau, q, qd, n, task_space_name, model):
         print(f"    j{j}      {tl[j]:8.2f}     {ta[j]:8.2f}")
     print("   Cross this with section 1: a joint with a large share AND low "
           "mobility\n   is where your force is disappearing.")
+    section5_lambda(system, ts, q, qd, ur_slots, ur_global, base)
+
+
+def section5_lambda(system, ts, q, qd, ur_slots, ur_global, base):
+    """Model-side confirmation: how direction-dependent is the apparent mass?
+
+    Lambda = (J M^-1 J.T)^-1 is what the EE actually feels. Under tau = J.T @ W
+    with no Lambda, a wrench of fixed magnitude produces acceleration inversely
+    proportional to the apparent mass in that direction -- so the ratio below is
+    how much a single gain is wrong by, across directions, at one pose. It is
+    the model-side twin of section 1's measured mobility spread.
+
+    Hand-rolled from System.compute_mass_matrix rather than
+    TaskSpace.compute_task_space_inertia_matrix: the built-in was observed to
+    return ~1e14 on the diagonal at a crude pose. Validate it before trusting it.
+    """
+    from geodude_teleoperation.torque_backend import splice_ur
+    print("\n5. APPARENT EE INERTIA  (Lambda = (J M^-1 J.T)^-1)")
+    n_full = None
+    try:
+        n_full = int(np.asarray(system.compute_mass_matrix(
+            np.zeros(len(system.get_joints())))).shape[0])
+    except Exception:
+        pass
+    rows = []
+    idx = np.linspace(0, len(q) - 1, min(12, len(q))).astype(int)
+    for k in idx:
+        try:
+            qc = splice_ur(base, q[k], ur_slots)
+            qdc = splice_ur(np.zeros(base.size), qd[k], ur_slots)
+            J = np.asarray(ts.compute_state(qc, qdc).get_jacobian(), dtype=float)
+            q_full = np.zeros(n_full) if n_full else None
+            if q_full is None:
+                continue
+            q_full[ur_global] = q[k]
+            M = np.asarray(system.compute_mass_matrix(q_full), dtype=float)
+            Mi = np.linalg.inv(M[np.ix_(ur_global, ur_global)])
+            Lam = np.linalg.inv(J @ Mi @ J.T)
+            lin = np.linalg.eigvalsh(0.5 * (Lam[3:, 3:] + Lam[3:, 3:].T))
+            ang = np.linalg.eigvalsh(0.5 * (Lam[:3, :3] + Lam[:3, :3].T))
+            rows.append((lin.min(), lin.max(), ang.min(), ang.max()))
+        except Exception as exc:
+            print(f"   Lambda failed at tick {k}: {type(exc).__name__}: {exc}")
+            return
+    if not rows:
+        print("   could not build Lambda")
+        return
+    r = np.array(rows)
+    print(f"   linear apparent mass  (kg):     {r[:,0].min():8.3f} .. {r[:,1].max():8.3f}")
+    print(f"   angular apparent inertia (kg.m2): {r[:,2].min():8.4f} .. {r[:,3].max():8.4f}")
+    print(f"   linear/angular ratio: {r[:,1].max()/max(r[:,2].min(),1e-9):.0f}x")
+    print("   Sanity: linear ~3-8 kg, angular ~0.05-0.5 kg.m2. Diagonals near 1e14")
+    print("   mean the inverse blew up -- do not feed that to the robot.")
 
 
 def main():
