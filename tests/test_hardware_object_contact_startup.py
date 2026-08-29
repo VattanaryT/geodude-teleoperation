@@ -595,12 +595,18 @@ class WrenchLawWiringTest(unittest.TestCase):
                 return lambda *a, **k: None
 
         real = mod.AdmittanceTeleoperationController
+        real_obj = mod.ga.control.SingleArmMotorControlObjective
         mod.AdmittanceTeleoperationController = _Spy
+        # Factory finishes with SingleArmMotorControlObjective(home_ee); the
+        # spy already ate the controller, but that ctor still runs and rejects
+        # None. Stub it so this test only asserts K/D wiring.
+        mod.ga.control.SingleArmMotorControlObjective = lambda *a, **k: object()
         try:
             mod._make_approach_controller(
                 None, None, None, wrench_law=True)
         finally:
             mod.AdmittanceTeleoperationController = real
+            mod.ga.control.SingleArmMotorControlObjective = real_obj
 
         k = np.diag(got["stiffness"])
         d = np.diag(got["damping"])
