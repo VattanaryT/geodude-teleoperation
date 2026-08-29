@@ -216,11 +216,36 @@ DEFAULT_STALE_AFTER_S = 0.1
 # Floor on the publish-side staleness bound, independent of --dtc-hz. Below the
 # period the host loop can actually hold, this bound does not protect against a
 # stalled loop, it chops a live one. See DirectTorqueBackend.__init__.
-# Physical bounds on Lambda's diagonal for a UR5e-class arm. Past these the
-# inverse has blown up (the built-in was seen at ~1e14) and the value must not
-# reach the robot. Generous on purpose: this is a sanity gate, not a tuning knob.
-LAMBDA_MAX_LIN_KG = 200.0
-LAMBDA_MAX_ANG_KGM2 = 50.0
+# Physical bounds on Lambda's eigenvalues for this arm with its tool. Measured
+# on geodude.yaml at well-conditioned poses: 4.3-8.7 kg linear, 0.0008-0.57
+# kg.m^2 angular (examples/analyze_dtc_mobility.py section 5).
+#
+# These are CLAMPS, not a pass/reject test, and they are tight rather than
+# generous. The first version of this gate allowed 200 kg / 50 kg.m^2 "on
+# purpose", reasoning that a sanity check should not double as a tuning knob.
+# That reasoning was wrong and it put the arm into an uncommanded high-speed
+# motion: Lambda multiplies the commanded force directly, so a ceiling 46x above
+# the true value is a licence to command 46x the intended force, and every value
+# under the ceiling passed through untouched. A bound that a runaway fits inside
+# is not a bound.
+#
+# Pass/reject was the second half of that failure. Rejecting a tick drops
+# straight to the un-shaped law, so a pose flickering across the threshold
+# alternates between a heavily shaped command and an unshaped one at 124 Hz --
+# an impulse train, the same shape as the tau-chop that caused C283A2. Clamping
+# eigenvalues degrades continuously instead: at the limit Lambda simply stops
+# growing.
+LAMBDA_MIN_LIN_KG = 1.0
+LAMBDA_MAX_LIN_KG = 15.0
+LAMBDA_MIN_ANG_KGM2 = 0.0005
+LAMBDA_MAX_ANG_KGM2 = 1.0
+# Below this smallest singular value of J the pose is near-singular and
+# (J M^-1 J.T) is losing rank -- which is where the 4576 kg came from. The
+# controller already computes sigma_min for the same reason (_note_conditioning
+# shouts under 0.02). Shaping ramps out to identity across this band rather
+# than switching off at a threshold.
+LAMBDA_SIGMA_FULL = 0.05
+LAMBDA_SIGMA_NONE = 0.02
 DEFAULT_STALE_TAU_MIN_S = 0.04
 
 
@@ -265,6 +290,22 @@ def resolve_control_group_slots(joint_indices, rail_indices, controlled_indices=
                 f"non-rail joints {got} vs controlled joints {expected}"
             )
     return ur_slots, rail_slots
+
+
+def _clamp_spd(ang, ang_lo, ang_hi, lin, lin_lo, lin_hi, full):
+    """Rebuild a block-diagonal Lambda with each blade's eigenvalues clamped.
+
+    The cross blocks are dropped deliberately. They are what couple a linear
+    command into an angular force, and near a singularity they are exactly the
+    terms that grow without bound while the diagonal still looks plausible --
+    so clamping the diagonal alone would not have stopped the runaway.
+    """
+    out = np.zeros((6, 6))
+    for blk, lo, hi, sl in ((ang, ang_lo, ang_hi, slice(0, 3)),
+                            (lin, lin_lo, lin_hi, slice(3, 6))):
+        w, v = np.linalg.eigh(0.5 * (blk + blk.T))
+        out[sl, sl] = v @ np.diag(np.clip(w, lo, hi)) @ v.T
+    return out
 
 
 def splice_ur(base, ur_values, ur_slots):
@@ -410,6 +451,7 @@ class DirectTorqueBackend:
         self._use_lambda = bool(use_lambda)
         self._n_lambda_reject = 0
         self._lambda_logged = False
+        self._last_lambda_alpha = 1.0
         self._safety_mode_fn = safety_mode_fn
         self._stale_after_s = float(stale_after_s)
         # The on-robot latch holds the last tau forever if this host loop stalls,
@@ -953,27 +995,38 @@ class DirectTorqueBackend:
             self._command_trace = None
 
     def _task_inertia(self, jacobian):
-        """``Lambda = (J M^-1 J.T)^-1``, or None if it does not look like an arm.
+        """``Lambda = (J M^-1 J.T)^-1``, eigenvalue-clamped and singularity-faded.
 
         Hand-rolled from ``System.compute_mass_matrix`` rather than
         ``TaskSpace.compute_task_space_inertia_matrix``: the built-in was
-        measured returning ~1e14 on the diagonal at a crude pose on this model,
-        while this construction gave the physical ~3-8 kg linear and
-        ~0.05-0.5 kg.m^2 angular. A near-singular pose makes ``J M^-1 J.T``
-        near-singular too, and its inverse then multiplies the command by an
-        arbitrarily large number in that direction.
+        measured returning ~1e14 on the diagonal on this model.
 
-        So the result is *gated*, not trusted: anything non-finite or outside a
-        physically possible range falls back to None, which is exactly the
-        un-shaped law. Refusing to shape is a mild degradation; feeding a 1e14
-        gain to a torque loop is not.
+        Three things stand between this and the robot, because the first version
+        of this method had none of them and drove the arm:
+
+        1. **Singularity fade.** Lambda's blow-up is not a numerical curiosity,
+           it is what a near-singular pose *means* -- the EE cannot accelerate in
+           some direction, so the mass in that direction goes to infinity.
+           Shaping fades to identity between ``LAMBDA_SIGMA_FULL`` and
+           ``LAMBDA_SIGMA_NONE`` instead of switching, so crossing the band is
+           not a step change in commanded force.
+        2. **Eigenvalue clamp,** in the two blades separately, to the range this
+           arm actually exhibits. Lambda multiplies the command, so its ceiling
+           IS the force ceiling.
+        3. **Blended, never rejected.** A per-tick accept/reject alternates
+           between two different laws at the control rate.
+
+        Returns None only when Lambda cannot be built at all, which is the
+        un-shaped law -- correct, and merely un-shaped.
         """
-        q_ctrl = self.control_group_state()
-        if q_ctrl is None:
+        state = self.control_group_state()
+        if state is None:
             return None
         try:
+            sigma = float(np.sqrt(max(0.0, float(
+                np.linalg.eigvalsh(jacobian @ jacobian.T)[0]))))
             q_full = self._q_seed.copy()
-            q_full[self._joint_indices] = q_ctrl[0]
+            q_full[self._joint_indices] = state[0]
             mass = np.asarray(
                 self._system.compute_mass_matrix(q_full), dtype=float)
             idx = np.asarray(self._ur_global, dtype=int)
@@ -983,20 +1036,28 @@ class DirectTorqueBackend:
             self._n_lambda_reject += 1
             self._last_error = f"lambda: {type(exc).__name__}: {exc}"
             return None
-        lam = 0.5 * (lam + lam.T)
-        diag = np.abs(np.diag(lam))
-        ok = (np.all(np.isfinite(lam))
-              and np.all(diag[3:] < LAMBDA_MAX_LIN_KG)
-              and np.all(diag[:3] < LAMBDA_MAX_ANG_KGM2)
-              and np.all(diag > 1e-6))
-        if not ok:
+        if not np.all(np.isfinite(lam)):
             self._n_lambda_reject += 1
             return None
+
+        lam = 0.5 * (lam + lam.T)
+        lam = _clamp_spd(lam[:3, :3], LAMBDA_MIN_ANG_KGM2, LAMBDA_MAX_ANG_KGM2,
+                         lam[3:, 3:], LAMBDA_MIN_LIN_KG, LAMBDA_MAX_LIN_KG, lam)
+
+        # Fade to identity near a singularity. alpha=1 is fully shaped.
+        span = LAMBDA_SIGMA_FULL - LAMBDA_SIGMA_NONE
+        alpha = float(np.clip((sigma - LAMBDA_SIGMA_NONE) / span, 0.0, 1.0))
+        if alpha <= 0.0:
+            self._n_lambda_reject += 1
+            return None
+        lam = alpha * lam + (1.0 - alpha) * np.eye(6)
+        self._last_lambda_alpha = alpha
         if not self._lambda_logged:
             self._lambda_logged = True
+            d = np.abs(np.diag(lam))
             print(f"dtc: inertia shaping on -- apparent mass "
-                  f"lin={np.round(diag[3:], 2)} kg  "
-                  f"ang={np.round(diag[:3], 4)} kg.m^2", flush=True)
+                  f"lin={np.round(d[3:], 2)} kg  ang={np.round(d[:3], 4)} kg.m^2  "
+                  f"sigma_min={sigma:.4f} alpha={alpha:.2f}", flush=True)
         return lam
 
     def _compute_wrench(self):
@@ -1295,6 +1356,7 @@ class DirectTorqueBackend:
             "i_peak": float(np.max(np.abs(self._law.integral))),
             "law": self._law_kind,
             "n_lambda_reject": self._n_lambda_reject,
+            "lambda_alpha": self._last_lambda_alpha,
             # Wrench law only. |W_lin| is the commanded lateral force in N, and
             # it is the number to read against tau_peak: a healthy slide is a
             # sane |W_lin| with tau_peak well under tau_max. n_tau_clipped

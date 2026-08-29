@@ -141,55 +141,80 @@ def section2_alignment(w, tau, q, qd, n, task_space_name, model):
 
 
 def section5_lambda(system, ts, q, qd, ur_slots, ur_global, base):
-    """Model-side confirmation: how direction-dependent is the apparent mass?
+    """Preflight: is Lambda safe to command torque with, at EVERY pose in this log?
 
-    Lambda = (J M^-1 J.T)^-1 is what the EE actually feels. Under tau = J.T @ W
-    with no Lambda, a wrench of fixed magnitude produces acceleration inversely
-    proportional to the apparent mass in that direction -- so the ratio below is
-    how much a single gain is wrong by, across directions, at one pose. It is
-    the model-side twin of section 1's measured mobility spread.
+    Sampling a dozen ticks is not a safety check. Lambda = (J M^-1 J.T)^-1 is the
+    factor the commanded force is multiplied by, so a single near-singular pose
+    is a single large uncommanded push -- and that is what a sparse sample
+    misses. This sweeps the whole log and reports how often Lambda leaves the
+    band the arm physically has, which is the number that decides whether
+    --dtc-lambda may be used at all.
 
-    Hand-rolled from System.compute_mass_matrix rather than
-    TaskSpace.compute_task_space_inertia_matrix: the built-in was observed to
-    return ~1e14 on the diagonal at a crude pose. Validate it before trusting it.
+    Hand-rolled from System.compute_mass_matrix; the built-in
+    compute_task_space_inertia_matrix was measured at ~1e14 on this model.
     """
-    from geodude_teleoperation.torque_backend import splice_ur
-    print("\n5. APPARENT EE INERTIA  (Lambda = (J M^-1 J.T)^-1)")
-    n_full = None
+    from geodude_teleoperation.torque_backend import (
+        splice_ur, LAMBDA_MAX_LIN_KG, LAMBDA_MAX_ANG_KGM2,
+        LAMBDA_SIGMA_FULL, LAMBDA_SIGMA_NONE)
+    print("\n5. LAMBDA PREFLIGHT  (every tick)")
     try:
         n_full = int(np.asarray(system.compute_mass_matrix(
             np.zeros(len(system.get_joints())))).shape[0])
-    except Exception:
-        pass
-    rows = []
-    idx = np.linspace(0, len(q) - 1, min(12, len(q))).astype(int)
-    for k in idx:
+    except Exception as exc:
+        print(f"   cannot size the model: {exc}")
+        return
+    lin_hi, ang_hi, sig, n_bad, n_fail = [], [], [], 0, 0
+    for k in range(len(q)):
         try:
             qc = splice_ur(base, q[k], ur_slots)
             qdc = splice_ur(np.zeros(base.size), qd[k], ur_slots)
             J = np.asarray(ts.compute_state(qc, qdc).get_jacobian(), dtype=float)
-            q_full = np.zeros(n_full) if n_full else None
-            if q_full is None:
-                continue
+            s_min = float(np.sqrt(max(0.0, float(
+                np.linalg.eigvalsh(J @ J.T)[0]))))
+            q_full = np.zeros(n_full)
             q_full[ur_global] = q[k]
             M = np.asarray(system.compute_mass_matrix(q_full), dtype=float)
             Mi = np.linalg.inv(M[np.ix_(ur_global, ur_global)])
             Lam = np.linalg.inv(J @ Mi @ J.T)
-            lin = np.linalg.eigvalsh(0.5 * (Lam[3:, 3:] + Lam[3:, 3:].T))
-            ang = np.linalg.eigvalsh(0.5 * (Lam[:3, :3] + Lam[:3, :3].T))
-            rows.append((lin.min(), lin.max(), ang.min(), ang.max()))
-        except Exception as exc:
-            print(f"   Lambda failed at tick {k}: {type(exc).__name__}: {exc}")
-            return
-    if not rows:
-        print("   could not build Lambda")
+            l = np.linalg.eigvalsh(0.5 * (Lam[3:, 3:] + Lam[3:, 3:].T)).max()
+            a = np.linalg.eigvalsh(0.5 * (Lam[:3, :3] + Lam[:3, :3].T)).max()
+        except Exception:
+            n_fail += 1
+            continue
+        lin_hi.append(l); ang_hi.append(a); sig.append(s_min)
+        if l > LAMBDA_MAX_LIN_KG or a > LAMBDA_MAX_ANG_KGM2 or not np.isfinite(l + a):
+            n_bad += 1
+    if not lin_hi:
+        print("   Lambda could not be built on any tick")
         return
-    r = np.array(rows)
-    print(f"   linear apparent mass  (kg):     {r[:,0].min():8.3f} .. {r[:,1].max():8.3f}")
-    print(f"   angular apparent inertia (kg.m2): {r[:,2].min():8.4f} .. {r[:,3].max():8.4f}")
-    print(f"   linear/angular ratio: {r[:,1].max()/max(r[:,2].min(),1e-9):.0f}x")
-    print("   Sanity: linear ~3-8 kg, angular ~0.05-0.5 kg.m2. Diagonals near 1e14")
-    print("   mean the inverse blew up -- do not feed that to the robot.")
+    lin_hi, ang_hi, sig = map(np.array, (lin_hi, ang_hi, sig))
+    n = len(lin_hi)
+    print(f"   linear  max eigenvalue (kg):      median {np.median(lin_hi):8.2f}"
+          f"  p99 {np.percentile(lin_hi, 99):10.2f}  max {lin_hi.max():12.2f}")
+    print(f"   angular max eigenvalue (kg.m2):   median {np.median(ang_hi):8.4f}"
+          f"  p99 {np.percentile(ang_hi, 99):10.4f}  max {ang_hi.max():12.4f}")
+    print(f"   sigma_min of J:                   median {np.median(sig):8.4f}"
+          f"  p01 {np.percentile(sig, 1):10.4f}  min {sig.min():12.4f}")
+    print(f"   ticks past the clamp ({LAMBDA_MAX_LIN_KG:g} kg / "
+          f"{LAMBDA_MAX_ANG_KGM2:g} kg.m2): {n_bad}/{n} = {100.0*n_bad/n:.1f}%")
+    print(f"   ticks inside the singularity fade (<{LAMBDA_SIGMA_FULL:g}): "
+          f"{100.0*(sig < LAMBDA_SIGMA_FULL).mean():.1f}%   "
+          f"fully faded out (<{LAMBDA_SIGMA_NONE:g}): "
+          f"{100.0*(sig < LAMBDA_SIGMA_NONE).mean():.1f}%")
+    if n_fail:
+        print(f"   {n_fail} ticks could not build Lambda at all")
+    frac = n_bad / n
+    print()
+    if frac > 0.02:
+        print(f"   NO-GO: Lambda leaves its physical band on {100*frac:.1f}% of poses in")
+        print("   this log. The clamp will be active there, so the shaped force is")
+        print("   bounded but no longer the true inertia -- and the poses doing it are")
+        print("   near-singular. Fix the workspace or the reach before commanding torque.")
+    else:
+        print(f"   GO: Lambda stays inside its band on {100*(1-frac):.1f}% of poses.")
+    print("\n   NOTE: M(q) comes from geodude.yaml and does NOT include a payload")
+    print("   calibrated on the teach pendant. If a custom tool is fitted, Lambda is")
+    print("   wrong by that tool's mass and inertia even where it is well conditioned.")
 
 
 def main():
