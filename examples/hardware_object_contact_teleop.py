@@ -352,14 +352,14 @@ def drive_startup_align(align, controller, now, T_flange, R_field, T_ee,
     return cmd
 
 
-def _contact_log_path(spec, save_dir="speedj_logs"):
-    """Resolve --contact-log. 'none' disables; 'auto' names one by timestamp."""
+def _contact_log_path(spec, save_dir="speedj_logs", prefix="contact"):
+    """Resolve --contact-log / --dtc-log. 'none' disables; 'auto' timestamps."""
     if spec in (None, "", "none", "off"):
         return None
     if spec != "auto":
         return spec
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    return str(pathlib.Path(save_dir).resolve() / f"contact_{stamp}.csv")
+    return str(pathlib.Path(save_dir).resolve() / f"{prefix}_{stamp}.csv")
 
 
 def enter_speedj_contact(*, mode, contact_controller, approach_controller, interface=None):
@@ -536,6 +536,19 @@ def build_arg_parser():
         "--dtc-hz", type=float, default=DEFAULT_DTC_HZ,
         help="dtc host control-law rate; the on-robot latch applies tau at the "
              "UR's own 500 Hz regardless (default %(default)s)")
+    parser.add_argument(
+        "--dtc-stale-tau-ms", type=float, default=None, metavar="MS",
+        help="dtc publish-side staleness bound: past this age since the last "
+             "control tick the publisher decays tau towards zero (full float "
+             "at --dtc-hz's stale_after_s). Must sit ABOVE the period the loop "
+             "actually holds -- read dtmax in the field-follow line. Default is "
+             "max(4/--dtc-hz, 40 ms).")
+    parser.add_argument(
+        "--dtc-log", default="auto", metavar="PATH",
+        help="per-tick CSV of the dtc seam (phase, safety mode, wrench, tau, q, "
+             "qdot, per-joint clip flags). 'auto' writes next to the speedj "
+             "logs, 'none' disables. Streamed to disk, so a protective-stopped "
+             "run keeps the record that explains it.")
     parser.add_argument(
         "--dtc-payload-mass", type=float, default=None,
         help="override the pendant's installation payload for dtc (kg). Default "
@@ -731,6 +744,10 @@ def main():
             friction_comp=args.dtc_friction_comp,
             hz=args.dtc_hz, hold_zero=args.dtc_hold_zero,
             hold_at_tick=args.dtc_hold_at_tick,
+            stale_tau_s=(
+                None if args.dtc_stale_tau_ms is None
+                else args.dtc_stale_tau_ms / 1000.0),
+            log_path=_contact_log_path(args.dtc_log, prefix="dtc"),
             payload_mass=args.dtc_payload_mass,
             payload_cog=args.dtc_payload_cog,
         )
@@ -990,15 +1007,26 @@ def main():
                     # an emergency stop: |W_lin| was 5.8 N while tau railed at
                     # 30 N.m, and the loop was at a third of its nominal rate,
                     # which is the delay the damping term is fed back through.
+                    # `stale` here is the PUBLISH-side count off the streamer,
+                    # not the backend's dead-state-read counter: the line used
+                    # to print the latter as 0 through a run where the former
+                    # was chopping tau 19 times per 5 s. Both are shown, and the
+                    # clipped joint is named -- a railed wrist and a railed
+                    # shoulder are different faults with the same scalar count.
+                    pub = st.get("streamer") or {}
+                    worst = st.get("clip_joint_worst", -1)
                     actuation = (
                         f"|W|={st.get('w_lin', 0.0):.1f}N "
                         f"|Wa|={st.get('w_ang', 0.0):.2f}Nm "
                         f"tau_peak={st.get('tau_peak', 0.0):.2f}Nm "
-                        f"clip={st.get('n_tau_clipped', 0)} "
+                        f"clip={st.get('n_tau_clipped', 0)}"
+                        f"{'' if worst < 0 else f'@j{worst}'} "
                         f"hz={st.get('hz_meas', 0.0):.0f}/"
                         f"{st.get('hz', 0.0):.0f} "
                         f"dtmax={st.get('dt_max_ms', 0.0):.0f}ms "
-                        f"stale={st.get('n_stale', 0)}")
+                        f"pub_stale={pub.get('n_stale', 0)}"
+                        f"/{pub.get('n_zeroed', 0)}float "
+                        f"read_stale={st.get('n_stale', 0)}")
                 else:
                     actuation = (
                         f"tau_peak={st.get('tau_peak', 0.0):.2f}Nm "

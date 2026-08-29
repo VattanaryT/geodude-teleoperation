@@ -19,6 +19,7 @@ packages installed at all.
 """
 from __future__ import annotations
 
+import pathlib
 import threading
 import time
 from typing import Any, Callable, Sequence
@@ -212,6 +213,11 @@ DEFAULT_DTC_HZ = 125.0
 # read, short enough that a dead socket is caught before the arm drifts far.
 DEFAULT_STALE_AFTER_S = 0.1
 
+# Floor on the publish-side staleness bound, independent of --dtc-hz. Below the
+# period the host loop can actually hold, this bound does not protect against a
+# stalled loop, it chops a live one. See DirectTorqueBackend.__init__.
+DEFAULT_STALE_TAU_MIN_S = 0.04
+
 
 # --- control-group splice -------------------------------------------------
 #
@@ -362,6 +368,7 @@ class DirectTorqueBackend:
         payload_mass: float | None = None,
         payload_cog: Sequence[float] | None = None,
         install_latch: bool = True,
+        log_path=None,
         latch_out_dir=None,
         stock_script=None,
         streamer_factory: Callable[..., Any] | None = None,
@@ -395,10 +402,18 @@ class DirectTorqueBackend:
         self._stale_after_s = float(stale_after_s)
         # The on-robot latch holds the last tau forever if this host loop stalls,
         # which is the safe failure for one dropped packet but the wrong one for
-        # a dead loop. Default: two control periods, so ordinary jitter never
-        # trips it. See HostDirectTorqueStreamer(stale_tau_s=...).
+        # a dead loop. See HostDirectTorqueStreamer(stale_tau_s=...).
+        #
+        # This bound must sit *above* the period the loop actually holds, not
+        # above the nominal one. Two control periods was 16 ms at 125 Hz against
+        # a measured dt_max of 25 ms, so the publisher chopped tau several times
+        # a second on a perfectly healthy loop -- and the chop, not the stall,
+        # is what moved the arm. Four periods with a 40 ms floor clears the
+        # measured jitter; the streamer decays rather than steps, and full float
+        # still arrives at stale_after_s.
         self._stale_tau_s = (
-            2.0 / max(self._hz, 1.0) if stale_tau_s is None else float(stale_tau_s))
+            max(4.0 / max(self._hz, 1.0), DEFAULT_STALE_TAU_MIN_S)
+            if stale_tau_s is None else float(stale_tau_s))
         self._rail_position = (
             None if rail_position is None else float(rail_position))
         self._payload_mass = payload_mass
@@ -471,7 +486,21 @@ class DirectTorqueBackend:
         self._gated_now = False
         self._cmd_fail_logged = False
         self._n_tau_clipped = 0
+        # Which joint railed, not just that one did. A wrist at tau_max and a
+        # shoulder at tau_max are different faults with the same scalar count:
+        # the wrist is the light, lightly-damped blade that shook the arm into
+        # C283A2, the shoulder is a friction grab doing its job.
+        self._n_clip_joint = np.zeros(self._n, dtype=int)
         self._last_wrench = np.zeros(6, dtype=float)
+        # One CSV row per control tick, flushed as it goes -- the 1 Hz console
+        # line has now hidden the failure three times (|W_lin| against a railed
+        # tau, the period the loop was holding, and a publish-side stale count
+        # printed as 0). A protective-stopped session must leave the record that
+        # explains it, the same way --contact-log does.
+        self._log_path = None if log_path in (None, "", "none") else str(log_path)
+        self._log_fh = None
+        self._log_t0 = None
+        self._log_fail_logged = False
         # Measured loop period. The damping term's stability product is
         # (D / M) * T, so a loop that quietly runs at a third of its nominal
         # rate triples the number that decides whether the arm shakes. Nothing
@@ -670,6 +699,9 @@ class DirectTorqueBackend:
                 target_hz=self._hz,
                 robot_latch=True,
                 stale_tau_s=self._stale_tau_s,
+                # Decay from the bound to full float at the same age a dead
+                # state read floats the arm. One number, both paths.
+                stale_zero_s=max(self._stale_after_s, 2.0 * self._stale_tau_s),
             )
         return self._streamer
 
@@ -719,6 +751,7 @@ class DirectTorqueBackend:
         if self.active:
             return
         streamer = self._ensure_streamer()
+        self._log_open()
         self._cmd_fail_logged = False
         self._law.reset()
         # Enter torque mode already holding zero, not whatever tau a previous
@@ -751,6 +784,7 @@ class DirectTorqueBackend:
         if thr is not None and thr.is_alive():
             thr.join(timeout=1.0)
         self._thread = None
+        self._log_close()
         streamer, self._streamer = self._streamer, None
         if streamer is not None:
             try:
@@ -901,8 +935,10 @@ class DirectTorqueBackend:
         tau_max = self._law.tau_max
         tau = jacobian.T @ wrench
         clipped = np.clip(tau, -tau_max, tau_max)
-        if np.any(clipped != tau):
+        railed = np.abs(tau) > tau_max + 1e-12
+        if np.any(railed):
             self._n_tau_clipped += 1
+            self._n_clip_joint += railed
         return clipped
 
     def _compute_qdot(self):
@@ -990,7 +1026,9 @@ class DirectTorqueBackend:
                 mode = None  # a failed read is not evidence of a stop
         gated = not is_safe_to_command(mode)
 
+        phase = "live"
         if gated or stale:
+            phase = "gated" if gated else "stale"
             if gated:
                 self._n_gated += 1
                 if not self._gated_now:
@@ -1022,6 +1060,7 @@ class DirectTorqueBackend:
                 tau_wrench = None
                 cmd = self._read_qdot_cmd()
             if self._hold_zero:
+                phase = "hold_zero"
                 # Bring-up gate. The law above the seam still runs every tick --
                 # the speedJ trace, the field-follow path and the viser EE frame
                 # all stay live, which is the whole point of watching the arm
@@ -1040,6 +1079,7 @@ class DirectTorqueBackend:
                 dt_tick = None if self._t_tick is None else now - self._t_tick
                 tau = self._law.step(cmd, qdot_last, q_last, dt=dt_tick)
 
+        dt_meas = None
         if self._t_tick is not None:
             dt_meas = now - self._t_tick
             self._dt_ewma = (
@@ -1047,6 +1087,8 @@ class DirectTorqueBackend:
                 else 0.98 * self._dt_ewma + 0.02 * dt_meas)
             self._dt_max = max(self._dt_max, dt_meas)
         self._t_tick = now
+        self._log_row(now, dt_meas, phase, safety_mode_name(mode), tau,
+                      q_last, qdot_last)
         with self._lock:
             self._last_tau = np.asarray(tau, dtype=float).reshape(-1).copy()
         if self._streamer is not None:
@@ -1066,6 +1108,67 @@ class DirectTorqueBackend:
             remain = dt - (time.perf_counter() - t0)
             if remain > 0:
                 self._stop.wait(remain)
+
+    # -- per-tick log -------------------------------------------------------
+
+    def _log_open(self) -> None:
+        if self._log_path is None or self._log_fh is not None:
+            return
+        try:
+            path = pathlib.Path(self._log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._log_fh = path.open("w", buffering=1)
+        except Exception as exc:
+            self._log_path = None
+            print(f"\033[93mdtc: could not open --dtc-log ({exc}); "
+                  f"running without the per-tick record\033[0m", flush=True)
+            return
+        n = self._n
+        cols = ["t", "dt_ms", "phase", "safety"]
+        cols += [f"w{i}" for i in range(6)]
+        cols += [f"tau{i}" for i in range(n)]
+        cols += [f"q{i}" for i in range(n)]
+        cols += [f"qd{i}" for i in range(n)]
+        cols += [f"clip{i}" for i in range(n)]
+        self._log_fh.write(",".join(cols) + "\n")
+        self._log_t0 = None
+        print(f"dtc log: {self._log_path}", flush=True)
+
+    def _log_close(self) -> None:
+        fh, self._log_fh = self._log_fh, None
+        if fh is not None:
+            try:
+                fh.close()
+            except Exception:
+                pass
+
+    def _log_row(self, now, dt, phase, safety, tau, q, qd) -> None:
+        fh = self._log_fh
+        if fh is None:
+            return
+        if self._log_t0 is None:
+            self._log_t0 = now
+        n = self._n
+        tau = np.asarray(tau, dtype=float).reshape(-1)
+        zeros = np.zeros(n)
+        q = zeros if q is None else np.asarray(q, dtype=float).reshape(-1)
+        qd = zeros if qd is None else np.asarray(qd, dtype=float).reshape(-1)
+        clip = np.abs(tau) >= self._law.tau_max - 1e-9
+        fields = [f"{now - self._log_t0:.4f}",
+                  "" if dt is None else f"{1e3 * dt:.2f}", phase, safety]
+        fields += [f"{v:.4f}" for v in self._last_wrench]
+        fields += [f"{v:.4f}" for v in tau]
+        fields += [f"{v:.5f}" for v in q[:n]]
+        fields += [f"{v:.5f}" for v in qd[:n]]
+        fields += ["1" if c else "0" for c in clip]
+        try:
+            fh.write(",".join(fields) + "\n")
+        except Exception as exc:
+            self._log_close()
+            if not self._log_fail_logged:
+                self._log_fail_logged = True
+                print(f"\033[93mdtc: per-tick log write failed ({exc}); "
+                      f"continuing without it\033[0m", flush=True)
 
     def stats(self) -> dict:
         out = {
@@ -1093,6 +1196,11 @@ class DirectTorqueBackend:
             "w_lin": float(np.linalg.norm(self._last_wrench[3:6])),
             "w_ang": float(np.linalg.norm(self._last_wrench[0:3])),
             "n_tau_clipped": self._n_tau_clipped,
+            "n_clip_joint": self._n_clip_joint.tolist(),
+            # The joint that railed most. -1 when nothing has.
+            "clip_joint_worst": (
+                int(np.argmax(self._n_clip_joint))
+                if int(self._n_clip_joint.sum()) else -1),
             # Nominal vs achieved. hz_meas well under hz means the damping term
             # is being fed back through a longer delay than it was tuned for,
             # which is the failure this seam actually has.
@@ -1115,6 +1223,7 @@ __all__ = [
     "DEFAULT_I_MAX",
     "DEFAULT_KV",
     "DEFAULT_STALE_AFTER_S",
+    "DEFAULT_STALE_TAU_MIN_S",
     "DEFAULT_TAU_MAX",
     "DirectTorqueBackend",
     "JointVelocityTorqueLaw",

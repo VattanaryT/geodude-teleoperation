@@ -11,6 +11,7 @@ import pytest
 
 from geodude_teleoperation.torque_backend import (
     DEFAULT_KV,
+    DEFAULT_STALE_TAU_MIN_S,
     DEFAULT_TAU_MAX,
     DirectTorqueBackend,
     JointVelocityTorqueLaw,
@@ -842,3 +843,106 @@ def test_the_loop_reports_the_period_it_actually_held():
     assert st["hz"] == 125.0
     assert 24.0 < st["hz_meas"] < 26.0
     assert 39.0 < st["dt_max_ms"] < 41.0
+
+
+# --- the publish-side staleness bound ---------------------------------------
+#
+# The streamer chops tau when the last tick is older than this. Two control
+# periods (16 ms at 125 Hz) sat *below* the period this loop actually holds
+# (dt_max 25 ms measured), so it chopped a live loop several times a second
+# and the on-robot latch applied every edge. The bound has to clear the
+# measured jitter, not the nominal one.
+
+
+def test_the_stale_bound_clears_the_jitter_a_healthy_loop_shows():
+    backend, _s, held = _backend(hz=125.0)
+    backend._ensure_streamer()
+    assert backend._stale_tau_s >= 0.032        # four periods, not two
+    assert backend._stale_tau_s >= DEFAULT_STALE_TAU_MIN_S
+
+
+def test_a_slow_loop_gets_a_proportionally_longer_bound():
+    backend, _s, _h = _backend(hz=50.0)
+    assert backend._stale_tau_s == pytest.approx(0.08)
+
+
+def test_the_floor_holds_when_the_nominal_rate_is_optimistic():
+    """4/hz alone would be 8 ms at 500 Hz -- below any real host tick."""
+    backend, _s, _h = _backend(hz=500.0)
+    assert backend._stale_tau_s == pytest.approx(DEFAULT_STALE_TAU_MIN_S)
+
+
+def test_an_explicit_bound_wins():
+    backend, _s, _h = _backend(hz=125.0, stale_tau_s=0.01)
+    assert backend._stale_tau_s == pytest.approx(0.01)
+
+
+# --- which joint railed ------------------------------------------------------
+
+
+def test_the_clipped_joint_is_named_not_just_counted():
+    """A railed wrist and a railed shoulder are different faults.
+
+    The wrist is the light, lightly-damped blade that shook the arm into
+    C283A2; the shoulder is a friction grab doing what tau_max is for.
+    """
+    j = np.zeros((6, 6))
+    j[3, 4] = 1.0                       # linear X blade drives joint 4 only
+    ctrl = FakeWrenchController([0, 0, 0, 500.0, 0, 0], jacobian=j)
+    backend, _s, _h = _wrench_backend(ctrl, tau_max=[30.0] * 6)
+    backend._compute_wrench()
+    st = backend.stats()
+    assert st["clip_joint_worst"] == 4
+    assert st["n_clip_joint"] == [0, 0, 0, 0, 1, 0]
+
+
+def test_nothing_railed_reads_as_no_joint():
+    ctrl = FakeWrenchController([0.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+    backend, _s, _h = _wrench_backend(ctrl)
+    backend._compute_wrench()
+    assert backend.stats()["clip_joint_worst"] == -1
+
+
+# --- the per-tick record -----------------------------------------------------
+#
+# The 1 Hz console line has now hidden the failure three times. A
+# protective-stopped run has to leave the record that explains it.
+
+
+def test_the_log_records_one_row_per_tick_with_the_phase(tmp_path):
+    path = tmp_path / "dtc.csv"
+    backend, _s, _h = _backend(qdot_cmd_fn=lambda: np.zeros(6),
+                               log_path=str(path))
+    backend._log_open()
+    backend.tick(now=1.000)
+    backend.tick(now=1.008)
+    backend._log_close()
+    rows = path.read_text().strip().splitlines()
+    header = rows[0].split(",")
+    assert header[:4] == ["t", "dt_ms", "phase", "safety"]
+    assert len(rows) == 3
+    assert rows[1].split(",")[2] == "live"
+    # dt is blank on the first row (no previous tick) and measured after.
+    assert rows[1].split(",")[1] == ""
+    assert float(rows[2].split(",")[1]) == pytest.approx(8.0, abs=0.1)
+
+
+def test_the_log_says_when_the_tick_was_gated_or_held_at_zero(tmp_path):
+    path = tmp_path / "dtc.csv"
+    backend, _s, _h = _backend(qdot_cmd_fn=lambda: np.zeros(6),
+                               hold_zero=True, log_path=str(path))
+    backend._log_open()
+    backend.tick(now=1.000)
+    backend._safety_mode_fn = lambda: 3          # not NORMAL/REDUCED
+    backend.tick(now=1.008)
+    backend._log_close()
+    phases = [r.split(",")[2] for r in path.read_text().strip().splitlines()[1:]]
+    assert phases == ["hold_zero", "gated"]
+
+
+def test_no_log_path_costs_nothing(tmp_path):
+    backend, _s, _h = _backend(qdot_cmd_fn=lambda: np.zeros(6), log_path="none")
+    backend._log_open()
+    backend.tick(now=1.0)
+    assert backend._log_fh is None
+    assert not list(tmp_path.iterdir())

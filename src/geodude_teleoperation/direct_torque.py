@@ -444,6 +444,7 @@ class HostDirectTorqueStreamer:
         target_hz: float = UR_SYSTEM_HZ,
         robot_latch: bool = True,
         stale_tau_s: float | None = None,
+        stale_zero_s: float | None = None,
     ):
         self._control = control
         self._friction_comp = bool(friction_comp)
@@ -453,10 +454,27 @@ class HostDirectTorqueStreamer:
         # set_tau(), which is the *safe* failure for a dropped packet but the
         # wrong one for a stalled control loop: a constant torque under a moving
         # arm keeps accelerating it against a plan nobody is computing any more.
-        # Past this age the publisher sends zeros (gravity-compensated float)
-        # instead of the stale value. None keeps the raw hold, which is what the
-        # rate-verification path wants.
+        # Past this age the publisher decays τ towards zero (gravity-compensated
+        # float) instead of holding the stale value. None keeps the raw hold,
+        # which is what the rate-verification path wants.
         self._stale_tau_s = None if stale_tau_s is None else float(stale_tau_s)
+        # ...and it *decays*, it does not step. A hard step from a live τ to 0
+        # and back one publish later is itself an impulse: measured on this rig
+        # the control tick jittered to 25 ms against a 16 ms bound, so the
+        # publisher zeroed ~19 times per 5 s and the on-robot latch applied
+        # every edge at 500 Hz. On the wrist (I ~= 0.05 kg.m^2) a 10 N.m pulse
+        # 22 ms wide is d(omega) = tau*dt/I = 4.4 rad/s -- that is the arm
+        # moving when nothing asked it to, which is the C283A2 the pendant
+        # reported. Full zero still arrives, at stale_zero_s, so a dead loop
+        # floats exactly as before.
+        self._stale_zero_s = (
+            None if stale_zero_s is None else float(stale_zero_s))
+        if (self._stale_tau_s is not None and self._stale_zero_s is not None
+                and self._stale_zero_s <= self._stale_tau_s):
+            raise ValueError(
+                f"stale_zero_s ({self._stale_zero_s}) must be greater than "
+                f"stale_tau_s ({self._stale_tau_s})")
+        self._n_zeroed = 0
         self._tau = np.zeros(6, dtype=float)
         self._tau_t = time.perf_counter()
         self._n_stale = 0
@@ -530,6 +548,7 @@ class HostDirectTorqueStreamer:
         self._measured_hz = float("nan")
         self._rate_warn_logged = False
         self._n_stale = 0
+        self._n_zeroed = 0
         self._stale_logged = False
         self._stale_report_t = 0.0
         self._stale_report_n = 0
@@ -579,6 +598,23 @@ class HostDirectTorqueStreamer:
                 except Exception:
                     continue
 
+    def _zero_age(self) -> float:
+        """Age at which τ reaches full float. Defaults to 2x the stale bound."""
+        if self._stale_tau_s is None:
+            return float("inf")
+        if self._stale_zero_s is not None:
+            return self._stale_zero_s
+        return 2.0 * self._stale_tau_s
+
+    def _stale_scale(self, age: float) -> float:
+        """1.0 while fresh, ramping linearly to 0.0 at :meth:`_zero_age`."""
+        if self._stale_tau_s is None:
+            return 1.0
+        span = self._zero_age() - self._stale_tau_s
+        if span <= 0.0:
+            return 0.0
+        return float(np.clip(1.0 - (age - self._stale_tau_s) / span, 0.0, 1.0))
+
     def stats(self) -> dict[str, Any]:
         return {
             "active": self.active,
@@ -587,7 +623,15 @@ class HostDirectTorqueStreamer:
             "last_error": self._last_error,
             "measured_hz": float(self._measured_hz),
             "robot_latch": bool(self._robot_latch),
+            # Publish-side staleness: how many publishes were decayed because
+            # the control tick was late. This is NOT the backend's own n_stale
+            # (a dead RTDE *state read*, bounded at stale_after_s) -- the 1 Hz
+            # console line printed that one as 0 while this one was counting 34.
             "n_stale": int(self._n_stale),
+            "n_zeroed": int(self._n_zeroed),
+            "stale_tau_ms": (
+                None if self._stale_tau_s is None
+                else 1e3 * self._stale_tau_s),
         }
 
     def _run(self) -> None:
@@ -601,8 +645,10 @@ class HostDirectTorqueStreamer:
                 tau = self._tau.copy()
                 age = t0 - self._tau_t
             if self._stale_tau_s is not None and age > self._stale_tau_s:
-                tau = np.zeros(6, dtype=float)
+                tau = tau * self._stale_scale(age)
                 self._n_stale += 1
+                if not np.any(tau):
+                    self._n_zeroed += 1
                 # Deliberately NOT a one-shot latch. A single warning at startup
                 # (viser and the SpaceMouse coming up behind the control thread)
                 # and a control loop that cannot hold its period print exactly
@@ -616,8 +662,9 @@ class HostDirectTorqueStreamer:
                     print(
                         "\033[93mWARNING: DTC τ stale by "
                         f"{age * 1e3:.0f} ms (> {self._stale_tau_s * 1e3:.0f} ms); "
-                        "publishing zero torque until the control loop catches up."
-                        "\033[0m",
+                        "decaying torque towards zero (full float at "
+                        f"{self._zero_age() * 1e3:.0f} ms) until the control "
+                        "loop catches up.\033[0m",
                         flush=True,
                     )
                 elif t0 - self._stale_report_t >= STALE_REPORT_WINDOW_S:
@@ -626,9 +673,10 @@ class HostDirectTorqueStreamer:
                     self._stale_report_n = self._n_stale
                     print(
                         "\033[93mWARNING: DTC τ stale again -- "
-                        f"{dn} zeroed publishes in the last "
+                        f"{dn} decayed publishes in the last "
                         f"{STALE_REPORT_WINDOW_S:.0f} s "
-                        f"({self._n_stale} total), age now {age * 1e3:.0f} ms. "
+                        f"({self._n_stale} total, {self._n_zeroed} of them at "
+                        f"full float), age now {age * 1e3:.0f} ms. "
                         "The control loop is not holding its period.\033[0m",
                         flush=True,
                     )

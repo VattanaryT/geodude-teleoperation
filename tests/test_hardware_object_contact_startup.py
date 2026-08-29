@@ -638,5 +638,40 @@ class WrenchLawWiringTest(unittest.TestCase):
         self.assertIn('refusing contact under --dtc-law wrench', source)
 
 
+class DtcDiagnosticsWiringTest(unittest.TestCase):
+    """The console line and the CLI knobs the C283A2 run needed and did not have."""
+
+    def test_the_stale_bound_is_tunable_and_defers_to_the_backend(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args([])
+        self.assertIsNone(args.dtc_stale_tau_ms)
+        args = mod.build_arg_parser().parse_args(["--dtc-stale-tau-ms", "50"])
+        self.assertEqual(args.dtc_stale_tau_ms, 50.0)
+
+    def test_the_per_tick_dtc_log_is_on_by_default(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args([])
+        self.assertEqual(args.dtc_log, "auto")
+        path = mod._contact_log_path("auto", prefix="dtc")
+        self.assertIn("/dtc_", path)
+        self.assertTrue(path.endswith(".csv"))
+        self.assertIsNone(mod._contact_log_path("none", prefix="dtc"))
+
+    def test_the_contact_log_name_did_not_move(self):
+        mod = _load_example()
+        self.assertIn("/contact_", mod._contact_log_path("auto"))
+
+    def test_the_console_line_reports_the_publish_side_stale_count(self):
+        """It printed the backend's read-stale as 0 while the publisher chopped tau."""
+        source = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("pub_stale=", source)
+        self.assertIn('st.get("streamer")', source)
+        self.assertIn("read_stale=", source)
+
+    def test_the_console_line_names_the_railed_joint(self):
+        source = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("clip_joint_worst", source)
+
+
 if __name__ == "__main__":
     unittest.main()

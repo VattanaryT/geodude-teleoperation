@@ -150,3 +150,64 @@ def test_install_fails_if_program_not_running(tmp_path: Path):
             out_dir=tmp_path,
             ready_timeout_s=0.15,
         )
+
+
+# --- publish-side staleness -------------------------------------------------
+#
+# The bound exists so a *stalled* control loop floats the arm. It is not
+# allowed to chop a *live* one: measured on this rig the tick jittered to 25 ms
+# against a 16 ms bound, so the publisher stepped tau to zero and back several
+# times a second, and the on-robot latch applied every edge at 500 Hz. On the
+# wrist (I ~= 0.05 kg.m^2) a 10 N.m pulse 22 ms wide is 4.4 rad/s of joint
+# velocity nobody commanded -- the C283A2 "robot is moving when in stop mode"
+# the pendant reported. Hence: decay, do not step.
+
+
+def _streamer(**kw):
+    from geodude_teleoperation.direct_torque import HostDirectTorqueStreamer
+
+    kw.setdefault("stale_tau_s", 0.02)
+    kw.setdefault("stale_zero_s", 0.06)
+    return HostDirectTorqueStreamer(object(), **kw)
+
+
+def test_fresh_tau_is_published_untouched():
+    s = _streamer()
+    assert s._stale_scale(0.0) == 1.0
+    assert s._stale_scale(0.02) == 1.0
+
+
+def test_a_late_tick_decays_tau_instead_of_stepping_it_to_zero():
+    s = _streamer()
+    mid = s._stale_scale(0.04)
+    assert 0.0 < mid < 1.0
+    assert abs(mid - 0.5) < 1e-9
+
+
+def test_full_float_still_arrives_for_a_dead_loop():
+    s = _streamer()
+    assert s._stale_scale(0.06) == 0.0
+    assert s._stale_scale(10.0) == 0.0
+
+
+def test_the_zero_age_defaults_to_twice_the_bound():
+    s = _streamer(stale_zero_s=None)
+    assert s._zero_age() == pytest.approx(0.04)
+
+
+def test_no_bound_means_the_raw_hold_the_rate_check_wants():
+    s = _streamer(stale_tau_s=None, stale_zero_s=None)
+    assert s._stale_scale(10.0) == 1.0
+
+
+def test_a_zero_age_inside_the_bound_is_refused():
+    with pytest.raises(ValueError):
+        _streamer(stale_tau_s=0.05, stale_zero_s=0.05)
+
+
+def test_the_publisher_reports_its_own_stale_count_separately():
+    """The console line printed the backend's read-stale (0) while this counted 34."""
+    s = _streamer()
+    st = s.stats()
+    assert st["n_stale"] == 0 and st["n_zeroed"] == 0
+    assert st["stale_tau_ms"] == pytest.approx(20.0)
