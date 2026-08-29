@@ -3726,19 +3726,42 @@ system:
     right_ur5e/wrist_3_link:
       name: right_ur5e/wrist_3_link
       parent_joint: right_ur5e/wrist_3_joint
+      # The 0.49 kg chamfer tool is merged into this link's inertial block.
+      # M(q) here is what Lambda = (J M^-1 J.T)^-1 is built from, and the tool
+      # was missing from it entirely -- the pendant knows the payload, gafropy
+      # did not. Bare-link values were mass 0.1889, cog_y 0.0771683,
+      # I = (9.90863e-05, 1.321340e-04, 9.90863e-05).
+      #
+      # Payload from the teach pendant: 0.49 kg, cog [0.019, -0.033, 0.03] in
+      # the TOOL frame, flange at y = 0.0996 along this link's +Y. The joint
+      # axis is (0,-1,0) (see right_ur5e/wrist_3_joint), so +Y IS the wrist3
+      # spin axis and yy is its inertia.
+      #
+      # yy is twist-independent by construction: the parallel-axis term about
+      # the spin axis is m*rho^2 with rho = |(0.019, -0.033)| = 0.038079 m, the
+      # cog's distance off that axis, so it needs no assumption about how the
+      # tool frame is rotated about Y. Only xx/zz depend on how rho splits
+      # between link X and Z, and the y-offset dominates both, so the split
+      # changes them by under 9% -- taken symmetrically (rho^2/2 each).
+      #
+      # yy goes 6.38x. That matters because Lambda's smallest angular
+      # eigenvalue was measured at 0.0008 kg.m^2, sitting on the
+      # LAMBDA_MIN_ANG_KGM2 = 0.0005 clamp floor in torque_backend.py -- the
+      # wrist axis, under-modelled, and the one that limit-cycled at 7-8 Hz.
+      # The left arm carries no tool and is deliberately untouched.
       inertial:
-        mass: 0.1889
+        mass: 0.6789
         inertia:
-          xx: 9.908629999999995e-05
+          xx: 8.291454e-04
           xy: -7.338063490180958e-21
           xz: 0
-          yy: 0.00013213399999999995
+          yy: 8.426340e-04
           yz: -0
-          zz: 9.90863e-05
+          zz: 8.291454e-04
         origin:
           position:
             x: -0
-            y: 0.07716829999999998
+            y: 0.1150112
             z: -0
           orientation:
             w: 1
