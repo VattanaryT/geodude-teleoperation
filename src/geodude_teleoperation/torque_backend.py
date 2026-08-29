@@ -1016,7 +1016,13 @@ class DirectTorqueBackend:
         jacobian = np.asarray(tss.get_jacobian(), dtype=float)
         # Read the jacobian before the law, because Lambda is built from it.
         lam = self._task_inertia(jacobian) if self._use_lambda else None
+        # The kwarg is passed ONLY when shaping is on. Passing inertia=None
+        # would still change the call signature every control law has to accept,
+        # and the un-shaped path is required to stay byte-identical -- that is
+        # the whole basis for trusting it against the speedJ A/B.
         wrench = np.asarray(
+            controller.compute_control_wrench(robot_state, objective_state, tss)
+            if lam is None else
             controller.compute_control_wrench(
                 robot_state, objective_state, tss, inertia=lam),
             dtype=float).reshape(-1)
