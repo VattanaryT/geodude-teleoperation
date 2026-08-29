@@ -903,6 +903,72 @@ def test_nothing_railed_reads_as_no_joint():
     assert backend.stats()["clip_joint_worst"] == -1
 
 
+# --- the live plot feed ------------------------------------------------------
+#
+# The speedJ trace hangs off the controller and fires at the end of
+# `compute_control_command`, which the wrench law never calls -- so the plot
+# window was empty for every wrench-law run, and the operator lost the one
+# view that shows |W_lin| between the 1 Hz console lines. It is traced from the
+# backend instead, where both the wrench and the *clipped* tau exist.
+
+
+class FakeTracedState:
+    def __init__(self, qdot):
+        self._qdot = np.asarray(qdot, dtype=float)
+
+    def get_velocity(self):
+        return self._qdot
+
+
+def _traced_backend(controller, qdot=None, **kwargs):
+    backend, state, held = _backend(law_kind="wrench", **kwargs)
+    rs = FakeTracedState(np.zeros(6) if qdot is None else qdot)
+    backend._control_states = lambda: (controller, rs, None, controller)
+    seen = []
+    backend.set_command_trace(
+        lambda tau, **kw: seen.append((np.asarray(tau, dtype=float), kw)))
+    return backend, seen
+
+
+def test_the_trace_gets_the_clipped_tau_and_the_wrench():
+    ctrl = FakeWrenchController([0.0, 0.0, 0.0, 500.0, 0.0, 0.0])
+    backend, seen = _traced_backend(ctrl, tau_max=[30.0] * 6)
+    backend._compute_wrench()
+    tau, kw = seen[0]
+    # Clipped, not raw: the plot has to show what the arm was actually sent,
+    # or a railed run looks like it was asking for 500 N.m and getting it.
+    assert np.allclose(tau, [0, 0, 0, 30, 0, 0])
+    assert np.allclose(kw["wrench"], [0, 0, 0, 500, 0, 0])
+
+
+def test_the_trace_carries_the_measured_joint_velocity():
+    """"Is the arm actually moving" is the question a stalling loop leaves open."""
+    ctrl = FakeWrenchController([0.0, 0.0, 0.0, 5.0, 0.0, 0.0])
+    qdot = np.array([0.02, 0.0, 0.0, 0.0, 0.0, 0.0])
+    backend, seen = _traced_backend(ctrl, qdot=qdot)
+    backend._compute_wrench()
+    np.testing.assert_allclose(seen[0][1]["measured"], qdot)
+
+
+def test_a_broken_trace_does_not_take_down_the_loop():
+    """It holds the robot's 500 Hz clock; a plot must never be able to stop it."""
+    ctrl = FakeWrenchController([0.0, 0.0, 0.0, 5.0, 0.0, 0.0])
+    backend, _s, _h = _wrench_backend(ctrl)
+    def boom(tau, **kw):
+        raise RuntimeError("plot process died")
+    backend.set_command_trace(boom)
+    assert np.allclose(backend._compute_wrench(), [0, 0, 0, 5, 0, 0])
+    assert backend._command_trace is None
+    assert np.allclose(backend._compute_wrench(), [0, 0, 0, 5, 0, 0])
+
+
+def test_no_trace_is_the_default():
+    ctrl = FakeWrenchController([0.0, 0.0, 0.0, 5.0, 0.0, 0.0])
+    backend, _s, _h = _wrench_backend(ctrl)
+    assert backend._command_trace is None
+    assert np.allclose(backend._compute_wrench(), [0, 0, 0, 5, 0, 0])
+
+
 # --- the per-tick record -----------------------------------------------------
 #
 # The 1 Hz console line has now hidden the failure three times. A

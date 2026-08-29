@@ -461,9 +461,11 @@ def build_arg_parser():
         "--dtc-k-lin", type=float, default=3000.0, metavar="N_PER_M",
         help="--dtc-law wrench: linear stiffness (N/m) on blades 3..5. This is "
              "where lateral authority comes from -- at field-follow's 5 mm "
-             "lead, 3000 N/m is ~15 N of slide. Raise this, not --max-lead-m: "
-             "the lead is the path contract that has to stay comparable with "
-             "speedj for the A/B (default %(default)s)")
+             "lead, 3000 N/m is ~15 N of slide. Prefer raising this over "
+             "--max-lead-m, which is the path contract that has to stay "
+             "comparable with speedj for the A/B -- but --max-lead-m is the "
+             "hard ceiling on the error this multiplies, so at the 5 mm "
+             "default no k-lin below ~8000 reaches 40 N (default %(default)s)")
     parser.add_argument(
         "--dtc-k-ang", type=float, default=50.0, metavar="NM_PER_RAD",
         help="--dtc-law wrench: angular stiffness (N.m/rad) on blades 0..2. A "
@@ -656,6 +658,18 @@ def build_arg_parser():
         help="after align, project() rate for stick field-follow (15–50 Hz). "
              "Not the RTDE/speedJ rate.")
     parser.add_argument(
+        "--max-lead-m", type=float, default=0.005, metavar="M",
+        help="how far the field-follow carrot may run ahead of the live TCP. "
+             "Under speedJ this is a path contract and 5 mm is right. Under "
+             "--dtc-law wrench it is also the *force* ceiling, because the "
+             "pose error that becomes force cannot exceed it: 3000 N/m x 5 mm "
+             "= 15 N, well under UR5e breakaway, and --dtc-err-clip-lin can "
+             "never bind above it. It is a ceiling twice over -- _clamp_lead "
+             "trims the carrot to it, and past it the catch-up branch rebases "
+             "the carrot onto the live TCP, which collapses the error to zero "
+             "exactly when the loop was closest to breaking stiction "
+             "(default %(default)s)")
+    parser.add_argument(
         "--align-delay", type=float, default=None,
         help="seconds to wait after viser starts before the align slerp "
              "(default: wait for Enter; orange ghost shows the snap first)")
@@ -819,7 +833,7 @@ def main():
     field_preview = FieldAlignPreview(vf)
     follow = FieldFollow(
         vf, hz=args.follow_hz, project_in_process=True, mesh=object_surface,
-        max_lead_m=0.005, max_step_m=0.004, max_dR_rad=0.02,
+        max_lead_m=args.max_lead_m, max_step_m=0.004, max_dR_rad=0.02,
         snap_to_surface=args.snap_follow_to_surface)
     follow_log_t = {"t": float("-inf")}
     stick = {
@@ -1363,7 +1377,15 @@ def main():
         if args.speedj_plot and speedj_trace is None:
             from geodude_teleoperation.speedj_plot import SpeedJTrace
             speedj_trace = SpeedJTrace()
-            approach_controller.set_command_trace(speedj_trace.record)
+            if dtc_backend is not None and args.dtc_law == "wrench":
+                # The wrench law never calls compute_control_command, so the
+                # controller's trace hook never fires and this window stayed
+                # empty for every wrench-law run. Feed it from the backend,
+                # which has the clipped tau and the wrench; the plot switches
+                # its top two panels to N.m and N on the first sample.
+                dtc_backend.set_command_trace(speedj_trace.record)
+            else:
+                approach_controller.set_command_trace(speedj_trace.record)
             speedj_trace.start(figsize=tuple(args.plot_size))
         approach_controller.set_input_active(False)
         approach_controller.hold_live_pose()

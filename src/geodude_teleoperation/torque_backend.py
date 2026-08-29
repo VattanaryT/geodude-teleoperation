@@ -492,6 +492,13 @@ class DirectTorqueBackend:
         # C283A2, the shoulder is a friction grab doing its job.
         self._n_clip_joint = np.zeros(self._n, dtype=int)
         self._last_wrench = np.zeros(6, dtype=float)
+        # Live plot feed for --dtc-law wrench. The speedJ trace hangs off
+        # AdmittanceTeleoperationController and fires at the end of
+        # compute_control_command, which the wrench law never calls -- so the
+        # plot window was empty for every wrench-law run. Traced from here
+        # instead, where both the wrench and the clipped tau exist.
+        self._command_trace = None
+        self._trace_fail_logged = False
         # One CSV row per control tick, flushed as it goes -- the 1 Hz console
         # line has now hidden the failure three times (|W_lin| against a railed
         # tau, the period the loop was holding, and a publish-side stale count
@@ -903,6 +910,36 @@ class DirectTorqueBackend:
         hold(q_ctrl)
         return True
 
+    def set_command_trace(self, fn):
+        """Optional ``callback(tau, measured=, spring=, stick=, wrench=)`` per tick.
+
+        Wrench law only. Under ``--dtc-law velocity`` the controller's own
+        ``set_command_trace`` still fires from inside
+        ``compute_control_command``, unchanged.
+        """
+        self._command_trace = fn
+
+    def _trace_wrench(self, controller, robot_state, tau, wrench):
+        trace = self._command_trace
+        if trace is None:
+            return
+        try:
+            qd = np.asarray(
+                robot_state.get_velocity(), dtype=float).reshape(-1)
+            measured = qd[self._ur_slots] if qd.size != self._n else qd
+            trace(tau, measured=measured,
+                  spring=bool(getattr(controller, "input_active", False)),
+                  stick=getattr(controller, "stick_linear", None),
+                  wrench=wrench)
+        except Exception as exc:
+            # A plot must never take down the loop that is holding the robot's
+            # 500 Hz clock. Say it once and keep streaming tau.
+            if not self._trace_fail_logged:
+                self._trace_fail_logged = True
+                print(f"\033[93mdtc: command trace disabled ({exc!r})\033[0m",
+                      flush=True)
+            self._command_trace = None
+
     def _compute_wrench(self):
         """One tick of the wrench law: ``tau = clip(J.T @ W, +/-tau_max)``.
 
@@ -939,6 +976,7 @@ class DirectTorqueBackend:
         if np.any(railed):
             self._n_tau_clipped += 1
             self._n_clip_joint += railed
+        self._trace_wrench(controller, robot_state, clipped, wrench)
         return clipped
 
     def _compute_qdot(self):

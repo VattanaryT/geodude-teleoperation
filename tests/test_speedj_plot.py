@@ -126,3 +126,77 @@ class SpeedJTraceTest(unittest.TestCase):
             self.assertTrue(png.is_file())
             data = np.load(npz)
             np.testing.assert_allclose(data["qddot"][1], [400.0, 0.0])
+
+
+class WrenchTraceTest(unittest.TestCase):
+    """--dtc-law wrench feeds this plot instead of speedJ.
+
+    The wrench law never calls ``compute_control_command``, so the controller's
+    trace hook never fires and the window was empty for every wrench-law run.
+    The backend traces it instead, with commanded tau in the ``qdot`` slot and
+    the task wrench alongside; a sample carrying a wrench flips the top two
+    panels to N.m and N.
+    """
+
+    def test_sample_carries_the_wrench_and_defaults_to_none(self):
+        plain = sample_from_qdot(np.zeros(6), t=0.0, prev=None)
+        self.assertIsNone(plain.wrench)
+        W = np.array([0.1, 0.2, 0.3, 4.0, 5.0, 6.0])
+        s = sample_from_qdot(np.zeros(6), t=0.0, prev=None, wrench=W)
+        np.testing.assert_allclose(s.wrench, W)
+
+    def test_wrench_session_renders_and_round_trips(self):
+        t = np.array([0.0, 0.008, 0.016])
+        tau = np.array([[0.0] * 6, [6.0, 3.5, 2.9, 1.5, 1.8, 0.06], [-4.0] + [0.0] * 5])
+        qddot = np.zeros((3, 6))
+        dt = np.array([0.0, 0.008, 0.008])
+        spring = np.array([0.0, 1.0, 1.0])
+        stick = np.zeros((3, 3))
+        measured = np.zeros((3, 6))
+        measured[1, 0] = 0.02
+        wrench = np.array([
+            [0.0] * 6,
+            [0.1, 0.2, 0.3, 10.0, 2.0, 1.0],
+            [0.0, 0.0, 0.0, 45.0, 0.0, 0.0],
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            png = pathlib.Path(tmp) / "wrench.png"
+            npz = pathlib.Path(tmp) / "wrench.npz"
+            write_speedj_session(
+                png, t=t, qdot=tau, qddot=qddot, dt=dt, spring=spring,
+                measured=measured, stick=stick, wrench=wrench, path_npz=npz)
+            # The PNG path swallows its own exceptions, so its existence is the
+            # only evidence the wrench-mode drawing branch actually ran.
+            self.assertTrue(png.is_file())
+            self.assertGreater(png.stat().st_size, 1000)
+            data = np.load(npz)
+            np.testing.assert_allclose(data["wrench"][2], wrench[2])
+
+    def test_a_speedj_session_still_writes_no_wrench_key(self):
+        t = np.array([0.0, 0.002])
+        qdot = np.zeros((2, 2))
+        with tempfile.TemporaryDirectory() as tmp:
+            png = pathlib.Path(tmp) / "s.png"
+            npz = pathlib.Path(tmp) / "s.npz"
+            write_speedj_session(
+                png, t=t, qdot=qdot, qddot=np.zeros((2, 2)),
+                dt=np.array([0.0, 0.002]), spring=np.zeros(2), path_npz=npz)
+            self.assertNotIn("wrench", np.load(npz).files)
+
+    def test_trace_save_session_keeps_the_wrench(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            png = pathlib.Path(tmp) / "sess.png"
+            npz = pathlib.Path(tmp) / "sess.npz"
+            trace = SpeedJTrace()
+            W = np.array([0.3, 0.0, 0.0, 12.0, 0.0, 0.0])
+            trace.record(np.zeros(6), t=0.0, spring=False)
+            trace.record(np.full(6, 2.0), t=0.008, spring=True,
+                         measured=np.zeros(6), wrench=W)
+            trace.save_session(png, npz)
+            self.assertTrue(png.is_file())
+            data = np.load(npz)
+            self.assertEqual(data["wrench"].shape, (2, 6))
+            # The first sample had no wrench: NaN, not a fabricated zero, or a
+            # run that started before the law engaged would read as "0 N".
+            self.assertTrue(np.all(np.isnan(data["wrench"][0])))
+            np.testing.assert_allclose(data["wrench"][1], W)

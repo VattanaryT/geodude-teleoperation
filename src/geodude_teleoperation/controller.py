@@ -285,6 +285,15 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         """Latest SpaceMouse linear (m) for the command plot. Does not drive speedJ."""
         self._stick_linear = np.asarray(linear, dtype=float).reshape(3).copy()
 
+    @property
+    def stick_linear(self):
+        """Read side of ``set_stick_linear``, for the direct-torque plot trace.
+
+        The speedJ trace reads ``_stick_linear`` from inside
+        ``compute_control_command``; the wrench law is traced from the backend,
+        which is outside this class and needs a public accessor."""
+        return np.array(self._stick_linear, copy=True)
+
     def set_input_active(self, active: bool) -> None:
         self._input_active = bool(active)
 
