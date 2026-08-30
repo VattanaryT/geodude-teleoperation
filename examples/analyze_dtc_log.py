@@ -37,6 +37,31 @@ STICK_FLOOR_HZ = 2.0
 # (median 1.03 rad/s under 0.1 s, 0.0000 past 0.5 s -- the same shape as a run
 # with a clean hold, which differed only in how many short stick bursts it had).
 QUIET_SETTLE_S = 0.25
+# Quiet-stick |qdot| p95 above this is worth explaining at all.
+QUIET_HOLD_RADPS = 0.05
+# ...and above either of these, a commanded wrench explains it. The idle hold
+# keeps the field *orientation* commanded on purpose, so the angular bound is
+# the one that fires; both sit well above the wrench a truly idle arm carries
+# (|W| medians on the quiet ticks of a clean run are ~0).
+QUIET_WRENCH_ANG_NM = 0.5
+QUIET_WRENCH_LIN_N = 2.0
+
+
+def _settled(quiet, act, dt):
+    """``quiet`` with QUIET_SETTLE_S after each falling edge dropped.
+
+    The arm is still decelerating there and that transient is not the hold
+    failing: dtc_20260830_123245.csv read |qdot| p95 1.111 rad/s over raw quiet
+    ticks and 0.003 over settled ones.
+    """
+    settle = max(1, int(round(QUIET_SETTLE_S / dt)))
+    since = np.full(quiet.size, settle + 1, int)
+    c = settle + 1
+    for i in range(quiet.size):
+        c = 0 if (quiet[i] and i > 0 and act[i - 1]) else (
+            c + 1 if quiet[i] else settle + 1)
+        since[i] = c
+    return quiet & (since >= settle)
 
 
 def _read(path):
@@ -91,12 +116,12 @@ def main():
     print("\n  rising left-to-right = still capped, raise --dtc-tau-max on that joint.")
     print("  flat/zero while the TCP will not slide = not the cap; look at |W_lin|.")
 
-    oscillation(rows, live, n)
+    oscillation(rows, live, W, n)
     stall(rows, live, W, n)
     tracking(rows, live, W)
 
 
-def oscillation(rows, live, n):
+def oscillation(rows, live, W, n):
     """Limit-cycle report: is the arm shaking at a frequency nobody commanded?
 
     This exists because dtc_20260830_005006.csv passed every other section of
@@ -172,8 +197,12 @@ def oscillation(rows, live, n):
           f"Nyquist {0.5/dt:.0f} Hz)")
     print(f"  peaks are the strongest line above {STICK_FLOOR_HZ:g} Hz, "
           f"not the argmax (which is always the stick)")
-    print("  joint   tau peak Hz   qdot peak Hz   |qdot| p95 quiet   |tau| p95 quiet")
-    quiet = ~act
+    # The same population the verdict below uses. These columns used to be the
+    # raw ~act mask while the verdict dropped QUIET_SETTLE_S of coast-down, so
+    # on dtc_20260830_130541.csv the table read j2/j3 at 0.64 rad/s "quiet"
+    # against an aggregate of 0.069 -- an order of magnitude apart, on the same
+    # run, under the same word.
+    quiet = _settled(~act, act, dt)
     peaks = []
     for j in range(n):
         f_tau, _, _ = peak(tau[:, j])
@@ -237,27 +266,44 @@ def oscillation(rows, live, n):
     else:
         print("     no ringing (the motion is where the operator put it).")
 
-    if quiet.any():
-        # Drop the coast-down after each release: the arm is still decelerating
-        # there and that is not the hold failing. See QUIET_SETTLE_S.
-        settle = max(1, int(round(QUIET_SETTLE_S / dt)))
-        since = np.full(t.size, settle + 1, int)
-        c = settle + 1
-        for i in range(t.size):
-            c = 0 if (quiet[i] and i > 0 and act[i - 1]) else (
-                c + 1 if quiet[i] else settle + 1)
-            since[i] = c
-        held = quiet & (since >= settle)
-        if held.any():
-            moved = float(np.percentile(np.linalg.norm(qd[held], axis=1), 95))
-            print(f"  |qdot| p95 with the stick QUIET and settled: "
-                  f"{moved:.3f} rad/s ({held.mean():.0%} of live ticks, "
-                  f"{QUIET_SETTLE_S:g} s of coast-down dropped)")
-            if moved > 0.05:
-                print("     \033[93mTHE HOLD IS NOT HOLDING: the arm keeps "
-                      "moving long after the stick was released.\033[0m")
-        else:
-            print(f"  (no quiet ticks past {QUIET_SETTLE_S:g} s of coast-down)")
+    held = quiet
+    if not held.any():
+        print(f"  (no quiet ticks past {QUIET_SETTLE_S:g} s of coast-down)")
+        return
+    moved = float(np.percentile(np.linalg.norm(qd[held], axis=1), 95))
+    print(f"  |qdot| p95 with the stick QUIET and settled: "
+          f"{moved:.3f} rad/s ({held.mean():.0%} of live ticks, "
+          f"{QUIET_SETTLE_S:g} s of coast-down dropped)")
+    if moved <= QUIET_HOLD_RADPS:
+        return
+
+    # Motion while quiet is only a *hold failure* if nothing was commanding it.
+    # It usually is not. controller.hold_pose_at re-bases the position onto the
+    # live pose but keeps the field orientation commanded (set_hold_rotation),
+    # deliberately, so the wrist goes on converging on the field between stick
+    # motions instead of being handed the whole angular error at the next
+    # re-arm. On dtc_20260830_130541.csv that read 0.069 rad/s quiet and
+    # printed "THE HOLD IS NOT HOLDING" while the loop was doing exactly what
+    # it was built to do -- |W_ang| was live and err_ang was 14-16 deg at every
+    # re-arm edge. Drift is motion under *no* wrench; convergence is motion
+    # under one.
+    wl_h = np.linalg.norm(W[live][held, 3:6], axis=1)
+    wa_h = np.linalg.norm(W[live][held, 0:3], axis=1)
+    ang = float(np.median(wa_h))
+    lin = float(np.median(wl_h))
+    print(f"     while quiet: |W_ang| median {ang:.2f} N.m  "
+          f"|W_lin| median {lin:.2f} N")
+    if ang > QUIET_WRENCH_ANG_NM or lin > QUIET_WRENCH_LIN_N:
+        print("     COMMANDED, not drift: the idle hold re-bases position but "
+              "keeps the field orientation commanded, so the wrist is still "
+              "closing err_ang while the stick is quiet.")
+        print("     Read it as convergence speed, not as a failed hold. It is "
+              "a fault only if it never settles -- check err_ang at the "
+              "re-arm edges below: falling edge-to-edge = converging.")
+    else:
+        print("     \033[93mTHE HOLD IS NOT HOLDING: the arm keeps moving "
+              "long after the stick was released, under no commanded "
+              "wrench.\033[0m")
 
 
 def stall(rows, live, W, n):
@@ -336,6 +382,7 @@ def tracking(rows, live, W):
               f"  p95 {q(n_deg[ok],95):6.2f}  max {n_deg[ok].max():6.2f}")
         print("     this is the conformity number. Sustained >5 deg while the "
               "spring is on = the arm is not reaching the field pose.")
+        roll(ea, n_deg, on & ok)
 
     # Re-arm steps: the spring gate going 0->1 hands the loop a fresh target in
     # one tick. A big wrench on that edge is a step command, not tracking.
@@ -355,6 +402,42 @@ def tracking(rows, live, W):
                   f"   err {el[i]:6.2f} mm / {ea[i]:5.2f} deg")
         print("    a large step here is a re-arm discontinuity: the target was "
               "the live pose while quiet and the full field pose one tick later.")
+
+
+def roll(ea, n_deg, mask):
+    """Split the angular error into tilt (= conformity) and roll about tool Z.
+
+    These two halves fail for opposite reasons and the norm hides it. ``n_deg``
+    is the angle between live tool +Z and the commanded field normal, so it IS
+    the tilt; whatever ``|err_ang|`` carries beyond it is rotation *about* tool
+    Z, which the field pins through the tangent and which nothing else reports.
+
+    Roll is the axis the shaped law starves. Under Lambda the commanded moment
+    scales with apparent inertia, spinning the tool about its own axis only
+    turns wrist 3's rotor, and breakaway friction does not scale with either --
+    so on dtc_20260830_130541.csv the tilt converged to 0.5 deg while the roll
+    sat at 17.8 deg untouched for the whole hold, on 0.109 N.m of commanded
+    moment. See LAMBDA_MIN_ANG_KGM2. A conformity number that looks excellent
+    next to an err_ang several times larger is this, every time.
+    """
+    if not mask.any():
+        return
+    tilt = float(np.median(n_deg[mask]))
+    tot = float(np.median(ea[mask]))
+    # Orthogonal by construction only in the small-angle limit, which is where
+    # this matters; the point is the split, not the third decimal.
+    res = float(np.sqrt(max(tot ** 2 - tilt ** 2, 0.0)))
+    print(f"  err_ang split deg  tilt (= conformity) {tilt:6.2f}"
+          f"   roll about tool Z {res:6.2f}")
+    if res > 5.0 and res > 2.0 * max(tilt, 1e-6):
+        print("     \033[93mROLL STARVED: the angular error is mostly rotation "
+              "about the tool axis, which the field pins through the tangent "
+              "and Lambda scales to near nothing.\033[0m")
+        print("     Check lamfloor in the console line. If it is 0 the floor "
+              "is inert -- raise LAMBDA_MIN_ANG_KGM2; if it is high and the "
+              "roll still will not close, wrist 3 is friction-bound and the "
+              "lever is --dtc-joint-hold-kp, not a task gain.")
+
 
 
 if __name__ == "__main__":

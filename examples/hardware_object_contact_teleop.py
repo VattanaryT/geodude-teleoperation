@@ -173,8 +173,8 @@ WRENCH_TAU_MAX = (50.0, 50.0, 50.0, 6.0, 6.0, 30.0)
 # 1.09 -> 10.35 N.m inside one 8 ms tick: while the stick is quiet the idle
 # hold pins the target on the live pose, so err_lin is ~0, and the first active
 # tick hands back the full field-follow carrot (up to --max-lead-m of lead).
-# 0.15 s is ~19 ticks at 125 Hz, which turns a 38 N step into ~2 N per tick and
-# is short enough to be well inside the operator's own reaction time. 0 off.
+# 0.15 s is ~30 ticks at the 200 Hz default, which turns a 38 N step into ~1 N
+# per tick and is well inside the operator's own reaction time. 0 off.
 DEFAULT_REARM_WRENCH_S = 0.15
 
 # --dtc-law wrench damping ratios and the no-Lambda angular frequency, resolved
@@ -1440,7 +1440,14 @@ def main():
                         # Stuck at 0 means the flag never reached the backend --
                         # a typo would otherwise be invisible, because the joint
                         # it holds is one the task wrench never touches either.
-                        f"jhold={st.get('n_joint_hold', 0)}")
+                        f"jhold={st.get('n_joint_hold', 0)} "
+                        # Ticks Lambda's angular eigenvalue floor clamped on.
+                        # A light axis -- tool roll -- is the one the shaped law
+                        # starves, because the commanded moment scales with the
+                        # apparent inertia and breakaway friction does not. See
+                        # LAMBDA_MIN_ANG_KGM2. Stuck at 0 means the floor is
+                        # inert and a stuck roll is not this.
+                        f"lamfloor={st.get('n_lambda_ang_floor', 0)}")
                 else:
                     actuation = (
                         f"tau_peak={st.get('tau_peak', 0.0):.2f}Nm "

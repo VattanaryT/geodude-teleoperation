@@ -228,12 +228,28 @@ class JointVelocityTorqueLaw:
 # is what sends it, in place of gafropy's ``interface.control(...)`` speedJ loop.
 
 # Host publish / control-law rate. The on-robot latch runs at the UR's own
-# 500 Hz, so this is only how often we refresh the value it latches.
-DEFAULT_DTC_HZ = 125.0
+# 500 Hz, so this is only how often we refresh the value it latches -- and the
+# streamer republishes at this same rate (HostDirectTorqueStreamer(target_hz)).
+#
+# 200, not 125. The loop delay T bounds every gain above this seam: the usable
+# crossover is ~f_s/12, and a damper applied T late is *negative* damping past
+# 90 deg of lag. At 125 Hz, T ~ 12 ms (1.5 control ticks + one 8 ms republish
+# period) put that sign flip at ~21 Hz, right on top of this rig's 24.5 Hz
+# structural mode. Both halves of T shrink here: 1.5 ticks of 5 ms plus a 5 ms
+# republish period is T ~ 9 ms, moving the flip to ~28 Hz and the fn ceiling
+# from ~10 to ~16 Hz.
+#
+# Measured, bare defaults at --dtc-hz 200 (dtc_20260830_130541.csv, 5295 ticks):
+# dt median 5.06 ms (198 Hz), p95 9.77, max 24.89; qdot power above 2 Hz 11.5%
+# peaked at 2.52 Hz (no ringing); conformity 1.32 deg median / 5.50 p95. The
+# host holds it, so 125 was leaving phase margin on the table for nothing. The
+# publish-side stale bound is max(4/hz, 40 ms) = 40 ms either way and still
+# clears that 24.89 ms worst tick.
+DEFAULT_DTC_HZ = 200.0
 
 # A state read older than this means the loop is flying blind, so tau drops to
 # zero (gravity-compensated float) rather than acting on a stale qdot_meas.
-# 0.1 s is ~12 ticks at DEFAULT_DTC_HZ -- long enough to ride out one slow RTDE
+# 0.1 s is ~20 ticks at DEFAULT_DTC_HZ -- long enough to ride out one slow RTDE
 # read, short enough that a dead socket is caught before the arm drifts far.
 DEFAULT_STALE_AFTER_S = 0.1
 
@@ -261,7 +277,35 @@ DEFAULT_STALE_AFTER_S = 0.1
 # growing.
 LAMBDA_MIN_LIN_KG = 1.0
 LAMBDA_MAX_LIN_KG = 15.0
-LAMBDA_MIN_ANG_KGM2 = 0.0005
+# The angular floor is set by FRICTION, not by inertia, and that is why it is
+# 40x the smallest apparent inertia this arm actually has.
+#
+# Under Lambda the commanded wrench is `Lambda (K e - D v)`, so an axis the EE
+# is *light* about gets a proportionally small moment -- correct for a
+# frictionless plant, and exactly wrong here, because breakaway friction does
+# not scale with apparent inertia. Rotating the tool about its own axis only
+# spins wrist 3's rotor, so Lambda_ang along that direction is ~0.001 kg.m^2,
+# and the loop asked for 0.109 N.m to close a 17.8 deg roll error -- an order of
+# magnitude under UR5e wrist breakaway. Measured on dtc_20260830_130541.csv:
+# with the stick quiet, `erx` (the tool-Z roll blade) sat at -0.310 rad and did
+# not move for the whole 0.74 s hold (17.30 -> 17.78 deg) while `n_deg` -- tool
+# Z against the field normal, an axis Lambda is heavy about -- converged from
+# 3.41 to 0.57 deg in the same window. The starved axis is always the light one.
+#
+# Worse, the demand does not vanish, it *leaks*: 355 rad/s^2 of unservable roll
+# acceleration went through Lambda's cross terms as 1.93 and 1.63 N.m on the
+# other two angular blades, torquing j1/j2/j3 at ~2 N.m each with the stick at
+# rest. That is the 0.069 rad/s of quiet motion that read as "the hold is not
+# holding" and is neither drift nor a limit cycle.
+#
+# The floor is therefore sized so the clip-limited command clears breakaway:
+# tau_break / (K_ang * err_clip_rot) = 1.5 / (355 * 0.2) = 0.021 kg.m^2. The
+# authority this buys is bounded and small -- 1.4 N.m at the rotation clip,
+# against a j5 tau_max of 30 -- and it touches only the near-null direction,
+# since the eigenvalue clamp leaves everything already above the floor alone.
+# The damping side scales with it too (D_ang * 0.02 = 0.075 N.m at 1 rad/s),
+# which is far too small to reach the delayed-damper mode.
+LAMBDA_MIN_ANG_KGM2 = 0.02
 LAMBDA_MAX_ANG_KGM2 = 1.0
 # Below this smallest singular value of J the pose is near-singular and
 # (J M^-1 J.T) is losing rank -- which is where the 4576 kg came from. The
@@ -489,6 +533,8 @@ class DirectTorqueBackend:
         self._n_lambda_reject = 0
         self._lambda_logged = False
         self._last_lambda_alpha = 1.0
+        self._n_lambda_ang_floor = 0
+        self._last_lambda_ang_min = float("nan")
         self._safety_mode_fn = safety_mode_fn
         self._stale_after_s = float(stale_after_s)
         # The on-robot latch holds the last tau forever if this host loop stalls,
@@ -1090,6 +1136,14 @@ class DirectTorqueBackend:
             return None
 
         lam = 0.5 * (lam + lam.T)
+        # Does the angular floor actually bind? The number it is sized against
+        # is a friction estimate, so it has to be checkable from a run rather
+        # than argued: n_lambda_ang_floor near 0 means the floor is inert and
+        # the roll starvation is somewhere else.
+        ang_eig = float(np.linalg.eigvalsh(0.5 * (lam[:3, :3] + lam[:3, :3].T))[0])
+        self._last_lambda_ang_min = ang_eig
+        if ang_eig < LAMBDA_MIN_ANG_KGM2:
+            self._n_lambda_ang_floor += 1
         lam = _clamp_spd(lam[:3, :3], LAMBDA_MIN_ANG_KGM2, LAMBDA_MAX_ANG_KGM2,
                          lam[3:, 3:], LAMBDA_MIN_LIN_KG, LAMBDA_MAX_LIN_KG, lam)
 
@@ -1591,6 +1645,12 @@ class DirectTorqueBackend:
             "law": self._law_kind,
             "n_lambda_reject": self._n_lambda_reject,
             "lambda_alpha": self._last_lambda_alpha,
+            # Ticks the angular eigenvalue floor clamped on. See
+            # LAMBDA_MIN_ANG_KGM2: the floor is what keeps a light axis -- tool
+            # roll -- from being commanded below breakaway friction, and this
+            # is the only evidence that it is doing anything.
+            "n_lambda_ang_floor": self._n_lambda_ang_floor,
+            "lambda_ang_min": self._last_lambda_ang_min,
             # Ticks on which the joint-space hold contributed anything. Its
             # torque is already in the per-joint tau columns of --dtc-log (on
             # wrist 3 it is the *only* thing there); this says whether it is
