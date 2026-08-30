@@ -543,12 +543,23 @@ def _wrench_law_kwargs(args):
         return {}
     fn_ang = resolve_wrench_fn_ang(
         args.dtc_lambda, args.dtc_fn_lin, args.dtc_fn_ang)
+    dmax = resolve_wrench_damping_max(args.dtc_hz, args.dtc_damping_max)
     zeta_lin, zeta_ang = resolve_wrench_zeta(
         args.dtc_lambda, args.dtc_damping_ratio, args.dtc_damping_ratio_ang,
         fn_lin=args.dtc_fn_lin, fn_ang=fn_ang,
-        damping_max=resolve_wrench_damping_max(
-            args.dtc_hz, args.dtc_damping_max),
+        damping_max=dmax,
         warn=lambda m: print(m, flush=True))
+    # Unconditional, because the interesting case is the one where the cap did
+    # *not* warn and the reader still needs to know how close it came.
+    note = (f"dtc wrench gains: zeta_lin={zeta_lin:.3f} zeta_ang={zeta_ang:.3f}")
+    if args.dtc_lambda:
+        # D = 2*zeta*omega_n only means 1/s under Lambda; without it D is
+        # N.s/m and N.m.s/rad and the cap does not apply at all.
+        note += (f"  fn_lin={args.dtc_fn_lin:g} fn_ang={fn_ang:g}"
+                 f"  D_lin={2.0 * zeta_lin * 2.0 * math.pi * args.dtc_fn_lin:.2f}"
+                 f" D_ang={2.0 * zeta_ang * 2.0 * math.pi * fn_ang:.2f} 1/s"
+                 f"  (cap {dmax:g} at --dtc-hz {args.dtc_hz:g})")
+    print(note, flush=True)
     return dict(
         wrench_law=True,
         k_lin=args.dtc_k_lin,
@@ -562,6 +573,33 @@ def _wrench_law_kwargs(args):
         fn_ang=fn_ang,
         rearm_wrench_s=args.dtc_rearm_wrench_s,
     )
+
+
+def _wrench_gain_note(args) -> str:
+    """What the gains were *asked* for, for the log's `#` header.
+
+    The header proper reads the live K and D, which is right and is blind to
+    exactly one thing: the D ceiling. ``_cap_zeta`` lowers zeta silently apart
+    from one line of yellow in scrollback, and scrollback is not evidence --
+    dtc_20260830_135043 (D_lin 15.08) and dtc_20260830_135527 (D_lin 12.00)
+    were a --dtc-damping-ratio 0.3 -> 0.4 experiment that came out *less*
+    damped than it started, and nothing in either log said which cap was in
+    force. So the request and the ceiling go in the record next to the result.
+    """
+    if getattr(args, "contact_backend", None) != "dtc" or args.dtc_law != "wrench":
+        return ""
+    zeta_lin = (WRENCH_ZETA_LIN if args.dtc_damping_ratio is None
+                else args.dtc_damping_ratio)
+    zeta_ang = (WRENCH_ZETA_ANG if args.dtc_damping_ratio_ang is None
+                else args.dtc_damping_ratio_ang)
+    bits = [f"zeta_req_ang={float(zeta_ang):g}",
+            f"zeta_req_lin={float(zeta_lin):g}",
+            f"fn_lin={float(args.dtc_fn_lin):g}",
+            f"fn_ang={resolve_wrench_fn_ang(args.dtc_lambda, args.dtc_fn_lin, args.dtc_fn_ang):g}"]
+    if args.dtc_lambda:
+        bits.append(
+            f"dmax={resolve_wrench_damping_max(args.dtc_hz, args.dtc_damping_max):g}")
+    return "  ".join(bits)
 
 
 def _hold_field_orientation(args) -> bool:
@@ -1207,6 +1245,7 @@ def main():
                 None if args.dtc_stale_tau_ms is None
                 else args.dtc_stale_tau_ms / 1000.0),
             log_path=_contact_log_path(args.dtc_log, prefix="dtc"),
+            gain_note_extra=_wrench_gain_note(args),
             payload_mass=args.dtc_payload_mass,
             payload_cog=args.dtc_payload_cog,
         )

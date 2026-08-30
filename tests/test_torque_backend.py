@@ -1184,3 +1184,52 @@ def test_joint_hold_forgets_its_target_on_a_safety_reset():
 def test_joint_hold_rejects_a_slot_outside_the_control_group():
     with pytest.raises(ValueError, match="outside"):
         _backend(joint_hold_joints=[9])
+
+
+# --- the gain header has to record what was *asked* for, not only what ran ----
+# _gain_note reads the live K and D on purpose, and that is blind to exactly one
+# thing: the D ceiling. dtc_20260830_135043 (D_lin 15.08) and
+# dtc_20260830_135527 (D_lin 12.00) were a --dtc-damping-ratio 0.3 -> 0.4
+# experiment that came out *less* damped than it started, and neither header
+# said which cap was in force.
+class _GainCtrl:
+    def __init__(self, k_ang=355.3, k_lin=631.7, d_ang=3.77, d_lin=15.08):
+        self._stiffness = np.diag([k_ang] * 3 + [k_lin] * 3)
+        self._damping = np.diag([d_ang] * 3 + [d_lin] * 3)
+        self._err_clip_lin = 0.05
+        self._err_clip_rot = 0.2
+        self._rearm_wrench_s = 0.15
+
+
+def test_the_gain_header_derives_zeta_from_the_live_matrices():
+    backend, _s, _h = _backend(law_kind="wrench", use_lambda=True)
+    backend._controller = _GainCtrl()
+    note = backend._gain_note()
+    # zeta = D / (2*sqrt(K)): 15.08 / (2*sqrt(631.7)) = 0.300
+    assert "zeta_lin=0.300" in note
+    # 3.77 / (2*sqrt(355.3)) = 0.100
+    assert "zeta_ang=0.100" in note
+
+
+def test_the_gain_header_shows_a_capped_zeta_as_the_capped_value():
+    """The run whose --dtc-damping-ratio 0.4 arrived as D = 12."""
+    backend, _s, _h = _backend(law_kind="wrench", use_lambda=True)
+    backend._controller = _GainCtrl(d_lin=12.0)
+    assert "zeta_lin=0.239" in backend._gain_note()
+
+
+def test_the_gain_header_carries_the_callers_request_and_ceiling():
+    backend, _s, _h = _backend(
+        law_kind="wrench", use_lambda=True,
+        gain_note_extra="zeta_req_lin=0.4  dmax=19.2")
+    backend._controller = _GainCtrl(d_lin=12.0)
+    note = backend._gain_note()
+    assert "zeta_req_lin=0.4" in note and "dmax=19.2" in note
+    # ...next to what actually ran, so the gap is visible in one line.
+    assert "zeta_lin=0.239" in note
+
+
+def test_the_gain_header_survives_a_controller_with_no_matrices():
+    backend, _s, _h = _backend(law_kind="wrench")
+    backend._controller = object()
+    assert "law=wrench" in backend._gain_note()

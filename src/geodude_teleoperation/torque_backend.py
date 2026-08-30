@@ -19,6 +19,7 @@ packages installed at all.
 """
 from __future__ import annotations
 
+import math
 import pathlib
 import threading
 import time
@@ -488,6 +489,7 @@ class DirectTorqueBackend:
         payload_cog: Sequence[float] | None = None,
         install_latch: bool = True,
         log_path=None,
+        gain_note_extra: str = "",
         latch_out_dir=None,
         stock_script=None,
         streamer_factory: Callable[..., Any] | None = None,
@@ -498,6 +500,12 @@ class DirectTorqueBackend:
         self._robot_ip = None if robot_ip is None else str(robot_ip)
         self._hz = float(hz)
         self._hold_zero = bool(hold_zero)
+        # Free-text appended to the log's `#` gain header. _gain_note reads the
+        # *live* matrices, which is right for what the loop is running and
+        # blind to what it was asked for: a capped zeta and an honestly-chosen
+        # one are the same number in D. The caller puts the request and the cap
+        # here so a log can distinguish them.
+        self._gain_note_extra = str(gain_note_extra or "")
         # "velocity": tau = kv * (qdot_cmd - qdot_meas), the first DTC port --
         # it swaps only the actuator and keeps the whole speedJ velocity
         # pipeline (inertia, dt, DLS inverse, joint clamps) in front of it.
@@ -1539,11 +1547,24 @@ class DirectTorqueBackend:
             v = getattr(ctrl, attr, None)
             if v is not None:
                 bits.append(f"{name}={float(v):g}")
+        # zeta back out of the live K and D (D = 2*zeta*sqrt(K)), because the
+        # D ceiling silently lowers it and nothing else in the log says so --
+        # two runs five minutes apart differed only here.
+        try:
+            k = np.diag(np.asarray(ctrl._stiffness, dtype=float))
+            dd = np.diag(np.asarray(ctrl._damping, dtype=float))
+            for name, i in (("zeta_ang", 0), ("zeta_lin", 3)):
+                if k[i] > 0:
+                    bits.append(f"{name}={dd[i] / (2.0 * math.sqrt(k[i])):.3f}")
+        except Exception:
+            pass
         try:
             bits.append("tau_max=" + ",".join(
                 f"{v:g}" for v in np.asarray(self._law.tau_max, dtype=float)))
         except Exception:
             pass
+        if self._gain_note_extra:
+            bits.append(self._gain_note_extra)
         return "  ".join(bits)
 
     def _log_close(self) -> None:
