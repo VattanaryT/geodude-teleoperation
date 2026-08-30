@@ -1299,6 +1299,15 @@ class DirectTorqueBackend:
         cols += [f"q{i}" for i in range(n)]
         cols += [f"qd{i}" for i in range(n)]
         cols += [f"clip{i}" for i in range(n)]
+        # Tracking. The wrench columns say what was *commanded*; these say what
+        # the arm was actually asked to correct, which is the only way to tell a
+        # loop that is following the field from one that is fighting a stale
+        # target. err* is the raw (pre-clip) objective error in blade order,
+        # n_deg is the angle between live tool +Z and the commanded field
+        # normal (see TeleoperationController.contact_normal_body), and act is
+        # the spring gate -- a 0->1 edge with a large err is a re-arm step, and
+        # that step is what rails tau.
+        cols += ["erx", "ery", "erz", "ex", "ey", "ez", "n_deg", "act"]
         self._log_fh.write(",".join(cols) + "\n")
         self._log_t0 = None
         print(f"dtc log: {self._log_path}", flush=True)
@@ -1320,6 +1329,38 @@ class DirectTorqueBackend:
         if tw is None:
             return np.zeros(6)
         return np.asarray(tw, dtype=float).reshape(-1)[:6]
+
+    def _tracking_for_log(self):
+        """(err_ang(3), err_lin(3), normal_deg, input_active) from the controller.
+
+        Pulled here rather than passed down because the wrench law already
+        recorded it on the controller during this tick; nothing new is computed
+        on the 125 Hz path except one arccos.
+        """
+        ctrl = self._controller
+        err_ang = np.zeros(3)
+        err_lin = np.zeros(3)
+        n_deg = float("nan")
+        act = 0
+        if ctrl is None:
+            return err_ang, err_lin, n_deg, act
+        cond = getattr(ctrl, "conditioning", None)
+        if callable(cond):
+            try:
+                c = cond()
+                err_ang = np.array(
+                    [c["err_rx"], c["err_ry"], c["err_rz"]], dtype=float)
+                err_lin = np.array(
+                    [c["err_x"], c["err_y"], c["err_z"]], dtype=float)
+            except Exception:
+                pass
+        n_body = getattr(ctrl, "contact_normal_body", None)
+        if n_body is not None:
+            n_deg = float(np.degrees(np.arccos(
+                np.clip(float(np.asarray(n_body, dtype=float).reshape(3)[2]),
+                        -1.0, 1.0))))
+        act = 1 if getattr(ctrl, "input_active", False) else 0
+        return err_ang, err_lin, n_deg, act
 
     def _log_row(self, now, dt, phase, safety, tau, q, qd) -> None:
         fh = self._log_fh
@@ -1344,6 +1385,10 @@ class DirectTorqueBackend:
         fields += [f"{v:.5f}" for v in q[:n]]
         fields += [f"{v:.5f}" for v in qd[:n]]
         fields += ["1" if c else "0" for c in clip]
+        err_ang, err_lin, n_deg, act = self._tracking_for_log()
+        fields += [f"{v:.6f}" for v in err_ang]
+        fields += [f"{v:.6f}" for v in err_lin]
+        fields += ["" if not np.isfinite(n_deg) else f"{n_deg:.2f}", str(act)]
         try:
             fh.write(",".join(fields) + "\n")
         except Exception as exc:

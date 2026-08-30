@@ -71,6 +71,112 @@ class FakeCtrl:
         self.active = bool(active)
 
 
+class ReArmStepTest(unittest.TestCase):
+    """The 0 -> 77 N / 0 -> 4.25 N.m one-tick step on dtc_20260829_214019.csv.
+
+    Cause: the target was the live pose while the stick was quiet (both idle
+    holds snap target := live) and the full field pose one tick later, so the
+    whole accumulated orientation deviation arrived as a step. Two independent
+    fixes, both switchable: keep the commanded orientation through quiet
+    (hold_field_orientation), and ramp the command onto the field goal
+    (rearm_slerp_s).
+    """
+
+    @staticmethod
+    def _tilt_vf(R_field):
+        class TiltVf:
+            def approach_basis_at(self, position):
+                return R_field
+
+            def project(self, motor):
+                T = np.asarray(motor.to_transformation_matrix(), dtype=float)
+                T[:3, :3] = R_field
+                return motor_from_matrix(T)
+
+        return TiltVf()
+
+    def test_quiet_no_longer_erases_the_commanded_orientation(self):
+        from scipy.spatial.transform import Rotation
+
+        R_field = Rotation.from_rotvec([0.0, 0.4, 0.0]).as_matrix()
+        follow = FieldFollow(
+            self._tilt_vf(R_field), hz=50.0, max_dR_rad=0.0,
+            snap_to_surface=False, hold_field_orientation=True)
+        live = np.array([0.0, 0.0, 1.0])
+        follow.seed(live, R_field)
+        ctrl = FakeCtrl()
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        drive_field_follow(follow, ctrl, 0.0, _motor_at(live), live_xyz=live,
+                           live_R=np.eye(3), stick_quiet=False)
+        commanded = np.array(follow._R_cmd, copy=True)
+        # Stick goes quiet with the wrist still 0.4 rad off the field.
+        drive_field_follow(follow, ctrl, 0.1, _motor_at(live), live_xyz=live,
+                           live_R=np.eye(3), stick_quiet=True)
+        np.testing.assert_allclose(follow._R_cmd, commanded, atol=1e-12)
+        T = np.asarray(
+            ctrl.get_objective().target.to_transformation_matrix(), dtype=float)
+        # Position re-based onto live, orientation kept.
+        np.testing.assert_allclose(T[:3, 3], live, atol=1e-9)
+        np.testing.assert_allclose(T[:3, :3], commanded, atol=1e-9)
+
+    def test_speedj_still_collapses_the_command_onto_live(self):
+        """The speedJ path is the C153 A/B baseline and must not move."""
+        from scipy.spatial.transform import Rotation
+
+        R_field = Rotation.from_rotvec([0.0, 0.4, 0.0]).as_matrix()
+        follow = FieldFollow(
+            self._tilt_vf(R_field), hz=50.0, max_dR_rad=0.0,
+            snap_to_surface=False, hold_field_orientation=False)
+        live = np.array([0.0, 0.0, 1.0])
+        follow.seed(live, R_field)
+        ctrl = FakeCtrl()
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        drive_field_follow(follow, ctrl, 0.0, _motor_at(live), live_xyz=live,
+                           live_R=np.eye(3), stick_quiet=False)
+        drive_field_follow(follow, ctrl, 0.1, _motor_at(live), live_xyz=live,
+                           live_R=np.eye(3), stick_quiet=True)
+        np.testing.assert_allclose(follow._R_cmd, np.eye(3), atol=1e-9)
+
+    def test_the_command_ramps_onto_the_field_instead_of_snapping(self):
+        from scipy.spatial.transform import Rotation
+
+        R_field = Rotation.from_rotvec([0.0, 0.4, 0.0]).as_matrix()
+        follow = FieldFollow(
+            self._tilt_vf(R_field), hz=50.0, max_dR_rad=0.0,
+            snap_to_surface=False, rearm_slerp_s=0.5,
+            hold_field_orientation=True)
+        live = np.array([0.0, 0.0, 1.0])
+        follow.seed(live, np.eye(3))          # wrist starts off the field
+        errs = []
+        for i in range(1, 151):
+            follow.add_body_linear(np.array([0.0001, 0.0, 0.0]))
+            follow.tick(0.02 * i, _motor_at(live), live_xyz=live,
+                        live_R=np.eye(3))
+            errs.append(orientation_error_rad(follow._R_cmd, R_field))
+        # First step is a fraction of the 0.4 rad gap (dt/tau = 0.04), not all
+        # of it -- that whole gap arriving in one tick is the 4.25 N.m step.
+        self.assertLess(0.4 - errs[0], 0.4 * 0.1)
+        # Monotone approach that actually converges -- no permanent lag.
+        self.assertTrue(all(b <= a + 1e-12 for a, b in zip(errs, errs[1:])))
+        self.assertLess(errs[-1], 0.01)
+        # The goal itself is the field the whole time.
+        np.testing.assert_allclose(follow._R, R_field, atol=1e-9)
+
+    def test_zero_slerp_snaps_like_before(self):
+        from scipy.spatial.transform import Rotation
+
+        R_field = Rotation.from_rotvec([0.0, 0.4, 0.0]).as_matrix()
+        follow = FieldFollow(
+            self._tilt_vf(R_field), hz=50.0, max_dR_rad=0.0,
+            snap_to_surface=False, rearm_slerp_s=0.0,
+            hold_field_orientation=True)
+        live = np.array([0.0, 0.0, 1.0])
+        follow.seed(live, np.eye(3))
+        follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
+        follow.tick(0.0, _motor_at(live), live_xyz=live, live_R=np.eye(3))
+        np.testing.assert_allclose(follow._R_cmd, R_field, atol=1e-9)
+
+
 class FieldFollowTest(unittest.TestCase):
     def test_idle_does_not_project(self):
         vf = FakeVf()
@@ -711,7 +817,15 @@ class HardwareFollowRoutingTest(unittest.TestCase):
         self.assertIn("FieldFollow", src)
         self.assertIn("drive_field_follow", src)
         self.assertIn("project_in_process=True", src)
-        self.assertIn("max_dR_rad=0.0", src)
+        # The field->field rotation cap is a flag again, not a hardcoded 0.0:
+        # 0 lets one project() flip at a mesh edge bank a large angular error
+        # for the next re-entry. The cap it replaced was measured against
+        # *live* R, which is a different (and worse) limit -- that one pinned
+        # R_err at ~1.1 deg forever and is not coming back.
+        self.assertIn("max_dR_rad=args.follow_max_dr_rad", src)
+        self.assertIn("--follow-max-dr-rad", src)
+        self.assertIn("hold_field_orientation=", src)
+        self.assertIn("rearm_slerp_s=", src)
         self.assertIn("max_qddot=5.0", src)
         self.assertNotIn("set_orientation_compliant", src)
         self.assertIn("live_R=", src)

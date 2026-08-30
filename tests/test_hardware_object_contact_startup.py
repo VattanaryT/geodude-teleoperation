@@ -226,9 +226,29 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         self.assertFalse(ctrl.active)
         self.assertTrue(ctrl.held)
 
-    def test_default_contact_backend_is_speedj(self):
-        mod = _load_example()
-        args = mod.build_arg_parser().parse_args([])
+    def test_default_config_is_the_measured_best_dtc_wrench_run(self):
+        """The bare command must equal the config that was tuned on hardware.
+
+        Pinned as one test rather than nine, because these numbers only mean
+        anything together: --dtc-fn-* are 1/s^2 gains that are wrong without
+        --dtc-lambda, and --max-lead-m 0.05 is a force ceiling that is only
+        sane under --dtc-law wrench.
+        """
+        args = _load_example().build_arg_parser().parse_args([])
+        self.assertEqual(args.contact_backend, "dtc")
+        self.assertEqual(args.dtc_law, "wrench")
+        self.assertTrue(args.dtc_lambda)
+        self.assertTrue(args.dtc_friction_comp)
+        self.assertAlmostEqual(args.dtc_fn_lin, 3.0)
+        self.assertAlmostEqual(args.dtc_fn_ang, 0.3)
+        self.assertAlmostEqual(args.dtc_err_clip_lin, 0.05)
+        self.assertAlmostEqual(args.max_lead_m, 0.05)
+        self.assertEqual(list(args.dtc_tau_max), [50.0, 50.0, 50.0, 1.0, 1.0, 30.0])
+        self.assertAlmostEqual(args.align_duration, 4.0)
+
+    def test_speedj_backend_is_still_reachable(self):
+        args = _load_example().build_arg_parser().parse_args(
+            ["--contact-backend", "speedj"])
         self.assertEqual(args.contact_backend, "speedj")
 
     def test_default_speedj_plot_is_on(self):
@@ -345,6 +365,32 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         qdot = ctrl.compute_control_command(
             _VelState(), _ObjState(error), _TaskState())
         self.assertAlmostEqual(float(np.asarray(qdot)[3:6] @ n), 0.0, places=9)
+
+    def test_contact_normal_body_is_the_conformity_error(self):
+        """The read side is stored in the *live* body frame, so its angle to +Z
+        is exactly the orientation the arm has failed to track.
+
+        Free space must publish it too -- the projection only runs while
+        z_compliant, but the number is the field-tracking diagnostic and the
+        dtc log wants it on every tick.
+        """
+        ctrl = _pose_ctrl()
+        self.assertIsNone(ctrl.contact_normal_body)
+        # Normal 30 deg off base Z, live tool aligned with base: 30 deg of error.
+        a = np.radians(30.0)
+        ctrl.set_contact_normal([np.sin(a), 0.0, np.cos(a)], np.eye(3))
+        n_body = ctrl.contact_normal_body
+        self.assertAlmostEqual(
+            float(np.degrees(np.arccos(float(n_body[2])))), 30.0, places=6)
+        # Rotating the tool onto the normal drives it to zero.
+        R = np.array([[np.cos(a), 0.0, np.sin(a)],
+                      [0.0, 1.0, 0.0],
+                      [-np.sin(a), 0.0, np.cos(a)]])
+        ctrl.set_contact_normal([np.sin(a), 0.0, np.cos(a)], R)
+        self.assertAlmostEqual(
+            float(ctrl.contact_normal_body[2]), 1.0, places=9)
+        ctrl.set_contact_normal(None, None)
+        self.assertIsNone(ctrl.contact_normal_body)
 
     def test_free_space_is_untouched_by_the_normal(self):
         # Not z_compliant: the projection must not run at all.
@@ -541,11 +587,12 @@ class WrenchLawWiringTest(unittest.TestCase):
 
     def test_speedj_gets_no_wrench_kwargs_at_all(self):
         mod = _load_example()
-        self.assertEqual(mod._wrench_law_kwargs(self._args([])), {})
+        args = self._args(["--contact-backend", "speedj"])
+        self.assertEqual(mod._wrench_law_kwargs(args), {})
 
     def test_velocity_law_gets_no_wrench_kwargs_either(self):
         mod = _load_example()
-        args = self._args(["--contact-backend", "dtc"])
+        args = self._args(["--contact-backend", "dtc", "--dtc-law", "velocity"])
         self.assertEqual(args.dtc_law, "velocity")
         self.assertEqual(mod._wrench_law_kwargs(args), {})
 
@@ -554,9 +601,14 @@ class WrenchLawWiringTest(unittest.TestCase):
         kw = mod._wrench_law_kwargs(
             self._args(["--contact-backend", "dtc", "--dtc-law", "wrench"]))
         self.assertTrue(kw["wrench_law"])
+        # k_lin/k_ang are the un-shaped N/m and N.m/rad gains; --dtc-lambda is
+        # on by default, so fn_lin/fn_ang are what actually set the spring.
         self.assertAlmostEqual(kw["k_lin"], 3000.0)
         self.assertAlmostEqual(kw["k_ang"], 50.0)
-        self.assertAlmostEqual(kw["err_clip_lin"], 0.01)
+        self.assertTrue(kw["use_lambda"])
+        self.assertAlmostEqual(kw["fn_lin"], 3.0)
+        self.assertAlmostEqual(kw["fn_ang"], 0.3)
+        self.assertAlmostEqual(kw["err_clip_lin"], 0.05)
         # Split, not one number: the formula's assumed M differs by ~60x
         # between the blades, so one zeta cannot be right for both.
         self.assertAlmostEqual(kw["damping_ratio"], 0.3)

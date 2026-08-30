@@ -1,8 +1,10 @@
 """Summarize a --dtc-log CSV: the wrench split, the rail, and which joint.
 
-The 1 Hz console line samples; this reads every tick. Answers the two questions
-a wrench-law run leaves open: is |W| actually asking for lateral newtons, and is
-the clip counter still *rising* (cap too low) or flat (not the cap any more).
+The 1 Hz console line samples; this reads every tick. Answers the three
+questions a wrench-law run leaves open: is |W| actually asking for lateral
+newtons, is the clip counter still *rising* (cap too low) or flat (not the cap
+any more), and -- from the tracking columns -- is the tool actually conforming
+to the object field or just being shoved at it.
 
     python examples/analyze_dtc_log.py            # newest speedj_logs/dtc_*.csv
     python examples/analyze_dtc_log.py path.csv
@@ -61,6 +63,66 @@ def main():
               f"   {clip[:,j].mean():6.1%}   {per_q}")
     print("\n  rising left-to-right = still capped, raise --dtc-tau-max on that joint.")
     print("  flat/zero while the TCP will not slide = not the cap; look at |W_lin|.")
+
+    tracking(rows, live, W)
+
+
+def tracking(rows, live, W):
+    """Field-conformity report off the err*/n_deg/act columns.
+
+    Written because the wrench columns alone cannot separate "the arm is
+    tracking the field" from "the arm is being shoved at a target it never
+    reaches": both read as a large |W|. n_deg is the angle between live tool +Z
+    and the commanded field normal, so it IS the conformity error; err* is what
+    the spring was correcting when that angle was held.
+    """
+    if "n_deg" not in rows[0]:
+        print("\n  (no tracking columns -- log predates err*/n_deg/act; "
+              "re-run to get the conformity report)")
+        return
+    def col(name):
+        return np.array([float(r[name]) if r[name] else np.nan for r in rows])
+
+    t = col("t")
+    act = np.array([r["act"] == "1" for r in rows])
+    n_deg = col("n_deg")
+    e_lin = np.array([[float(r[k]) for k in ("ex", "ey", "ez")] for r in rows])
+    e_ang = np.array([[float(r[k]) for k in ("erx", "ery", "erz")] for r in rows])
+    el = np.linalg.norm(e_lin, axis=1) * 1000.0
+    ea = np.degrees(np.linalg.norm(e_ang, axis=1))
+    on = live & act
+    print(f"\n  spring on {act.mean():6.1%} of ticks "
+          f"({int((act & live).sum())} live)")
+    if on.any():
+        print(f"  |err_lin| mm  median {q(el[on],50):7.2f}  p95 {q(el[on],95):7.2f}"
+              f"  max {el[on].max():7.2f}   (spring on)")
+        print(f"  |err_ang| deg median {q(ea[on],50):7.2f}  p95 {q(ea[on],95):7.2f}"
+              f"  max {ea[on].max():7.2f}   (spring on)")
+    ok = np.isfinite(n_deg)
+    if ok.any():
+        print(f"  tool Z vs field normal deg  median {q(n_deg[ok],50):6.2f}"
+              f"  p95 {q(n_deg[ok],95):6.2f}  max {n_deg[ok].max():6.2f}")
+        print("     this is the conformity number. Sustained >5 deg while the "
+              "spring is on = the arm is not reaching the field pose.")
+
+    # Re-arm steps: the spring gate going 0->1 hands the loop a fresh target in
+    # one tick. A big wrench on that edge is a step command, not tracking.
+    wl = np.linalg.norm(W[:, 3:6], axis=1)
+    wa = np.linalg.norm(W[:, 0:3], axis=1)
+    edge = np.flatnonzero(act[1:] & ~act[:-1]) + 1
+    if edge.size:
+        step_l = wl[edge]
+        step_a = wa[edge]
+        print(f"\n  spring re-arm edges: {edge.size}"
+              f"   |W_lin| on the edge median {q(step_l,50):6.2f} max {step_l.max():7.2f} N"
+              f"   |W_ang| max {step_a.max():6.2f} N.m")
+        worst = edge[np.argsort(step_l)[-5:][::-1]]
+        for i in sorted(worst):
+            print(f"    t={t[i]:8.3f}  |W_lin| {wl[i-1]:6.2f} -> {wl[i]:7.2f} N"
+                  f"   |W_ang| {wa[i-1]:5.2f} -> {wa[i]:5.2f} N.m"
+                  f"   err {el[i]:6.2f} mm / {ea[i]:5.2f} deg")
+        print("    a large step here is a re-arm discontinuity: the target was "
+              "the live pose while quiet and the full field pose one tick later.")
 
 
 if __name__ == "__main__":

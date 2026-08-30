@@ -1025,6 +1025,58 @@ def test_the_log_says_when_the_tick_was_gated_or_held_at_zero(tmp_path):
     assert phases == ["hold_zero", "gated"]
 
 
+def test_the_log_records_the_tracking_error_and_field_conformity(tmp_path):
+    """err*/n_deg/act are what separate "following the field" from "shoved at it".
+
+    The wrench columns alone cannot: a loop tracking a target it reaches and a
+    loop railing against one it never reaches both read as a large |W|. n_deg
+    is the angle between live tool +Z and the commanded field normal, so it is
+    the conformity error itself, and act marks the spring-gate edges where the
+    target jumps from the live pose to the full field pose in one tick.
+    """
+    path = tmp_path / "dtc.csv"
+    ctrl = FakeWrenchController([0.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+    ctrl.conditioning = lambda: {
+        "err_rx": 0.01, "err_ry": -0.02, "err_rz": 0.03,
+        "err_x": 0.004, "err_y": -0.005, "err_z": 0.006,
+    }
+    # 30 deg off body +Z.
+    ctrl.contact_normal_body = np.array([0.5, 0.0, np.sqrt(3.0) / 2.0])
+    ctrl.input_active = True
+    backend, _s, _h = _wrench_backend(ctrl, log_path=str(path))
+    backend.set_controller(ctrl)
+    backend._log_open()
+    backend.tick(now=1.0)
+    backend._log_close()
+    lines = path.read_text().strip().splitlines()
+    header = lines[0].split(",")
+    row = lines[1].split(",")
+    assert header[-8:] == ["erx", "ery", "erz", "ex", "ey", "ez", "n_deg", "act"]
+    got = dict(zip(header, row))
+    assert [float(got[k]) for k in ("erx", "ery", "erz")] == pytest.approx(
+        [0.01, -0.02, 0.03])
+    assert [float(got[k]) for k in ("ex", "ey", "ez")] == pytest.approx(
+        [0.004, -0.005, 0.006])
+    assert float(got["n_deg"]) == pytest.approx(30.0, abs=0.01)
+    assert got["act"] == "1"
+
+
+def test_the_tracking_columns_survive_a_controller_that_has_none(tmp_path):
+    """A missing accessor must not take down the loop holding the 500 Hz clock."""
+    path = tmp_path / "dtc.csv"
+    ctrl = FakeWrenchController([0.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+    backend, _s, _h = _wrench_backend(ctrl, log_path=str(path))
+    backend.set_controller(ctrl)
+    backend._log_open()
+    backend.tick(now=1.0)
+    backend._log_close()
+    lines = path.read_text().strip().splitlines()
+    got = dict(zip(lines[0].split(","), lines[1].split(",")))
+    assert float(got["ex"]) == 0.0
+    assert got["n_deg"] == ""        # no normal published yet, not 0 degrees
+    assert got["act"] == "0"
+
+
 def test_no_log_path_costs_nothing(tmp_path):
     backend, _s, _h = _backend(qdot_cmd_fn=lambda: np.zeros(6), log_path="none")
     backend._log_open()

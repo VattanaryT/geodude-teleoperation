@@ -2,7 +2,8 @@
 
 Free space: gafropy speedJ + SpaceMouse (approach mode).
 
-Contact (default ``speedj``): same pose-spring speedJ plant as free space.
+Contact (``--contact-backend speedj``): same pose-spring speedJ plant as free
+space.
 The mode button (``--mode-button``, default 1) latches force-hold until it is
 pressed again — no auto-drop to free-space approach. The press PID overlays
 tool-Z; it owns Fd and nothing else does.
@@ -24,8 +25,20 @@ bisect which one matters. ``--press-loop legacy --no-free-along-normal
   point from ``vf.project()`` so the next query stays on the mesh.
 
 ``--contact-backend force_mode`` is UR hybrid force/position (not admittance).
-``--contact-backend dtc``: startup align under speedJ, then one handoff to
-Direct Torque for all teleop (free space + contact); contact is Z-overlay only.
+``--contact-backend dtc`` (the default): startup align under speedJ, then one
+handoff to Direct Torque for all teleop (free space + contact); contact is
+Z-overlay only.
+
+**Defaults are the measured-best free-space DTC config**, so the bare command
+is now equivalent to::
+
+    --contact-backend dtc --dtc-law wrench --dtc-lambda --dtc-friction-comp
+    --dtc-fn-lin 3.0 --dtc-fn-ang 0.3 --dtc-err-clip-lin 0.05 --max-lead-m 0.05
+    --dtc-tau-max 50 50 50 1 1 30 --align-duration 4
+
+To go back to the speedJ plant end-to-end, pass ``--contact-backend speedj
+--max-lead-m 0.005``: the 50 mm lead is a wrench-law force ceiling and is far
+too much slack for a velocity carrot chased by a position servo.
 """
 from __future__ import annotations
 
@@ -114,7 +127,6 @@ from geodude_teleoperation.torque_backend import (
     DEFAULT_I_MAX,
     DEFAULT_KI,
     DEFAULT_KV,
-    DEFAULT_TAU_MAX,
     DirectTorqueBackend,
 )
 from geodude_teleoperation.virtual_fixture import FieldAlignPreview, workstation_field_z_arrows
@@ -124,6 +136,16 @@ MODEL = str(ROOT / "assets" / "robots" / "geodude" / "geodude.yaml")
 DEFAULT_HARDWARE_CONFIG = str(ROOT / "assets" / "robots" / "geodude" / "geodude_hardware.yaml")
 
 DEFAULT_VENTION_HEIGHT = 0.51
+
+# --dtc-tau-max default for --dtc-law wrench, which is now this example's
+# default backend. Deliberately NOT torque_backend.DEFAULT_TAU_MAX: that tuple
+# is the velocity law's (30/30/30/10/10/10) and stays where it is. Under the
+# wrench law the shoulders have to make real lateral newtons through J.T while
+# the wrists must not -- a railed wrist is the fault that ended in
+# `C283A2 wrist 1a, robot is moving when in stop mode`, so j3/j4 are pinned at
+# 1 N.m and only j5 (tool roll, which carries the chamfer) gets 30.
+WRENCH_TAU_MAX = (50.0, 50.0, 50.0, 1.0, 1.0, 30.0)
+
 STICK_LINEAR_SCALE = 0.0015
 STICK_ANGULAR_SCALE = 0.05
 
@@ -325,6 +347,20 @@ def _wrench_law_kwargs(args):
     )
 
 
+def _hold_field_orientation(args) -> bool:
+    """Whether the idle hold keeps the commanded field orientation.
+
+    Defaults on exactly where the wrench law runs. Under speedJ the pose spring
+    is a *velocity* command chased by a position servo, so a persistent angular
+    error with hands off the stick servos the wrist continuously -- and that
+    path has to stay bit-identical for the C153 A/B anyway.
+    """
+    if getattr(args, "hold_field_orientation", None) is not None:
+        return bool(args.hold_field_orientation)
+    return (getattr(args, "contact_backend", None) == "dtc"
+            and args.dtc_law == "wrench")
+
+
 def defer_dtc_until_align_done(*, dtc_backend, align) -> bool:
     """True: run speedJ through startup align, then hand off to DTC once."""
     return dtc_backend is not None and align is not None and not align.finished
@@ -464,8 +500,8 @@ def build_arg_parser():
         help="spacemouse button index that toggles between approach and contact "
              "mode (with --device keyboard, index 1 is 'v' and index 0 is 't')")
     parser.add_argument(
-        "--contact-backend", choices=["speedj", "force_mode", "dtc"], default="speedj",
-        help="contact implementation (default: speedj = pose spring + Z force overlay). "
+        "--contact-backend", choices=["speedj", "force_mode", "dtc"], default="dtc",
+        help="contact implementation ('speedj' = pose spring + Z force overlay). "
              "'force_mode' is UR hybrid force/position, not admittance. 'dtc' runs "
              "startup align under speedJ, then hands RTDE to Direct Torque for "
              "all teleop (free space + contact). Contact is the same pose spring "
@@ -475,7 +511,7 @@ def build_arg_parser():
     # tau latch. Start tau_max low: it is the only thing left bounding a grab
     # now that the UR's own path supervisor is out of the loop.
     parser.add_argument(
-        "--dtc-law", choices=["velocity", "wrench"], default="velocity",
+        "--dtc-law", choices=["velocity", "wrench"], default="wrench",
         help="dtc control law. 'velocity' is the first port: it keeps the whole "
              "speedJ velocity pipeline (inertia, dt, DLS inverse, joint clamps) "
              "and closes tau = kv*(qdot_cmd - qdot_meas) under it. Those caps "
@@ -522,13 +558,16 @@ def build_arg_parser():
              "target = pose(t-T) adds K*T/2 of delayed damping, 75 N.s/m at "
              "20 Hz -- so this off restores the pre-fix behavior")
     parser.add_argument(
-        "--dtc-err-clip-lin", type=float, default=0.01, metavar="M",
+        "--dtc-err-clip-lin", type=float, default=0.05, metavar="M",
         help="--dtc-law wrench: pose error clip (m) before it becomes force. "
-             "This is the shove cap, replacing max_step_m; the bound in newtons "
-             "is --dtc-k-lin times this (default %(default)s)")
+             "This is the shove cap, replacing max_step_m. Without --dtc-lambda "
+             "the bound in newtons is --dtc-k-lin times this; with it, the "
+             "bound is (2*pi*--dtc-fn-lin)^2 * this * apparent mass -- at the "
+             "defaults ~355 1/s^2 * 0.05 m * ~4 kg = ~71 N, which is the peak "
+             "measured on hardware (default %(default)s)")
     parser.add_argument(
         "--dtc-lambda", dest="dtc_lambda",
-        action=argparse.BooleanOptionalAction, default=False,
+        action=argparse.BooleanOptionalAction, default=True,
         help="--dtc-law wrench: inertia shaping. tau = J.T @ (Lambda @ a) with "
              "Lambda = (J M^-1 J.T)^-1, instead of tau = J.T @ W. Without it "
              "one wrench is handed to joints whose measured mobility spans 78x "
@@ -539,19 +578,22 @@ def build_arg_parser():
              "makes the EE a unit mass in every direction, so a gain is correct "
              "at more than one pose. Changes what K means, hence opt-in: "
              "--dtc-k-lin/--dtc-k-ang are ignored and --dtc-fn-lin/--dtc-fn-ang "
-             "take over (default: off)")
+             "take over (default: on)")
     parser.add_argument(
-        "--dtc-fn-lin", type=float, default=2.0, metavar="HZ",
+        "--dtc-fn-lin", type=float, default=3.0, metavar="HZ",
         help="--dtc-lambda: linear closed-loop natural frequency (Hz). K = "
              "(2*pi*f)^2 in 1/s^2. Must sit well under the control rate; this "
              "loop holds ~124 Hz and limit-cycled at 5.9 Hz when omega_n was "
              "7.1 Hz (default %(default)s)")
     parser.add_argument(
-        "--dtc-fn-ang", type=float, default=2.0, metavar="HZ",
-        help="--dtc-lambda: angular natural frequency (Hz). Same number as the "
-             "linear one is correct under Lambda -- the 20:1 split existed only "
-             "because the two blades had different apparent M, which Lambda now "
-             "carries exactly (default %(default)s)")
+        "--dtc-fn-ang", type=float, default=0.3, metavar="HZ",
+        help="--dtc-lambda: angular natural frequency (Hz). Lambda already "
+             "carries the two blades' different apparent M, so in principle "
+             "the same number as the linear one is correct -- but measured on "
+             "this rig the angular blade is the one that rails the wrists on a "
+             "re-arm (|W_ang| 4.45 N.m against 0.07 on the good run), so it is "
+             "detuned an order of magnitude below the linear one "
+             "(default %(default)s)")
     parser.add_argument(
         "--dtc-err-clip-rot", type=float, default=0.2, metavar="RAD",
         help="--dtc-law wrench: angular pose error clip (rad) "
@@ -585,7 +627,7 @@ def build_arg_parser():
              "well under --dtc-tau-max so a stuck joint pushes hard but "
              "bounded (default %(default)s)")
     parser.add_argument(
-        "--dtc-tau-max", type=float, nargs="+", default=list(DEFAULT_TAU_MAX),
+        "--dtc-tau-max", type=float, nargs="+", default=list(WRENCH_TAU_MAX),
         metavar="NM",
         help="dtc per-joint torque cap, scalar or 6 values. This cap IS the "
              "compliance (default %(default)s)")
@@ -730,9 +772,42 @@ def build_arg_parser():
              "decays on its own as the arm catches up. Defaults off under "
              "--dtc-law wrench, on everywhere else")
     parser.add_argument(
-        "--max-lead-m", type=float, default=0.005, metavar="M",
+        "--hold-field-orientation", dest="hold_field_orientation",
+        action=argparse.BooleanOptionalAction, default=None,
+        help="keep the commanded field orientation while the stick is quiet, "
+             "re-basing only the *position* onto the live TCP. Off, both idle "
+             "holds snap target := live pose, which erases the angular error "
+             "too: measured on dtc_20260829_214019.csv the wrench was exactly "
+             "zero on 42%% of ticks and the wrists moved 0.06 deg over the run "
+             "while j0..j2 moved 8 deg -- quiet erased the error, the next "
+             "stick sample handed back the full field pose in one tick, and the "
+             "wrist tau cap threw the correction away, so the tool never "
+             "converged onto the field. On, the wrist keeps working toward the "
+             "field between stick motions and there is no step left to make. "
+             "Note this means the arm turns with hands off the stick. Defaults "
+             "on under --dtc-law wrench, off everywhere else (speedJ must stay "
+             "bit-identical for the C153 A/B)")
+    parser.add_argument(
+        "--rearm-slerp-s", type=float, default=0.5, metavar="S",
+        help="time constant for the commanded orientation's approach to the "
+             "field goal. 0 snaps, which put |W_ang| 0 -> 4.25 N.m and tau on "
+             "the 50 N.m rail in one tick. This is a rate on the command's own "
+             "history, not a cap against live R -- the live-based cap is what "
+             "pinned R_err at ~1.1 deg forever and was removed in 2eceb0f. "
+             "Ignored without --hold-field-orientation, where the command is "
+             "re-based on live every quiet tick and a ramp could only lag "
+             "(default %(default)s)")
+    parser.add_argument(
+        "--follow-max-dr-rad", type=float, default=0.02, metavar="RAD",
+        help="per-follow-tick cap on how far the field goal itself may turn, "
+             "so one project() flip at a mesh edge cannot bank a large angular "
+             "error for the next re-entry. Field->field only; 0 disables "
+             "(default %(default)s)")
+    parser.add_argument(
+        "--max-lead-m", type=float, default=0.05, metavar="M",
         help="how far the field-follow carrot may run ahead of the live TCP. "
-             "Under speedJ this is a path contract and 5 mm is right. Under "
+             "Under speedJ this is a path contract and 5 mm is right -- pass "
+             "--max-lead-m 0.005 when running --contact-backend speedj. Under "
              "--dtc-law wrench it is also the *force* ceiling, because the "
              "pose error that becomes force cannot exceed it: 3000 N/m x 5 mm "
              "= 15 N, well under UR5e breakaway, and --dtc-err-clip-lin can "
@@ -908,7 +983,16 @@ def main():
     field_preview = FieldAlignPreview(vf)
     follow = FieldFollow(
         vf, hz=args.follow_hz, project_in_process=True, mesh=object_surface,
-        max_lead_m=args.max_lead_m, max_step_m=0.004, max_dR_rad=0.0,
+        max_lead_m=args.max_lead_m, max_step_m=0.004,
+        max_dR_rad=args.follow_max_dr_rad,
+        # The ramp only means anything where the command persists: with
+        # hold_field_orientation off the commanded R is collapsed onto live R
+        # on every quiet/catch-up call, so a ramp would restart from live every
+        # time and pin the command permanently behind the field -- which is the
+        # ~1.1 deg lag 2eceb0f removed.
+        rearm_slerp_s=(args.rearm_slerp_s
+                       if _hold_field_orientation(args) else 0.0),
+        hold_field_orientation=_hold_field_orientation(args),
         snap_to_surface=args.snap_follow_to_surface,
         # speedJ keeps the re-based carrot: it is a velocity command and the
         # position servo underneath wants exactly that. The wrench law turns
@@ -1080,6 +1164,11 @@ def main():
             n_base = T_cmd[:3, 2]
             R_tool = T_ee_m[:3, :3]
             approach_controller.set_contact_normal(n_base, R_tool)
+            # Same frame, same tick: the idle hold keeps this orientation and
+            # re-bases only the position, so the hold target and the follow
+            # target are the same rotation by construction.
+            if _hold_field_orientation(args):
+                approach_controller.set_hold_rotation(T_cmd[:3, :3])
             if contact_controller is not None:
                 contact_controller.set_contact_normal(n_base, R_tool)
         if (now - follow_log_t["t"]) >= 1.0:

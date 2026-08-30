@@ -239,6 +239,9 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         self._n_joints_seen = None
         self._t_cond_warn = None
         self._n_body = None
+        # Commanded EE orientation for the idle hold. None = the plain live-pose
+        # snap, which erases the angular error along with the linear one.
+        self._hold_rotation = None
         self._slide_twist = np.zeros(6)
         self._max_slide_mps = 0.008
         self._max_slide_radps = 0.12
@@ -362,7 +365,43 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         """
         ee = self.get_task_space().compute_ee_motor(
             np.asarray(q_control_group, dtype=float))
+        R_hold = self._hold_rotation
+        if R_hold is not None:
+            # Hold the *commanded field orientation* with the live position.
+            #
+            # The plain snap sets target := live pose, which erases the angular
+            # error as well as the linear one. Measured on
+            # dtc_20260829_214019.csv: with this running at 125 Hz whenever the
+            # stick was quiet, |W| was exactly zero on 42% of ticks and the
+            # wrists moved 0.06 deg over the whole run while j0..j2 moved 8 deg.
+            # The loop could not converge onto the field -- quiet erased the
+            # error, the next stick sample handed back the full field pose in
+            # one tick, and the wrist tau cap threw the correction away. Only
+            # the position is re-based here; the orientation stays commanded, so
+            # the wrist keeps working toward the field between stick motions and
+            # there is no step to make when the stick moves again.
+            #
+            # set_hold_rotation publishes field-follow's *commanded* R (already
+            # ramped by rearm_slerp_s), not the raw field goal, so this and the
+            # follow target are the same rotation by construction.
+            T = np.asarray(ee.to_transformation_matrix(), dtype=float).copy()
+            T[:3, :3] = R_hold
+            ee = gafropy.Motor.from_matrix(T)
         self.get_objective().set_target(ee)
+
+    def set_hold_rotation(self, R_base):
+        """Commanded EE orientation (base frame) for the idle hold, or None.
+
+        Published from the field-follow tick, same call site and same frame as
+        ``set_contact_normal`` -- ``R_base`` is the mapped commanded EE rotation
+        in the *controller* world, so it composes with ``compute_ee_motor``
+        without a further transform. ``None`` restores the plain live-pose snap.
+        """
+        if R_base is None:
+            self._hold_rotation = None
+            return
+        R = np.asarray(R_base, dtype=float).reshape(3, 3)
+        self._hold_rotation = None if not np.all(np.isfinite(R)) else R.copy()
 
     @property
     def input_active(self) -> bool:
@@ -686,6 +725,20 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         n_body = R.T @ (n / norm)
         n_norm = float(np.linalg.norm(n_body))
         self._n_body = None if n_norm < 1e-12 else n_body / n_norm
+
+    @property
+    def contact_normal_body(self):
+        """Last commanded field normal, in the live body frame (or None).
+
+        Read side of ``set_contact_normal``. The angle between this and body +Z
+        is the number that says whether the tool is actually conforming to the
+        object field: ``n_base`` is the commanded target's Z column and
+        ``R_tool_to_base`` is the *live* EE rotation, so the two differ by
+        exactly the orientation the arm has failed to track. Logged per tick by
+        ``DirectTorqueBackend`` -- the 1 Hz console ``R_err`` samples it, and a
+        re-arm transient lives entirely between two samples.
+        """
+        return None if self._n_body is None else np.array(self._n_body, copy=True)
 
     def set_virtual_fixture(self, vf):
         self.vf = vf

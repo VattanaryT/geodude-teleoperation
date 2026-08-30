@@ -79,6 +79,28 @@ def _limit_rotation(R_prev, R_new, max_rad):
     return slerp_rotation(R_prev, R_new, float(max_rad / err))
 
 
+def _approach_rotation(R_cmd, R_goal, dt, tau_s):
+    """First-order approach of the commanded R toward the field goal.
+
+    ``tau_s <= 0`` snaps, which is the pre-fix behavior. Otherwise the command
+    moves a fraction ``dt / tau_s`` of the remaining angle per tick -- an
+    exponential approach, so it converges (no sawtooth on the spring gate, no
+    permanent lag) and the one-tick step is bounded by that fraction however far
+    off-field the wrist is. Deliberately a rate on the *command's own history*,
+    not a cap measured against live R: the live-based cap is what pinned R_err
+    at ~1.1 deg forever and was removed in 2eceb0f.
+    """
+    R_goal = np.asarray(R_goal, dtype=float).reshape(3, 3)
+    tau_s = float(tau_s)
+    if tau_s <= 0.0 or not np.isfinite(dt) or dt <= 0.0:
+        return R_goal.copy()
+    frac = float(np.clip(dt / tau_s, 0.0, 1.0))
+    if frac >= 1.0:
+        return R_goal.copy()
+    out = slerp_rotation(R_cmd, R_goal, frac)
+    return out if _is_rotation(out) else R_goal.copy()
+
+
 def _snap_normal_to_surface(stick_xyz, xyz_proj, R, max_correction_m=0.02):
     """Take the along-normal component from ``vf.project()``, tangential from the stick.
 
@@ -142,7 +164,8 @@ class FieldFollow:
     def __init__(self, vf, *, hz=20.0, zero_smoothing_after_first=True,
                  project_in_process=False, mesh=None, max_lead_m=0.02,
                  max_dR_rad=0.12, max_step_m=0.0, snap_to_surface=True,
-                 rebase_on_live=True):
+                 rebase_on_live=True, rearm_slerp_s=0.0,
+                 hold_field_orientation=False):
         hz = float(hz)
         if hz <= 0.0:
             raise ValueError(f"hz must be positive, got {hz}")
@@ -162,6 +185,20 @@ class FieldFollow:
         # held stick builds error up to max_lead_m and the spring makes a real,
         # sustained push that decays on its own once the arm catches up.
         self._rebase_on_live = bool(rebase_on_live)
+        # Time constant for the commanded orientation's approach to the field
+        # goal. 0 snaps, which is what put |W_ang| 0 -> 4.25 N.m and tau on the
+        # 50 N.m rail in one tick on dtc_20260829_214019.csv: the target was the
+        # live pose while the stick was quiet and the full field pose one tick
+        # later. The commanded R is kept separate from the goal (_R_cmd vs _R)
+        # rather than rate-limiting against *live*, which is what pinned R_err
+        # at ~1.1 deg forever before 2eceb0f -- this one converges.
+        self._rearm_slerp_s = max(0.0, float(rearm_slerp_s))
+        # Whether the commanded orientation survives a quiet stick. Off (speedJ)
+        # collapses it to live R on every idle/catch-up call, which at 50 Hz
+        # against a 20 Hz follow tick is most calls -- so the wrist was handed a
+        # fresh full-field error on every re-arm and never converged onto the
+        # field between them. On, only the *position* re-bases to live.
+        self._hold_field_orientation = bool(hold_field_orientation)
         self._zero_smoothing_after_first = bool(zero_smoothing_after_first)
         self._proc = None
         self._in_q = None
@@ -173,6 +210,7 @@ class FieldFollow:
         self._idle = True
         self._xyz = None
         self._R = np.eye(3)
+        self._R_cmd = np.eye(3)
         self._last_t = float("-inf")
         self.last_target = None
         self._undo = None
@@ -199,6 +237,10 @@ class FieldFollow:
             self._R = (
                 np.eye(3) if R is None
                 else np.asarray(R, dtype=float).reshape(3, 3).copy())
+            # Seed is the one place the command is deliberately re-based on the
+            # arm (align has just finished, so live R is already on the field),
+            # so the re-arm slerp starts from here and not from a stale carrot.
+            self._R_cmd = self._R.copy()
             self._pending[:] = 0.0
             self._idle = True
             self._last_t = float("-inf")
@@ -215,7 +257,7 @@ class FieldFollow:
             self._idle = True
             if xyz is not None:
                 self._xyz = np.asarray(xyz, dtype=float).reshape(3).copy()
-                self.last_target = _motor_at(self._xyz, self._R)
+                self.last_target = _motor_at(self._xyz, self._R_cmd)
 
     def snap_tcp(self, xyz, R=None):
         """Rebase the carrot to ``xyz`` without blocking the next stick tick."""
@@ -223,7 +265,8 @@ class FieldFollow:
             self._xyz = np.asarray(xyz, dtype=float).reshape(3).copy()
             if R is not None:
                 self._R = np.asarray(R, dtype=float).reshape(3, 3).copy()
-            self.last_target = _motor_at(self._xyz, self._R)
+                self._R_cmd = self._R.copy()
+            self.last_target = _motor_at(self._xyz, self._R_cmd)
             self._idle = False
 
     def _drain(self):
@@ -308,9 +351,10 @@ class FieldFollow:
         """Undo the last committed follow step (bad project / mapped EE jump)."""
         if self._undo is None:
             return
-        xyz, R, last = self._undo
+        xyz, R, last, R_cmd = self._undo
         self._xyz = None if xyz is None else np.array(xyz, copy=True)
         self._R = np.array(R, copy=True)
+        self._R_cmd = np.array(R_cmd, copy=True)
         self.last_target = last
         self._undo = None
         self._pending[:] = 0.0
@@ -331,13 +375,23 @@ class FieldFollow:
         if np.isfinite(self._last_t) and (now - self._last_t) < self._min_dt:
             return FollowTick(idle=False)
         delta = self._drain()
+        t_prev = self._last_t
         self._last_t = now
         if float(np.linalg.norm(delta)) < 1e-15:
             return FollowTick(idle=False)
+        # Bounded to the nominal follow period: the ramp is a per-tick
+        # fraction, and an idle gap (t_prev is the last *committed* tick, which
+        # can be seconds ago, or -inf on the first) would otherwise clip the
+        # fraction to 1 and snap -- exactly the step this exists to remove.
+        dt_tick = self._min_dt
+        if np.isfinite(t_prev):
+            dt_tick = float(
+                np.clip(now - t_prev, self._min_dt, 4.0 * self._min_dt))
         self._undo = (
             None if self._xyz is None else self._xyz.copy(),
             self._R.copy(),
             self.last_target,
+            self._R_cmd.copy(),
         )
         base = self._xyz
         if (self._rebase_on_live and live_xyz is not None
@@ -378,10 +432,18 @@ class FieldFollow:
             self.revert_tick()
             return FollowTick(idle=True)
         self._R = R_new
+        # The goal is the field; the *command* approaches it. Everything
+        # downstream (last_target, the ghost, the published hold rotation) reads
+        # _R_cmd, so there is exactly one commanded orientation.
+        self._R_cmd = _approach_rotation(
+            self._R_cmd, R_new, dt_tick, self._rearm_slerp_s)
+        # Surface snap takes its normal from the *goal*: it is correcting the
+        # commanded point onto the mesh, and the mesh normal is the field's, not
+        # the ramp's momentary orientation.
         self._xyz = _snap_normal_to_surface(
             stick_xyz, xyz_proj, R_new,
             max_correction_m=self._max_lead_m) if self._snap_to_surface else stick_xyz
-        target = _motor_at(self._xyz, self._R)
+        target = _motor_at(self._xyz, self._R_cmd)
         self.last_target = target
         quat = _quat_wxyz_from_motor(target)
         overrun = project_ms > RTDE_PERIOD_MS
@@ -445,9 +507,24 @@ def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
     """Apply a follow tick to the pose spring.
 
     Stick tick: live TCP + field-frame linear; commanded R is the field at the
-    tip (orange-ghost contract). Quiet stick freezes (clears pending) so
-    leftover R cannot keep pushing. Stick-live leftover snaps xyz; catch-up
-    holds use live R so a stalled wrist is not yanked by field orientation.
+    tip (orange-ghost contract), approached at ``rearm_slerp_s``. Quiet stick
+    freezes (clears pending) so leftover xyz cannot keep pushing.
+
+    What the quiet and catch-up branches do with *orientation* is
+    ``hold_field_orientation``:
+
+    - **off** (speedJ) collapses the commanded R to live R, so a stalled wrist
+      is never yanked by field orientation. This path must stay bit-identical --
+      it is the speedJ side of the C153 A/B.
+    - **on** (dtc wrench law) keeps it. Measured on
+      ``dtc_20260829_214019.csv``: this function runs at ~50 Hz against a 20 Hz
+      follow tick, so most calls took a catch-up branch and re-based the
+      commanded orientation onto the live wrist. Combined with the controller's
+      idle hold (target := live pose at 125 Hz) the angular error was erased
+      between every stick motion, so the wrists -- which moved 0.06 deg over the
+      whole run while j0..j2 moved 8 deg -- were handed the same full-field
+      error over and over and never converged onto it. Only the *position*
+      re-bases to live here.
     """
     del err_rad, max_ee_jump_m
     R_live = _rotation_or_none(live_R)
@@ -479,9 +556,11 @@ def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
         return tick
     leftover = _leftover_tcp_m(follow, live_xyz)
     max_lead = float(getattr(follow, "_max_lead_m", 0.02))
+    hold_R = bool(getattr(follow, "_hold_field_orientation", False))
     if stick_quiet:
-        if R_live is not None:
+        if R_live is not None and not hold_R:
             follow._R = R_live
+            follow._R_cmd = np.array(R_live, copy=True)
         if live_xyz is not None:
             follow.set_idle(live_xyz, clear_pending=True)
         else:
@@ -493,10 +572,15 @@ def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
             controller.get_objective().set_target(frozen)
         controller.set_input_active(False)
         return tick
-    R_hold = R_live if R_live is not None else follow._R
+    if hold_R:
+        R_hold = np.array(follow._R_cmd, copy=True)
+    else:
+        R_hold = R_live if R_live is not None else follow._R
     if leftover > max(max_lead, CATCHUP_TCP_M) + 1e-12:
         if live_xyz is not None:
-            follow.snap_tcp(live_xyz, R_hold)
+            # R=None under hold_R: snap_tcp re-bases the command deliberately,
+            # and here only the position is being re-based.
+            follow.snap_tcp(live_xyz, None if hold_R else R_hold)
         if follow.last_target is not None:
             frozen = follow.last_target
             if map_target is not None:
@@ -507,7 +591,9 @@ def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
     if leftover > CATCHUP_TCP_M:
         if follow.xyz is not None:
             follow.last_target = _motor_at(follow.xyz, R_hold)
-            follow._R = np.array(R_hold, copy=True)
+            if not hold_R:
+                follow._R = np.array(R_hold, copy=True)
+                follow._R_cmd = np.array(R_hold, copy=True)
         if follow.last_target is not None:
             frozen = follow.last_target
             if map_target is not None:
@@ -518,7 +604,9 @@ def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
     if follow.last_target is not None:
         if follow.xyz is not None:
             follow.last_target = _motor_at(follow.xyz, R_hold)
-            follow._R = np.array(R_hold, copy=True)
+            if not hold_R:
+                follow._R = np.array(R_hold, copy=True)
+                follow._R_cmd = np.array(R_hold, copy=True)
         frozen = follow.last_target
         if map_target is not None:
             frozen = map_target(frozen)
