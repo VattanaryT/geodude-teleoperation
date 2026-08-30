@@ -12,6 +12,10 @@ to the object field or just being shoved at it.
 import csv, glob, pathlib, sys
 import numpy as np
 
+# Kept in step with torque_backend by hand: this script must run without
+# gafropy (and therefore without importing the package) on a log-only box.
+LAMBDA_MIN_ANG_KGM2 = 0.02
+
 
 def newest():
     hits = sorted(glob.glob("speedj_logs/dtc_*.csv"), key=lambda p: pathlib.Path(p).stat().st_mtime)
@@ -30,6 +34,11 @@ def q(a, p):
 # of the qdot spectrum is always the stick, which is what made a run with 75%
 # of its qdot power at 8.45 Hz print "no limit cycle".
 STICK_FLOOR_HZ = 2.0
+# A peak above this is the closed loop, not the operator -- a SpaceMouse cannot
+# reach it even in a burst, so it needs far less of the total power to be worth
+# calling. See the ringing verdict for the two runs that set these.
+RING_FLOOR_HZ = 5.0
+RING_MIN_SHARE = 0.15
 # Ticks of coast-down to drop after the stick is released. The arm is still
 # decelerating there, and that transient is not a limit cycle: on
 # dtc_20260830_123245.csv the "quiet" |qdot| p95 read 1.111 rad/s, which looked
@@ -116,9 +125,44 @@ def main():
     print("\n  rising left-to-right = still capped, raise --dtc-tau-max on that joint.")
     print("  flat/zero while the TCP will not slide = not the cap; look at |W_lin|.")
 
+    lambda_floor(rows, live)
     oscillation(rows, live, W, n)
     stall(rows, live, W, n)
     tracking(rows, live, W)
+
+
+def lambda_floor(rows, live):
+    """How often Lambda's angular eigenvalue floor was load-bearing.
+
+    LAMBDA_MIN_ANG_KGM2 is sized against breakaway friction, not against any
+    measured inertia, so "does it bind" is an empirical question and the answer
+    belongs in the run record rather than in a 1 Hz console counter. It also
+    sets the *bandwidth* of the axis it floors: a clamped Lambda is not that
+    axis's real apparent inertia, so its true closed-loop frequency runs
+    sqrt(floor / true) above the fn asked for -- ~3.2x on the roll axis here,
+    which is why --dtc-fn-lin 4.0 rang at 14.43 Hz. See
+    WRENCH_FN_ANG_MAX_LAMBDA.
+    """
+    if "lam_ang" not in rows[0]:
+        return
+    v = np.array([float(r["lam_ang"]) if r["lam_ang"] else np.nan
+                  for r in rows])[live]
+    ok = np.isfinite(v)
+    if not ok.any():
+        return
+    v = v[ok]
+    bound = float((v < LAMBDA_MIN_ANG_KGM2).mean())
+    print(f"\n  Lambda angular min eig kg.m^2  median {q(v,50):.5f}"
+          f"  p5 {q(v,5):.5f}   floor {LAMBDA_MIN_ANG_KGM2:g} bound on "
+          f"{bound:.1%} of live ticks")
+    if bound > 0.5:
+        infl = float(np.sqrt(LAMBDA_MIN_ANG_KGM2 / max(q(v, 50), 1e-9)))
+        print(f"     the floor is carrying the roll axis. Its real loop runs "
+              f"~{infl:.1f}x the angular fn asked for, so read the peak "
+              f"frequency below against that, not against fn.")
+    elif bound < 0.05:
+        print("     the floor is inert -- a stuck roll is not this, and "
+              "raising it would change nothing.")
 
 
 def oscillation(rows, live, W, n):
@@ -235,7 +279,19 @@ def oscillation(rows, live, W, n):
         pk = float("nan")
     print(f"\n  qdot power above {STICK_FLOOR_HZ:g} Hz (the stick cannot go "
           f"there): {share:.1%}, peaked at {pk:.2f} Hz")
-    if share > 0.35:
+    # Share alone is the wrong discriminator and it has now missed twice, in
+    # both directions. A share threshold cannot separate "the operator drove
+    # briskly" from "the arm has a line in it": dtc_20260830_132204.csv is
+    # 15.0% peaked at 2.59 Hz (the stick, healthy) and dtc_20260830_132604.csv
+    # is 33.7% peaked at **14.43 Hz** (a real 14 Hz line on j0/j4, with j3
+    # clipping 20.4% by the last quartile) -- and the old `share > 0.35` called
+    # the second one clean by 1.3 points. dtc_20260830_005006.csv, the run this
+    # section was written for, was 34% and also squeaked under. What separates
+    # them is WHERE the power is: nothing the operator does lands above
+    # RING_FLOOR_HZ, so a peak up there with a real share is the loop talking
+    # to itself no matter how much of the total it is.
+    ringing = share > 0.35 or (pk > RING_FLOOR_HZ and share > RING_MIN_SHARE)
+    if ringing:
         print("     \033[93mRINGING: most of the joint motion is at a frequency "
               "nobody commanded.\033[0m")
         phase = 360.0 * pk * 1.5 * dt
@@ -300,6 +356,13 @@ def oscillation(rows, live, W, n):
         print("     Read it as convergence speed, not as a failed hold. It is "
               "a fault only if it never settles -- check err_ang at the "
               "re-arm edges below: falling edge-to-edge = converging.")
+    elif ringing:
+        # dtc_20260830_132604.csv reads both at once, and only one of them is a
+        # bug you can fix at the hold: a ringing loop does not stop ringing
+        # because the operator let go, so its quiet ticks are the oscillation
+        # continuing, not the hold leaking. Fix the ring first and re-read.
+        print("     this is the ringing above continuing through the quiet "
+              f"ticks ({pk:.1f} Hz), not a leaking hold. Fix the ring first.")
     else:
         print("     \033[93mTHE HOLD IS NOT HOLDING: the arm keeps moving "
               "long after the stick was released, under no commanded "

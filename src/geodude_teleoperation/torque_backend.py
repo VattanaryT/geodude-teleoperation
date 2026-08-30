@@ -1500,6 +1500,13 @@ class DirectTorqueBackend:
         # the spring gate -- a 0->1 edge with a large err is a re-arm step, and
         # that step is what rails tau.
         cols += ["erx", "ery", "erz", "ex", "ey", "ez", "n_deg", "act"]
+        # Lambda's smallest angular eigenvalue BEFORE the clamp. The floor that
+        # clamps it is sized against friction rather than inertia
+        # (LAMBDA_MIN_ANG_KGM2), so whether it binds is an empirical question,
+        # and a per-run counter in a console line is not evidence anyone can go
+        # back to. Below the floor on a tick means the roll axis was running on
+        # borrowed authority on that tick.
+        cols += ["lam_ang"]
         self._log_fh.write(",".join(cols) + "\n")
         self._log_t0 = None
         print(f"dtc log: {self._log_path}", flush=True)
@@ -1616,6 +1623,8 @@ class DirectTorqueBackend:
         fields += [f"{v:.6f}" for v in err_ang]
         fields += [f"{v:.6f}" for v in err_lin]
         fields += ["" if not np.isfinite(n_deg) else f"{n_deg:.2f}", str(act)]
+        lam_ang = self._last_lambda_ang_min
+        fields += ["" if not np.isfinite(lam_ang) else f"{lam_ang:.6f}"]
         try:
             fh.write(",".join(fields) + "\n")
         except Exception as exc:

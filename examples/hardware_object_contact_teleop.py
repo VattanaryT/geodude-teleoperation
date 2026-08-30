@@ -183,6 +183,23 @@ WRENCH_ZETA_LIN = 0.3
 WRENCH_ZETA_ANG = 0.1
 WRENCH_FN_ANG_NO_LAMBDA = 1.5
 
+# Ceiling on the angular fn that resolve_wrench_fn_ang *derives* from
+# --dtc-fn-lin under Lambda. An explicit --dtc-fn-ang still wins.
+#
+# Under Lambda, "fn is the closed-loop frequency" holds only where Lambda is
+# the arm's real apparent inertia. On the roll axis it is not: Lambda there is
+# ~0.001 kg.m^2 and LAMBDA_MIN_ANG_KGM2 clamps it up to 0.02, so the real
+# natural frequency on that axis is inflated by sqrt(0.02/0.002) ~ 3.2x. At
+# fn 3.0 that is a true ~9.5 Hz loop, which this rig holds; at fn 4.0 it is
+# ~12.6 Hz, and dtc_20260830_132604.csv duly put 33.7% of the qdot power at
+# **14.43 Hz**, peaked on j0/j4, with j3 clipping 9.8% and rising to 20.4% by
+# the last quartile and wrist 3 stick-slipping at 0.215 rad/s with the stick at
+# rest. The same run's *linear* numbers all improved (err_lin 8.85 -> 5.81 mm,
+# conformity 0.73 -> 0.51 deg), which is the tell: the benefit was linear and
+# the damage was angular, so the two blades must stop moving together above
+# this. The floor buys the roll axis authority, and it costs it bandwidth.
+WRENCH_FN_ANG_MAX_LAMBDA = 3.0
+
 # Ceiling on the pose spring's damping coefficient D = 2*zeta*omega_n, in 1/s,
 # under --dtc-lambda only (without Lambda D is N.s/m and N.m.s/rad and this
 # number means nothing). This is NOT the rigid-body delayed-damper bound
@@ -272,10 +289,28 @@ def resolve_wrench_fn_ang(use_lambda, fn_lin, fn_ang=None):
     --dtc-fn-ang 3.0 (= fn_lin) cut that to 1.33 / 5.28 deg, with err_ang
     median 14.25 -> 6.95 deg. Without Lambda the split is doing real work and
     this leaves it alone.
+
+    Tracking the linear blade stops at WRENCH_FN_ANG_MAX_LAMBDA, though. The
+    equality argument above is that Lambda carries the real apparent M, and on
+    the roll axis it does not -- LAMBDA_MIN_ANG_KGM2 clamps that axis up off
+    its true ~0.001 kg.m^2 on purpose, so its real closed-loop frequency runs
+    ~3.2x the fn asked for. The cap is on what this function *derives*; an
+    explicit --dtc-fn-ang is the operator saying they mean it, and passes
+    through.
     """
     if fn_ang is not None:
         return float(fn_ang)
-    return float(fn_lin) if use_lambda else WRENCH_FN_ANG_NO_LAMBDA
+    if not use_lambda:
+        return WRENCH_FN_ANG_NO_LAMBDA
+    fn = float(fn_lin)
+    if fn > WRENCH_FN_ANG_MAX_LAMBDA:
+        print(f"\033[93mdtc: angular fn held at "
+              f"{WRENCH_FN_ANG_MAX_LAMBDA:g} Hz, not --dtc-fn-lin {fn:g} -- "
+              f"the roll axis sits on Lambda's angular floor, so its real "
+              f"loop runs ~3x the fn asked for. --dtc-fn-ang {fn:g} to "
+              f"override.\033[0m", flush=True)
+        return WRENCH_FN_ANG_MAX_LAMBDA
+    return fn
 
 STICK_LINEAR_SCALE = 0.0015
 STICK_ANGULAR_SCALE = 0.05
