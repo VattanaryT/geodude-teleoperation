@@ -19,6 +19,7 @@ wrench_net`. Frames and signs are shared by construction. These tests hold that
 line -- that the speedJ path is untouched, that the wrench carries the same
 compliance invariants, and that the shove is bounded before it becomes force.
 """
+import time
 import unittest
 
 import numpy as np
@@ -330,6 +331,130 @@ class DiagnosticsTest(unittest.TestCase):
         ctrl = _ctrl(err_clip_lin=0.01)
         _wrench(ctrl, _lin_error([0.5, 0.0, 0.0]))
         self.assertAlmostEqual(ctrl.conditioning()["err_x"], 0.5, places=9)
+
+
+class RearmRampTest(unittest.TestCase):
+    """The `input_active` 0->1 edge must not be a one-tick step in the wrench.
+
+    `--rearm-slerp-s` ramps the commanded *rotation* only. Nothing ramped the
+    wrench, and while the stick is quiet the idle hold pins the target on the
+    live pose (err_lin ~ 0) -- so the first active tick handed back the full
+    field-follow carrot at once. Measured on dtc_20260830_115039.csv, 9 edges:
+    |W_lin| 9.25 -> 38.30 N and |W_ang| 1.09 -> 10.35 N.m inside one 8 ms tick.
+
+    Deliberately an edge blend and not a slew-rate limit on W: on that same log
+    ordinary sliding already runs |dW_lin|/dt of 1005 N/s at p95 and 3268 N/s
+    at p99.9, against 613..3641 N/s at the edges, so no rate separates them.
+    """
+
+    def _idle_then_active(self, ctrl, error, hold_error=None):
+        """One quiet tick (which sets the held wrench), then the first active
+        tick, which is the edge under test."""
+        ctrl.set_input_active(False)
+        w_idle = _wrench(ctrl, _lin_error([0.0, 0.0, 0.0])
+                         if hold_error is None else hold_error)
+        ctrl.set_input_active(True)
+        return w_idle, _wrench(ctrl, error)
+
+    # 5 mm is one field-follow lead, inside the 10 mm err_clip_lin default:
+    # these read the gain, not the cap. 1 mm is the residue the idle hold
+    # leaves behind, which is what the blend has to open from.
+    SLIDE = 0.005    # -> -15 N at k_lin=3000
+    HOLD = 0.001     # ->  -3 N
+
+    def test_the_first_active_tick_opens_from_the_held_wrench(self):
+        ctrl = _ctrl(k_lin=3000.0, rearm_wrench_s=1e4)  # alpha ~ 0 on tick one
+        w_idle, w_edge = self._idle_then_active(
+            ctrl, _lin_error([self.SLIDE, 0.0, 0.0]),
+            hold_error=_lin_error([self.HOLD, 0.0, 0.0]))
+        # Un-ramped this edge is -3 N -> -15 N in one tick. The blend starts
+        # at the hold instead.
+        self.assertAlmostEqual(w_idle[3], -3.0, places=9)
+        np.testing.assert_allclose(w_edge, w_idle, atol=1e-3)
+
+    def test_the_ramp_converges_on_the_full_spring(self):
+        ctrl = _ctrl(k_lin=3000.0, rearm_wrench_s=0.15)
+        self._idle_then_active(ctrl, _lin_error([self.SLIDE, 0.0, 0.0]),
+                               hold_error=_lin_error([self.HOLD, 0.0, 0.0]))
+        # Halfway: -3 N blending toward -15 N.
+        ctrl._rearm_t0 = time.perf_counter() - 0.075
+        w_mid = _wrench(ctrl, _lin_error([self.SLIDE, 0.0, 0.0]))
+        self.assertLess(w_mid[3], -3.0)
+        self.assertGreater(w_mid[3], -15.0)
+        # Past the ramp it is the plain spring again, and the state is dropped.
+        ctrl._rearm_t0 = time.perf_counter() - 1.0
+        w_end = _wrench(ctrl, _lin_error([self.SLIDE, 0.0, 0.0]))
+        self.assertAlmostEqual(w_end[3], -15.0, places=9)
+        self.assertIsNone(ctrl._rearm_t0)
+
+    def test_zero_restores_the_one_tick_step(self):
+        """Reduction to the previously-working case, and it is exact."""
+        ctrl = _ctrl(k_lin=3000.0, rearm_wrench_s=0.0)
+        _, w_edge = self._idle_then_active(
+            ctrl, _lin_error([self.SLIDE, 0.0, 0.0]))
+        self.assertAlmostEqual(w_edge[3], -15.0, places=9)
+
+    def test_the_ramp_is_inactive_during_ordinary_sliding(self):
+        """No edge, no blend -- so it adds no lag to the loop that is already
+        spending its stability budget on the delayed damper.
+
+        Note the *first* active tick of a fresh controller is itself an edge,
+        which is correct: nothing was holding the arm, so the blend opens from
+        zero. This drains that one and then checks the steady state."""
+        ctrl = _ctrl(k_lin=3000.0, rearm_wrench_s=0.15)
+        ctrl.set_input_active(True)
+        _wrench(ctrl, _lin_error([0.004, 0.0, 0.0]))
+        ctrl._rearm_t0 = time.perf_counter() - 1.0
+        _wrench(ctrl, _lin_error([0.004, 0.0, 0.0]))
+        self.assertIsNone(ctrl._rearm_t0)
+        # A large change *without* an edge now passes straight through.
+        w = _wrench(ctrl, _lin_error([self.SLIDE, 0.0, 0.0]))
+        self.assertAlmostEqual(w[3], -15.0, places=9)
+        w = _wrench(ctrl, _lin_error([0.0, 0.0, 0.0]))
+        self.assertAlmostEqual(w[3], 0.0, places=12)
+
+    def test_the_press_passes_through_the_blend_untouched(self):
+        """The press is added before the blend and is common to both ends, so
+        `W0 + a*(W - W0)` leaves it alone. Ramping it would unload the tool at
+        exactly the moment the operator asked the arm to move."""
+        ctrl = _ctrl(k_lin=3000.0, rearm_wrench_s=1e4)
+        ctrl.set_press_wrench([0.0, 0.0, -10.0])
+        _, w_edge = self._idle_then_active(
+            ctrl, _lin_error([self.SLIDE, 0.0, 0.0]))
+        self.assertAlmostEqual(w_edge[5], -10.0, places=6)
+
+    def test_reset_forgets_the_blend(self):
+        """A pendant stop must not queue up a ramp that opens from a pre-stop
+        wrench. Same rule as the idle latch and the joint hold."""
+        ctrl = _ctrl(k_lin=3000.0, rearm_wrench_s=1e4)
+        self._idle_then_active(ctrl, _lin_error([self.SLIDE, 0.0, 0.0]),
+                               hold_error=_lin_error([self.HOLD, 0.0, 0.0]))
+        ctrl.reset_wrench_rearm()
+        self.assertIsNone(ctrl._rearm_t0)
+        np.testing.assert_allclose(ctrl._last_wrench, 0.0, atol=1e-12)
+        # Still active, but the edge has been forgotten, so the next tick
+        # re-arms from zero rather than from the stale wrench.
+        w = _wrench(ctrl, _lin_error([self.SLIDE, 0.0, 0.0]))
+        np.testing.assert_allclose(w, 0.0, atol=1e-3)
+
+    def test_the_velocity_law_never_sees_the_ramp(self):
+        """A-only. speedJ has to stay bit-identical or the C153 A/B is void."""
+        ctrl = _ctrl(k_lin=3000.0, rearm_wrench_s=1e4)
+        ctrl.set_input_active(True)
+        qdot = np.asarray(ctrl.compute_control_command(
+            FakeRobotState(np.zeros(6)),
+            FakeObjectiveState(_lin_error([0.004, 0.0, 0.0])),
+            FakeTaskSpaceState(),
+        ), dtype=float)
+        self.assertIsNone(ctrl._rearm_t0)
+        ref = _ctrl(k_lin=3000.0, rearm_wrench_s=0.0)
+        ref.set_input_active(True)
+        qdot_ref = np.asarray(ref.compute_control_command(
+            FakeRobotState(np.zeros(6)),
+            FakeObjectiveState(_lin_error([0.004, 0.0, 0.0])),
+            FakeTaskSpaceState(),
+        ), dtype=float)
+        np.testing.assert_allclose(qdot, qdot_ref, atol=0.0)
 
 
 if __name__ == "__main__":

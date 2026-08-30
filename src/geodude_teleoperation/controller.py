@@ -175,7 +175,8 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
                  max_twist_scaling_factor=10.0, twist_linear_scale=2.0,
                  max_qddot=5.0, stick_hz=50.0, free_along_normal=True,
                  dls_damping=0.05, per_joint_velocity=True,
-                 err_clip_lin=0.01, err_clip_rot=0.2):
+                 err_clip_lin=0.01, err_clip_rot=0.2,
+                 rearm_wrench_s=0.15):
         super().__init__()
         self._inertia = np.diag([1.0] * 6) if inertia is None else inertia
         self._damping = np.diag([20.0] * 6) if damping is None else damping
@@ -282,6 +283,32 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         self._press_wrench_body = np.zeros(3)
         self._last_wrench_lin = 0.0
         self._last_wrench_ang = 0.0
+        # Re-arm ramp for the wrench law. ``rearm_slerp_s`` ramps the commanded
+        # *rotation*; nothing ramped the wrench itself, so the ``input_active``
+        # 0->1 edge was a one-tick step in both blades. Measured on
+        # dtc_20260830_115039.csv (9 edges): |W_lin| 9.25 -> 38.30 N and
+        # |W_ang| 1.09 -> 10.35 N.m between two 8 ms ticks, because while quiet
+        # the idle hold keeps the target on the live pose (err_lin ~ 0) and the
+        # first active tick hands back the full field-follow carrot.
+        #
+        # Deliberately an *edge* ramp, not a slew-rate limit on W. The two are
+        # not separable by rate on this rig: ordinary sliding already runs
+        # |dW_lin|/dt of 1005 N/s at p95 and 3268 N/s at p99.9, against 613 to
+        # 3641 N/s at the edges. A rate limit tight enough to catch the edges
+        # would fire constantly and add phase lag to a loop whose stability
+        # budget is already spent on the delayed damper (see resolve_wrench_zeta
+        # and the 24.5 Hz limit cycle). This blend is armed only by the edge,
+        # so outside it the law is byte-identical to before.
+        #
+        # The blend starts from the wrench that was already holding the arm, so
+        # the hold is never dropped -- and because the press is added before the
+        # blend and is unchanged across the edge, it passes through untouched:
+        # ``W0 + a*(W - W0)`` leaves any component common to both alone.
+        self._rearm_wrench_s = max(0.0, float(rearm_wrench_s))
+        self._rearm_t0 = None
+        self._rearm_w0 = None
+        self._prev_input_active = False
+        self._last_wrench = np.zeros(6)
 
     def set_command_trace(self, fn):
         """Optional callback(qdot, measured=, spring=, stick=) after each speedJ command."""
@@ -639,9 +666,56 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
 
         wrench[3:6] = wrench[3:6] + self._press_wrench_body
 
+        wrench = self._apply_rearm_ramp(wrench)
+
+        self._last_wrench = wrench.copy()
         self._last_wrench_lin = float(np.linalg.norm(wrench[3:6]))
         self._last_wrench_ang = float(np.linalg.norm(wrench[0:3]))
         return wrench
+
+    def _apply_rearm_ramp(self, wrench):
+        """Blend the spring's first active tick out of the idle hold wrench.
+
+        Wrench law only, and armed only by the ``input_active`` 0->1 edge --
+        see the note in ``__init__``. ``rearm_wrench_s = 0`` disables it, which
+        is the reduction to the previously-working case and is exact: with the
+        ramp inactive this returns its argument unchanged.
+        """
+        active = bool(self._input_active)
+        if not active:
+            self._prev_input_active = False
+            self._rearm_t0 = None
+            self._rearm_w0 = None
+            return wrench
+        if not self._prev_input_active:
+            self._prev_input_active = True
+            if self._rearm_wrench_s > 0.0:
+                self._rearm_t0 = time.perf_counter()
+                # The wrench that was holding the arm one tick ago, not zero:
+                # ramping from zero would drop the hold (and the press with it)
+                # at exactly the moment the operator asked the arm to move.
+                self._rearm_w0 = self._last_wrench.copy()
+        if self._rearm_t0 is None or self._rearm_w0 is None:
+            return wrench
+        alpha = (time.perf_counter() - self._rearm_t0) / self._rearm_wrench_s
+        if not np.isfinite(alpha) or alpha >= 1.0:
+            self._rearm_t0 = None
+            self._rearm_w0 = None
+            return wrench
+        alpha = max(0.0, float(alpha))
+        return self._rearm_w0 + alpha * (wrench - self._rearm_w0)
+
+    def reset_wrench_rearm(self) -> None:
+        """Forget the re-arm blend and the held wrench.
+
+        Paired with every ``law.reset()`` in ``DirectTorqueBackend``: a pendant
+        stop must not queue up a ramp that opens from a pre-stop wrench when
+        someone clears it. Same rule as the idle latch and the joint hold.
+        """
+        self._rearm_t0 = None
+        self._rearm_w0 = None
+        self._prev_input_active = False
+        self._last_wrench = np.zeros(6)
 
     def _note_conditioning(self, jacobian):
         """Record how close this pose is to singular, and shout once if it is.

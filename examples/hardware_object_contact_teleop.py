@@ -167,6 +167,16 @@ DEFAULT_VENTION_HEIGHT = 0.51
 # oscillation is confirmed gone. One variable at a time.
 WRENCH_TAU_MAX = (50.0, 50.0, 50.0, 6.0, 6.0, 30.0)
 
+# --dtc-rearm-wrench-s default. The wrench-law counterpart to --rearm-slerp-s,
+# which only ever ramped the commanded *rotation*. On dtc_20260830_115039.csv
+# the input_active 0->1 edge stepped |W_lin| 9.25 -> 38.30 N and |W_ang|
+# 1.09 -> 10.35 N.m inside one 8 ms tick: while the stick is quiet the idle
+# hold pins the target on the live pose, so err_lin is ~0, and the first active
+# tick hands back the full field-follow carrot (up to --max-lead-m of lead).
+# 0.15 s is ~19 ticks at 125 Hz, which turns a 38 N step into ~2 N per tick and
+# is short enough to be well inside the operator's own reaction time. 0 off.
+DEFAULT_REARM_WRENCH_S = 0.15
+
 # --dtc-law wrench damping ratios and the no-Lambda angular frequency, resolved
 # by resolve_wrench_zeta / resolve_wrench_fn_ang.
 WRENCH_ZETA_LIN = 0.3
@@ -344,7 +354,8 @@ def _make_approach_controller(interface, task_space, home_ee_motor,
                               k_lin=3000.0, k_ang=50.0, damping_ratio=0.3,
                               damping_ratio_ang=0.1,
                               err_clip_lin=0.01, err_clip_rot=0.2,
-                              use_lambda=False, fn_lin=2.0, fn_ang=2.0):
+                              use_lambda=False, fn_lin=2.0, fn_ang=2.0,
+                              rearm_wrench_s=DEFAULT_REARM_WRENCH_S):
     # These are NOT hardware_free_teleop's defaults, despite what this comment
     # used to claim -- that file constructs AdmittanceTeleoperationController()
     # with no arguments, so it runs the class defaults (stiffness 3000,
@@ -439,6 +450,7 @@ def _make_approach_controller(interface, task_space, home_ee_motor,
         per_joint_velocity=per_joint_velocity,
         err_clip_lin=err_clip_lin,
         err_clip_rot=err_clip_rot,
+        rearm_wrench_s=rearm_wrench_s,
     )
     approach.set_task_space(task_space)
     approach.set_interface(interface)
@@ -472,6 +484,7 @@ def _wrench_law_kwargs(args):
         use_lambda=args.dtc_lambda,
         fn_lin=args.dtc_fn_lin,
         fn_ang=fn_ang,
+        rearm_wrench_s=args.dtc_rearm_wrench_s,
     )
 
 
@@ -710,6 +723,15 @@ def build_arg_parser():
              "bound is (2*pi*--dtc-fn-lin)^2 * this * apparent mass -- at the "
              "defaults ~355 1/s^2 * 0.05 m * ~4 kg = ~71 N, which is the peak "
              "measured on hardware (default %(default)s)")
+    parser.add_argument(
+        "--dtc-rearm-wrench-s", type=float, default=DEFAULT_REARM_WRENCH_S,
+        metavar="S",
+        help="--dtc-law wrench: blend the spring's first active tick out of "
+             "the idle hold wrench over this many seconds. The wrench-law "
+             "counterpart to --rearm-slerp-s, which only ramps the commanded "
+             "rotation. Armed by the input_active 0->1 edge only, so it is "
+             "inactive during ordinary sliding and adds no phase lag there; 0 "
+             "restores the one-tick step (default %(default)s)")
     parser.add_argument(
         "--dtc-lambda", dest="dtc_lambda",
         action=argparse.BooleanOptionalAction, default=True,

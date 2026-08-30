@@ -1332,6 +1332,12 @@ class DirectTorqueBackend:
             # Zero *and* forget the latch -- see the class docstring.
             self._law.reset()
             self._joint_hold_reset()
+            # Same rule for the wrench law's re-arm blend: it opens from the
+            # last wrench, and a pre-stop wrench is exactly what must not be
+            # handed back when someone clears the pendant.
+            rearm_reset = getattr(self._controller, "reset_wrench_rearm", None)
+            if callable(rearm_reset):
+                rearm_reset()
             tau = np.zeros(self._n, dtype=float)
         else:
             if self._gated_now:
