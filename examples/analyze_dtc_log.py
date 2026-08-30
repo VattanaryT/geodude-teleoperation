@@ -59,6 +59,32 @@ QUIET_HOLD_RADPS = 0.05
 QUIET_WRENCH_ANG_NM = 0.5
 QUIET_WRENCH_LIN_N = 2.0
 
+# --- release response (the step test) ---------------------------------------
+# The cleanest discriminator this rig has between "excited" and
+# "self-sustaining", and it needs no instrumentation the logs do not already
+# carry: command a motion, let go of the stick, and watch the envelope. A ring
+# the operator is exciting collapses within a couple of hundred ms of the
+# release; a ring the loop is feeding does not care that the stick stopped.
+# Everything else in this file averages that answer away -- the quiet-stick
+# percentile drops QUIET_SETTLE_S of coast-down and then pools every quiet tick
+# in the run, so one release that ran away is 1% of the population.
+#
+# Replayed over every dtc log on this rig the separation is total: every
+# release of every run decays to <0.05 rad/s except t=49.63 of
+# dtc_20260830_141034.csv, which goes 0.368 -> 0.922 rad/s with tau riding
+# 40 -> 50 N.m at 32.7 Hz. That is the workstation run, and the release is
+# 0.16 s BEFORE the event the rail guard catches.
+REL_MIN_S = 0.30
+# Windows after the release, in seconds. The first skips the release tick
+# itself (the command is still being blended out) and the second starts where
+# a healthy coast-down is already over.
+REL_EARLY = (0.02, 0.15)
+REL_LATE = (0.15, 0.40)
+# Below this the arm was simply already still and the ratio is noise on noise.
+REL_FLOOR_RADPS = 0.02
+REL_DECAY_FRAC = 0.5
+REL_GROW_FRAC = 0.8
+
 
 def _settled(quiet, act, dt):
     """``quiet`` with QUIET_SETTLE_S after each falling edge dropped.
@@ -132,8 +158,9 @@ def main():
     # Before anything that averages over the run: a 1.4 s event that swings
     # the arm into a workstation is invisible in every percentile below.
     railed = rail_oscillation(rows, live, tau, n, meta)
+    grew = release_response(rows, live, tau, n)
     lambda_floor(rows, live)
-    oscillation(rows, live, W, n, railed)
+    oscillation(rows, live, W, n, railed, grew)
     stall(rows, live, W, n)
     tracking(rows, live, W)
 
@@ -322,7 +349,155 @@ def peak_q(freq, power, pk_idx, floor_hz):
     return float(freq[pk_idx] / width)
 
 
-def oscillation(rows, live, W, n, railed=0):
+def release_response(rows, live, tau, n):
+    """The step test: command a motion, let go, watch the envelope decay.
+
+    Everything else in this file is a statistic over the whole run, and a
+    statistic cannot answer the one question that decides which knob to turn.
+    Two failures look identical while the operator is driving:
+
+      - **excited** -- the loop is stable, the operator's own motion is
+        exciting a real structural mode, and it bleeds off once they stop.
+        The fix is MORE damping (--dtc-damping-max / --dtc-damping-ratio).
+      - **self-sustaining** -- the loop is pumping its own delay and needs no
+        input at all. The fix is a SLOWER loop (--dtc-fn-lin, K = (2*pi*fn)^2);
+        adding damping to this one makes it worse, because past 90 deg of lag
+        -D*v IS the source.
+
+    Releasing the stick separates them in one motion, with no new
+    instrumentation: after the falling edge of `act` the operator is
+    contributing nothing, so whatever is left is the loop's own.
+
+    Read the table as: env_early is the p95 of |qdot| over REL_EARLY after the
+    release and env_late the same over REL_LATE. A ratio well under 1 is a
+    decay; at or above REL_GROW_FRAC with real amplitude, the loop is feeding
+    itself. tau alongside it, because a growing envelope riding tau_max is the
+    shape of the run that swung the arm into the workstation.
+
+    That run is why the windows are this short. dtc_20260830_141034.csv
+    releases at t=49.63 and the cycle starts at t=49.79 -- 0.16 s later, inside
+    a quiet stretch only 0.54 s long, because the operator pressed again at
+    50.17. A 0.6 s minimum quiet window drops that release entirely and the
+    section reports the run as clean; REL_MIN_S of 0.30 catches it, and it is
+    the ONLY release in any log on this rig that does not decay (0.368 ->
+    0.922 rad/s, tau 40 -> 50 N.m, 32.7 Hz). It also fires 0.56 s before the
+    rail guard and 1.1 s before the 167 N peak.
+
+    Returns the number of releases whose envelope did not decay.
+    """
+    if f"qd{n - 1}" not in rows[0] or "act" not in rows[0]:
+        print("\n  (no qd*/act columns -- log predates them; no release report)")
+        return 0
+    t = np.array([float(r["t"]) for r in rows])[live]
+    if t.size < 64:
+        return 0
+    dt = float(np.median(np.diff(t)))
+    if not np.isfinite(dt) or dt <= 0:
+        return 0
+    qd = np.array([[float(r[f"qd{j}"]) for j in range(n)] for r in rows])[live]
+    tau = tau[live]
+    act = np.array([r["act"] == "1" for r in rows])[live]
+    speed = np.linalg.norm(qd, axis=1)
+    tpk = np.abs(tau).max(axis=1)
+
+    fall = np.where(act[:-1] & ~act[1:])[0] + 1
+    print(f"\n  release response ({fall.size} stick releases; "
+          f"the step test -- does the motion die when you let go?)")
+    if fall.size == 0:
+        print("     (the stick was never released -- no step test in this run)")
+        return 0
+    print("     t_rel   quiet_s   f_pk Hz   |qdot| early    late   ratio"
+          "    |tau| early   late   verdict")
+
+    def env(sl, ts, lo, hi, x):
+        m = (ts >= lo) & (ts < hi)
+        return float(np.percentile(x[sl][m], 95)) if int(m.sum()) > 3 else float("nan")
+
+    grew, shown, ratios, grew_f = 0, 0, [], []
+    for i in fall:
+        j = i
+        while j < act.size and not act[j]:
+            j += 1
+        quiet_s = float(t[min(j, t.size - 1)] - t[i])
+        if quiet_s < REL_MIN_S:
+            continue
+        sl = slice(i, j)
+        ts = t[sl] - t[i]
+        e0 = env(sl, ts, *REL_EARLY, speed)
+        e1 = env(sl, ts, *REL_LATE, speed)
+        t0 = env(sl, ts, *REL_EARLY, tpk)
+        t1 = env(sl, ts, *REL_LATE, tpk)
+        if not (np.isfinite(e0) and np.isfinite(e1)):
+            continue
+        seg = qd[sl]
+        w = np.hanning(seg.shape[0])
+        f2 = np.fft.rfftfreq(seg.shape[0], dt)
+        P = np.zeros(f2.size)
+        for k in range(n):
+            x = seg[:, k]
+            P += np.abs(np.fft.rfft((x - x.mean()) * w)) ** 2
+        P[0] = 0.0
+        b = (f2 >= RING_FLOOR_HZ) & (f2 <= min(40.0, 0.45 / dt))
+        f_pk = (float(f2[int(np.argmax(np.where(b, P, 0.0)))])
+                if b.any() and P[b].max() > 0 else float("nan"))
+        ratio = e1 / e0 if e0 > 1e-9 else float("nan")
+        # The floor first: a release from an already-still arm has a ratio of
+        # noise over noise and must not be called a limit cycle.
+        if e1 < REL_FLOOR_RADPS or (np.isfinite(ratio) and ratio < REL_DECAY_FRAC):
+            verdict = "decays"
+        elif np.isfinite(ratio) and ratio >= REL_GROW_FRAC:
+            verdict = "\033[93mFLAT/GROWS\033[0m"
+            grew += 1
+            grew_f.append(f_pk)
+        else:
+            verdict = "slow"
+        ratios.append(ratio)
+        print(f"   {t[i]:8.2f}  {quiet_s:7.2f}  {f_pk:7.2f}   {e0:11.4f} "
+              f"{e1:7.4f}  {ratio:6.2f}    {t0:9.2f}  {t1:6.2f}   {verdict}")
+        shown += 1
+
+    if shown == 0:
+        print(f"     (no release held the stick quiet for {REL_MIN_S:g} s -- "
+              "let go for half a second and re-run)")
+        return 0
+    if grew:
+        print(f"     \033[93mSELF-SUSTAINING on {grew} of {shown} releases: "
+              "the motion outlives the operator, so the loop is the "
+              "source.\033[0m")
+        # Which knob depends on where the runaway sits against f_90 = 1/(4T),
+        # the frequency at which the damper's own output is a quarter cycle
+        # late and stops opposing the motion. Above it, D is literally the
+        # source and only D fixes it -- dtc_20260830_141034.csv ran away at
+        # 32.7 Hz against an f_90 of 33 Hz, at D_lin 19.1. Below it the damper
+        # is still damping and the loop is simply asking for a bandwidth its
+        # delay cannot deliver, which is an fn problem.
+        f90 = 1.0 / (4.0 * 1.5 * dt)
+        hot = [f for f in grew_f if np.isfinite(f)]
+        if hot and max(hot) > 0.7 * f90:
+            print(f"     It ran away at {max(hot):.1f} Hz against "
+                  f"f_90 = 1/(4T) = {f90:.0f} Hz, where -D*v is a quarter "
+                  f"cycle late and becomes a SOURCE. Lower D "
+                  f"(--dtc-damping-max); fn will not touch this one.")
+        else:
+            print("     Lower --dtc-fn-lin. Do NOT add damping -- a loop that "
+                  "pumps itself is not short of D, and more D is more pump.")
+    else:
+        med = float(np.nanmedian(ratios))
+        print(f"     EXCITED, not self-sustaining: every release decays "
+              f"(median envelope ratio {med:.2f} over "
+              f"{REL_LATE[0]:g}-{REL_LATE[1]:g} s). Whatever rings, rings "
+              f"because the operator is driving it.")
+        print("     So damping is the lever here, not fn -- but read the "
+              "phase in the oscillation section first, and mind the measured "
+              "ceiling (D_lin 15.08 clean, 19.1 catastrophic at 200 Hz).")
+        print("     A clean step test is necessary, not sufficient: it says "
+              "nothing about a cycle that only appears mid-drive, and it "
+              "tests only the axes you actually moved. Repeat it as a pure "
+              "rotation.")
+    return grew
+
+
+def oscillation(rows, live, W, n, railed=0, grew=0):
     """Limit-cycle report: is the arm shaking at a frequency nobody commanded?
 
     This exists because dtc_20260830_005006.csv passed every other section of
@@ -441,10 +616,35 @@ def oscillation(rows, live, W, n, railed=0):
         pk = float("nan")
     print(f"\n  qdot power above {STICK_FLOOR_HZ:g} Hz (the stick cannot go "
           f"there): {share:.1%}, peaked at {pk:.2f} Hz")
+    # ...and again above RING_FLOOR_HZ, because the 2 Hz band edge is not a
+    # wall. A SpaceMouse's spectrum does not stop at the floor, it leaks over
+    # it, so the 2-40 Hz peak lands in the FIRST BIN above the floor on any
+    # briskly-driven run -- dtc_20260830_150044.csv printed "35.0%, peaked at
+    # 2.01 Hz", which reads as "that is just the operator", while 21.5% of its
+    # motion sat at 12 Hz and the operator was watching the arm buzz. Worse,
+    # `pk > RING_FLOOR_HZ` gated the Q measurement, so the one number that can
+    # A/B a damping change was silently skipped on exactly the run that needed
+    # it. Measured across every log here the 5-40 Hz share separates cleanly
+    # where 2-40 does not: healthy runs 2.9-9.4% (including 132204, whose
+    # 2-40 share is 15.0% and whose 5-40 share is 5.4%), ringing runs 15.1%
+    # and up.
+    ring = (freq >= RING_FLOOR_HZ) & (freq <= min(40.0, 0.45 / dt))
+    ring_k = (int(np.argmax(np.where(ring, power, 0.0)))
+              if ring.any() and power[ring].max() > 0 else -1)
+    ring_share = float(power[ring].sum() / total)
+    ring_pk = float(freq[ring_k]) if ring_k >= 0 else float("nan")
+    print(f"  qdot power above {RING_FLOOR_HZ:g} Hz (nothing the operator "
+          f"does lands here): {ring_share:.1%}, peaked at {ring_pk:.2f} Hz")
+    is_ring = ring_share > RING_MIN_SHARE
+    # The peak the rest of this section reasons about: the ring's, whenever
+    # there is a ring, and the whole-band one otherwise.
+    if is_ring:
+        pk, band, k_pk = ring_pk, ring, ring_k
+    else:
+        k_pk = int(np.argmax(np.where(band, power, 0.0))) if band.any() else -1
     # Share is drive-dependent; Q is not. See peak_q.
-    if np.isfinite(pk) and pk > RING_FLOOR_HZ:
-        qf = peak_q(freq, power,
-                    int(np.argmax(np.where(band, power, 0.0))), STICK_FLOOR_HZ)
+    if np.isfinite(pk) and pk > RING_FLOOR_HZ and k_pk >= 0:
+        qf = peak_q(freq, power, k_pk, STICK_FLOOR_HZ)
         if np.isfinite(qf):
             width = pk / qf
             print(f"     peak Q {qf:.1f} (half-power width {width:.2f} Hz), "
@@ -472,7 +672,7 @@ def oscillation(rows, live, W, n, railed=0):
     # them is WHERE the power is: nothing the operator does lands above
     # RING_FLOOR_HZ, so a peak up there with a real share is the loop talking
     # to itself no matter how much of the total it is.
-    ringing = share > 0.35 or (pk > RING_FLOOR_HZ and share > RING_MIN_SHARE)
+    ringing = is_ring or share > 0.35
     if ringing:
         print("     \033[93mRINGING: most of the joint motion is at a frequency "
               "nobody commanded.\033[0m")
@@ -512,6 +712,14 @@ def oscillation(rows, live, W, n, railed=0):
                 print("     ...but the rail section above found a real limit "
                       "cycle in this run, and THAT is the fault. This peak is "
                       "a whole-run average and cannot see it. Lower D.")
+            elif grew:
+                # The release section watched the envelope after the operator
+                # let go; this branch is about to average over every quiet tick
+                # in the run, and one runaway release is 1% of that population.
+                print("     ...but the release section above found "
+                      f"{grew} release(s) whose motion did NOT decay. Believe "
+                      "that over the pooled quiet percentile: lower "
+                      "--dtc-fn-lin, do not add D.")
             elif np.isfinite(moved) and moved <= QUIET_HOLD_RADPS:
                 print(f"     EXCITED, not self-sustaining: it dies when the "
                       f"stick stops ({moved:.3f} rad/s quiet). The peak is at "
