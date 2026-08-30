@@ -128,6 +128,8 @@ from geodude_teleoperation.torque_backend import (
     DEFAULT_I_MAX,
     DEFAULT_JOINT_HOLD_KD,
     DEFAULT_JOINT_HOLD_KP,
+    DEFAULT_STICTION_ASSIST_NM,
+    DEFAULT_STICTION_MAX_NM,
     DEFAULT_KI,
     DEFAULT_KV,
     DEFAULT_RAIL_OSC_FLIPS,
@@ -962,6 +964,28 @@ def build_arg_parser():
              "Their torque shows up in the per-joint tau columns of --dtc-log "
              "like any other; stats() reports n_joint_hold")
     parser.add_argument(
+        "--dtc-stiction-assist-nm", type=float,
+        default=DEFAULT_STICTION_ASSIST_NM, metavar="NM",
+        help="--dtc-law wrench: bounded feedforward push, in the direction the "
+             "task torque already points, on a joint from "
+             "--dtc-joint-hold-joints that is commanded but not moving. Wrist "
+             "3 sat at the Lambda floor's full 1.42 N.m ceiling on three runs "
+             "and travelled 0.02-0.49 deg end to end -- breakaway there is "
+             "above anything the floor can command -- so the roll error never "
+             "closed and leaked onto the other angular blades through Lambda's "
+             "cross terms. Friction is the deficiency, so the fix is "
+             "feedforward: this moves no pole, where raising "
+             "LAMBDA_MIN_ANG_KGM2 to reach breakaway would inflate that axis's "
+             "own loop to ~15 Hz, onto this rig's structural mode. It ramps in "
+             "over 0.25 s, releases the moment the joint breaks free, and "
+             "0 disables it (default %(default)s)")
+    parser.add_argument(
+        "--dtc-stiction-max-nm", type=float, default=DEFAULT_STICTION_MAX_NM,
+        metavar="NM",
+        help="ceiling on task torque + assist for an assisted joint. This is "
+             "what keeps a friction compensator from becoming an authority: "
+             "wrist 3's own --dtc-tau-max is 30 N.m (default %(default)s)")
+    parser.add_argument(
         "--dtc-friction-comp", dest="dtc_friction_comp",
         action=argparse.BooleanOptionalAction, default=True,
         help="ask the UR for its own joint friction feedforward. The reference "
@@ -1272,6 +1296,8 @@ def main():
             joint_hold_kp=args.dtc_joint_hold_kp,
             joint_hold_kd=args.dtc_joint_hold_kd,
             joint_hold_joints=args.dtc_joint_hold_joints,
+            stiction_assist_nm=args.dtc_stiction_assist_nm,
+            stiction_max_nm=args.dtc_stiction_max_nm,
             stale_tau_s=(
                 None if args.dtc_stale_tau_ms is None
                 else args.dtc_stale_tau_ms / 1000.0),
@@ -1596,6 +1622,7 @@ def main():
                         # a typo would otherwise be invisible, because the joint
                         # it holds is one the task wrench never touches either.
                         f"jhold={st.get('n_joint_hold', 0)} "
+                        f"assist={st.get('n_stiction', 0)} "
                         # Ticks Lambda's angular eigenvalue floor clamped on.
                         # A light axis -- tool roll -- is the one the shaped law
                         # starves, because the commanded moment scales with the

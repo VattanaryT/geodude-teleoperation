@@ -159,6 +159,7 @@ def main():
     # the arm into a workstation is invisible in every percentile below.
     railed = rail_oscillation(rows, live, tau, n, meta)
     grew = release_response(rows, live, tau, n)
+    wrist_travel(rows, live, n)
     lambda_floor(rows, live)
     oscillation(rows, live, W, n, railed, grew)
     stall(rows, live, W, n)
@@ -942,10 +943,66 @@ def roll(ea, n_deg, mask):
         print("     \033[93mROLL STARVED: the angular error is mostly rotation "
               "about the tool axis, which the field pins through the tangent "
               "and Lambda scales to near nothing.\033[0m")
-        print("     Check lamfloor in the console line. If it is 0 the floor "
-              "is inert -- raise LAMBDA_MIN_ANG_KGM2; if it is high and the "
-              "roll still will not close, wrist 3 is friction-bound and the "
-              "lever is --dtc-joint-hold-kp, not a task gain.")
+        print("     Check the wrist travel line above, and lamfloor in the "
+              "console line. If lamfloor is 0 the floor is inert -- raise "
+              "LAMBDA_MIN_ANG_KGM2. If it binds and the wrist still never "
+              "moves, the command is already at the floor's ceiling and "
+              "breakaway is above it: that is --dtc-stiction-assist-nm, a "
+              "feedforward, NOT a task gain and NOT --dtc-joint-hold-kp.")
+
+
+def q95(a):
+    return q(a, 95)
+
+
+def wrist_travel(rows, live, n):
+    """Did the joint the roll needs actually move?
+
+    This is the measurement that settled where the roll error was going, and it
+    is one line: on dtc_20260830_151553/152659/154729 the last driven joint
+    travelled **0.02, 0.07 and 0.49 deg end to end** while sitting at the
+    Lambda floor's full 1.42 N.m ceiling, stalled on 99.7-100% of the ticks the
+    spring was on. So the roll was not being served slowly, it was not being
+    served at all, and every newton-metre the floor bought was spent against
+    static friction.
+
+    Two failures wear the same "roll starved" hat and the fix differs:
+
+    - the joint IS moving but slowly -- the command is under-powered, and the
+      Lambda floor (LAMBDA_MIN_ANG_KGM2) is the lever;
+    - the joint never moves at its own ceiling -- breakaway is above anything
+      the task wrench can command there, so the lever is feedforward
+      (--dtc-stiction-assist-nm). Raising the floor to reach breakaway costs
+      bandwidth on that axis by sqrt(new/old) and walks it into the 15 Hz mode.
+
+    A percentile on |qdot| cannot tell them apart; end-to-end travel can.
+    """
+    j = n - 1
+    if f"q{j}" not in rows[0]:
+        return
+    q = np.array([float(r[f"q{j}"]) for r in rows])[live]
+    qd = np.abs(np.array([float(r[f"qd{j}"]) for r in rows])[live])
+    tau = np.abs(np.array([float(r[f"tau{j}"]) for r in rows])[live])
+    act = (np.array([r["act"] == "1" for r in rows])[live]
+           if "act" in rows[0] else np.ones(q.size, bool))
+    if q.size == 0:
+        return
+    travel = float(np.degrees(q.max() - q.min()))
+    on = act
+    stalled = float((qd[on] < 0.01).mean()) if on.any() else float("nan")
+    print(f"\n  wrist travel (j{j}, the roll axis)  end-to-end "
+          f"{travel:6.2f} deg   |tau{j}| p95 {q95(tau):5.2f} max "
+          f"{tau.max():5.2f} N.m")
+    print(f"     stalled (|qdot| < 0.01) on {stalled:.1%} of spring-on ticks")
+    if travel < 1.0 and np.isfinite(stalled) and stalled > 0.9:
+        print("     \033[93mIT NEVER MOVED. Whatever the roll error is, no "
+              "part of it is being served -- and under Lambda an unservable "
+              "demand does not vanish, it leaks onto the other angular blades "
+              "through the cross terms.\033[0m")
+        print("     Read |tau| max against the floor's ceiling "
+              "(LAMBDA_MIN_ANG_KGM2 * K_ang * err_clip_rot, 1.42 N.m at the "
+              "defaults). At the ceiling and still stalled = breakaway is "
+              "above it: --dtc-stiction-assist-nm.")
 
 
 

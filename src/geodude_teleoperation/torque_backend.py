@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import math
 import pathlib
+import shlex
+import sys
 import threading
 import time
 from typing import Any, Callable, Sequence
@@ -83,6 +85,44 @@ DEFAULT_JOINT_HOLD_TAU_MAX = 2.0
 # follows the joint instead of fighting it. 0.05 N.m is ~100x the largest tau5
 # either run produced and ~2% of the 2.5 N.m the wrists carry when working.
 DEFAULT_JOINT_HOLD_YIELD_NM = 0.05
+
+# --- stiction breakaway assist ----------------------------------------------
+# The Lambda angular floor was sized so the roll axis would be *commanded* at
+# roughly UR5e wrist breakaway: tau_break/(K_ang*err_clip_rot) = 1.5/(355*0.2).
+# It delivers exactly that -- |tau5| p95 1.42 N.m, and 1.478 N.m is the largest
+# this rig has ever asked for -- and measured over three runs on 2026-08-30
+# **wrist 3 never moved**: q5 travelled 0.02, 0.07 and 0.49 deg end to end,
+# |qd5| median 0.0000 rad/s, and j5 was stalled on 99.7-100% of the ticks the
+# spring was on, including every tick at the 1.42 N.m ceiling. So breakaway
+# here is ABOVE the ceiling the floor can reach, the roll error stays open (up
+# to 25 deg p95) and, because a demand under Lambda does not vanish when it
+# cannot be served, it leaks through Lambda's cross terms onto the other two
+# angular blades as torque nobody asked for.
+#
+# The deficiency is friction, so the fix is feedforward, not a gain: raising
+# the floor to reach breakaway would take LAMBDA_MIN_ANG_KGM2 to ~0.035, which
+# inflates that axis's own loop frequency by sqrt(0.035/0.00154) = 4.8x and
+# lands a fn_ang of 3.0 right on this rig's 15 Hz structural mode. A bounded
+# push in the direction the task torque already points moves no pole at all.
+#
+# It engages only where the task wrench is asking and the joint is not moving,
+# ramps in over STICTION_RAMP_S rather than stepping, and releases the moment
+# the joint breaks free -- so the joint creeps in increments instead of
+# running away, and the closed loop on that axis is still just the task wrench.
+DEFAULT_STICTION_ASSIST_NM = 1.0
+# Hard ceiling on tau_task + assist for an assisted joint. Wrist 3's tau_max is
+# 30 N.m; this is the number that keeps a friction compensator from becoming an
+# authority. 2.5 N.m is ~1.7x the largest commanded tau5 on this rig.
+DEFAULT_STICTION_MAX_NM = 2.5
+# Below this the task is not asking for motion on that joint and there is
+# nothing to break away *to*.
+DEFAULT_STICTION_DEADBAND_NM = 0.2
+# "Not moving". The measured |qd5| on a stalled wrist 3 is 0.0000-0.0009 rad/s.
+DEFAULT_STICTION_STALL_RADPS = 0.01
+# Ramp in (and out) over this. Deliberately slow next to the 15 Hz structural
+# mode's 66 ms period, so the assist cannot excite it, and slow enough that a
+# joint that breaks free early never sees the full push.
+DEFAULT_STICTION_RAMP_S = 0.25
 
 
 def _as_vec(value, n: int, name: str) -> np.ndarray:
@@ -557,6 +597,8 @@ class DirectTorqueBackend:
         joint_hold_kd: float = DEFAULT_JOINT_HOLD_KD,
         joint_hold_joints: Sequence[int] | None = None,
         joint_hold_tau_max: float = DEFAULT_JOINT_HOLD_TAU_MAX,
+        stiction_assist_nm: float = DEFAULT_STICTION_ASSIST_NM,
+        stiction_max_nm: float = DEFAULT_STICTION_MAX_NM,
         hz: float = DEFAULT_DTC_HZ,
         hold_zero: bool = False,
         hold_at_tick: bool = True,
@@ -621,6 +663,16 @@ class DirectTorqueBackend:
         self._joint_hold_request = joint_hold_joints
         self._joint_hold_q = None
         self._n_joint_hold = 0
+        # Wrench law only, and on the same joints as the hold -- both exist for
+        # "the task wrench cannot move this joint", they just answer it
+        # differently: the hold stops a free joint drifting, the assist gets a
+        # commanded one over breakaway. See DEFAULT_STICTION_ASSIST_NM.
+        self._stiction_nm = max(0.0, float(stiction_assist_nm))
+        self._stiction_max_nm = abs(float(stiction_max_nm))
+        self._stiction_frac = None
+        self._stiction_sign = None
+        self._stiction_t = None
+        self._n_stiction = 0
         # Inertia shaping: tau = J.T @ (Lambda @ a) instead of J.T @ W.
         # Opt-in because it changes what K means (N/m -> 1/s^2) and nothing
         # here can detect a gain left over from the un-shaped law.
@@ -1323,6 +1375,85 @@ class DirectTorqueBackend:
             self._n_joint_hold += 1
         return tau
 
+    def _stiction_tau(self, tau_task):
+        """Bounded feedforward push on joints the task torque cannot break free.
+
+        See ``DEFAULT_STICTION_ASSIST_NM`` for the measurement this exists for:
+        wrist 3 sat at the Lambda floor's full 1.42 N.m ceiling and travelled
+        0.02 deg in 80 s, so the roll error never closed and the unservable
+        demand leaked onto the other angular blades through Lambda's cross
+        terms.
+
+        This is a friction compensator, not a second controller, and every
+        clause below is what keeps it one:
+
+        - **It only ever pushes the way the task is already pushing.** The sign
+          comes from ``tau_task``; it cannot choose a direction of its own, so
+          it cannot fight the field, the operator, or the hold.
+        - **It engages only on a *stalled* joint the task is *asking* to move**
+          (``DEFAULT_STICTION_DEADBAND_NM`` / ``DEFAULT_STICTION_STALL_RADPS``),
+          and releases as the joint breaks free -- so the arm creeps in
+          increments rather than accelerating, and the closed loop on that axis
+          is still just the task wrench.
+        - **It ramps** over ``DEFAULT_STICTION_RAMP_S``, an order of magnitude
+          slower than this rig's 15 Hz structural mode, so it cannot excite it.
+          It is *not* an integrator on the error: the target is a fixed push,
+          not something that grows without bound while the joint stays stuck.
+        - **The total is capped** at ``stiction_max_nm``, well under the joint's
+          own ``tau_max``.
+        - **It is forgotten on every ``law.reset()``**, the same rule as the
+          hold and the re-arm blend: a pendant stop must stop the push, not
+          queue one up.
+
+        ``--dtc-stiction-assist-nm 0`` disables it and restores the previously
+        running behavior exactly.
+        """
+        idx = self._joint_hold_idx
+        zero = np.zeros(self._n)
+        if idx.size == 0 or self._stiction_nm <= 0.0:
+            return zero
+        with self._lock:
+            qd6 = None if self._qd6 is None else self._qd6.copy()
+        if qd6 is None:
+            return zero
+        now = time.monotonic()
+        prev, self._stiction_t = self._stiction_t, now
+        # Clamped, because the first tick after a reset has no previous time
+        # and a stalled loop must not hand the ramp a whole second at once.
+        dt = 0.0 if prev is None else min(max(now - prev, 0.0),
+                                          DEFAULT_STICTION_RAMP_S)
+        if self._stiction_frac is None:
+            self._stiction_frac = np.zeros(self._n)
+            self._stiction_sign = np.zeros(self._n)
+
+        tt = np.asarray(tau_task, dtype=float).reshape(-1)
+        step = dt / DEFAULT_STICTION_RAMP_S
+        tau = zero.copy()
+        for j in idx:
+            want = (abs(tt[j]) > DEFAULT_STICTION_DEADBAND_NM
+                    and abs(qd6[j]) < DEFAULT_STICTION_STALL_RADPS)
+            if want:
+                self._stiction_frac[j] = min(1.0, self._stiction_frac[j] + step)
+                self._stiction_sign[j] = math.copysign(1.0, tt[j])
+            else:
+                self._stiction_frac[j] = max(0.0, self._stiction_frac[j] - step)
+            boost = self._stiction_frac[j] * self._stiction_nm
+            if boost <= 0.0:
+                continue
+            # Cap the *total* on the joint, not the boost, so the ceiling means
+            # what it says however much the task is already asking for.
+            room = max(0.0, self._stiction_max_nm - abs(tt[j]))
+            tau[j] = self._stiction_sign[j] * min(boost, room)
+        if np.any(np.abs(tau) > 1e-9):
+            self._n_stiction += 1
+        return tau
+
+    def _stiction_reset(self):
+        """Forget the ramp. Paired with every ``law.reset()``."""
+        self._stiction_frac = None
+        self._stiction_sign = None
+        self._stiction_t = None
+
     def _joint_hold_reset(self):
         """Forget the held angles. Paired with every ``law.reset()``.
 
@@ -1330,6 +1461,7 @@ class DirectTorqueBackend:
         it -- the same reason the velocity law's idle latch is reset there.
         """
         self._joint_hold_q = None
+        self._stiction_reset()
 
     def _compute_wrench(self):
         """One tick of the wrench law: ``tau = clip(J.T @ W, +/-tau_max)``.
@@ -1375,6 +1507,12 @@ class DirectTorqueBackend:
         # everything else and cannot smuggle torque past it. Its own cap keeps
         # it small enough that it never changes which joint rails.
         tau = tau + self._joint_hold_tau(tau)
+        # After the hold and before the clip: the assist reads the task torque
+        # (its sign is the only direction it has) and is bounded by the same
+        # tau_max as everything else. It is deliberately fed `jacobian.T @
+        # wrench` rather than the post-hold sum -- the hold is a *hold*, and a
+        # friction push aimed at it would be the two-authorities fight.
+        tau = tau + self._stiction_tau(jacobian.T @ wrench)
         clipped = np.clip(tau, -tau_max, tau_max)
         railed = np.abs(tau) > tau_max + 1e-12
         if np.any(railed):
@@ -1603,6 +1741,15 @@ class DirectTorqueBackend:
             print(f"\033[93mdtc: could not open --dtc-log ({exc}); "
                   f"running without the per-tick record\033[0m", flush=True)
             return
+        # The command line, verbatim, before the resolved gains. The gain header
+        # records what the loop RAN, which is the half that has bitten; this
+        # records what was ASKED FOR, including the flags no resolver touches
+        # and any typo in one. Between them a log needs no lab notebook.
+        try:
+            self._log_fh.write("# argv: " + " ".join(
+                shlex.quote(a) for a in sys.argv) + "\n")
+        except Exception:
+            pass
         meta = self._gain_note()
         if meta:
             # One '#' line before the header, so a run's gains travel with its
@@ -1685,6 +1832,20 @@ class DirectTorqueBackend:
                 f"{v:g}" for v in np.asarray(self._law.tau_max, dtype=float)))
         except Exception:
             pass
+        # The joint-space terms. These are not in the K/D matrices above and a
+        # run that changed only --dtc-joint-hold-kp was indistinguishable from
+        # one that did not -- which is how a kp sweep got run against a hold
+        # that DEFAULT_JOINT_HOLD_YIELD_NM had already disconnected.
+        bits.append(f"jhold_kp={self._joint_hold_kp:g}")
+        bits.append(f"jhold_kd={self._joint_hold_kd:g}")
+        bits.append(f"jhold_tau_max={self._joint_hold_tau_max:g}")
+        try:
+            bits.append("jhold_joints=" + ",".join(
+                str(int(j)) for j in self._joint_hold_idx))
+        except Exception:
+            pass
+        bits.append(f"stiction_nm={self._stiction_nm:g}")
+        bits.append(f"stiction_max_nm={self._stiction_max_nm:g}")
         if self._gain_note_extra:
             bits.append(self._gain_note_extra)
         return "  ".join(bits)
@@ -1808,6 +1969,10 @@ class DirectTorqueBackend:
             # wrist 3 it is the *only* thing there); this says whether it is
             # running at all, which a flag typo would otherwise hide.
             "n_joint_hold": self._n_joint_hold,
+            # Ticks the stiction assist pushed on. 0 with a nonzero
+            # --dtc-stiction-assist-nm means no assisted joint was ever both
+            # commanded and stalled, which is the healthy reading.
+            "n_stiction": self._n_stiction,
             # Wrench law only. |W_lin| is the commanded lateral force in N, and
             # it is the number to read against tau_peak: a healthy slide is a
             # sane |W_lin| with tau_peak well under tau_max. n_tau_clipped

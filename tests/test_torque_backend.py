@@ -7,6 +7,7 @@ staleness bound and the safety gate are exercised here without a robot.
 from __future__ import annotations
 
 import pathlib
+import time
 import unittest
 
 import numpy as np
@@ -1460,3 +1461,95 @@ def test_hold_zero_never_cuts_out(tmp_path):
     for k in range(50):
         backend.tick(now=1.0 + k * 0.005)
     assert backend.stats()["n_rail_osc"] == 0
+
+
+# --- stiction breakaway assist ----------------------------------------------
+# Three runs on 2026-08-30 sat wrist 3 at the Lambda floor's full 1.42 N.m
+# ceiling and moved it 0.02-0.49 deg end to end -- stalled on 99.7-100% of the
+# spring-on ticks -- so the roll error stayed open and leaked onto the other
+# angular blades through Lambda's cross terms. The assist is the feedforward
+# answer to that, and what makes it a friction compensator rather than a second
+# controller is entirely in these conditions.
+
+
+def _assist(backend, tau_task, qd5=0.0, ticks=60, sleep_s=0.005):
+    """Run the assist to steady state, since it ramps rather than stepping."""
+    qd = np.zeros(backend.n_joints)
+    qd[-1] = qd5
+    out = []
+    for _ in range(ticks):
+        backend._qd6 = qd.copy()
+        out.append(backend._stiction_tau(tau_task)[-1])
+        time.sleep(sleep_s)
+    return out
+
+
+def _task_tau(backend, nm):
+    tau = np.zeros(backend.n_joints)
+    tau[-1] = nm
+    return tau
+
+
+def test_assist_ramps_in_on_a_stalled_commanded_joint():
+    backend, _s, _h = _backend()
+    out = _assist(backend, _task_tau(backend, 1.42))
+    assert out[0] == 0.0, "must not step in on the first tick"
+    assert all(b >= a - 1e-12 for a, b in zip(out, out[1:])), "must be monotone"
+    # Capped by the room under stiction_max_nm (2.5 - 1.42 = 1.08), not by it.
+    assert 0.9 < out[-1] <= 1.0 + 1e-9
+
+
+def test_assist_releases_once_the_joint_breaks_free():
+    """The whole safety story: it pushes a stalled joint, never a moving one."""
+    backend, _s, _h = _backend()
+    _assist(backend, _task_tau(backend, 1.42))
+    out = _assist(backend, _task_tau(backend, 1.42), qd5=0.5)
+    assert out[-1] == 0.0
+
+
+def test_assist_takes_its_direction_from_the_task_torque():
+    """It has no direction of its own, so it cannot fight the field."""
+    backend, _s, _h = _backend()
+    assert _assist(backend, _task_tau(backend, -1.42))[-1] < 0.0
+
+
+def test_assist_caps_the_total_not_its_own_share():
+    backend, _s, _h = _backend()
+    out = _assist(backend, _task_tau(backend, 2.4))
+    assert abs(2.4 + out[-1]) <= 2.5 + 1e-9
+
+
+def test_assist_stays_out_when_the_task_is_not_asking():
+    """Below the deadband there is nothing to break away to."""
+    backend, _s, _h = _backend()
+    assert _assist(backend, _task_tau(backend, 0.1))[-1] == 0.0
+
+
+def test_assist_off_restores_the_previous_behavior_exactly():
+    backend, _s, _h = _backend(stiction_assist_nm=0.0)
+    assert _assist(backend, _task_tau(backend, 1.42))[-1] == 0.0
+
+
+def test_assist_is_forgotten_on_a_reset():
+    """A pendant stop must stop the push, not queue one up."""
+    backend, _s, _h = _backend()
+    assert _assist(backend, _task_tau(backend, 1.42))[-1] > 0.0
+    backend._joint_hold_reset()
+    assert backend._stiction_tau(_task_tau(backend, 1.42))[-1] == 0.0
+
+
+def test_log_header_records_the_command_line_and_the_joint_space_gains(tmp_path):
+    """The header is the lab notebook: what was asked for AND what ran.
+
+    A --dtc-joint-hold-kp sweep was run against a hold that
+    DEFAULT_JOINT_HOLD_YIELD_NM had already disconnected, and nothing in the
+    CSV distinguished those runs from each other.
+    """
+    log = tmp_path / "dtc.csv"
+    backend, _s, _h = _backend(log_path=log, joint_hold_kp=4.0)
+    backend._log_open()
+    backend._log_close()
+    head = log.read_text().splitlines()
+    assert head[0].startswith("# argv: ")
+    assert "jhold_kp=4" in head[1]
+    assert "stiction_nm=" in head[1]

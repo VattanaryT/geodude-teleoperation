@@ -82,3 +82,64 @@ class PeakQTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReleaseResponseTest(unittest.TestCase):
+    """The step test, run against the runs it was built from.
+
+    Synthetic data cannot show that this discriminates, because what it has to
+    discriminate is a real rig. These two logs are in the repo: 141034 is the
+    run that swung the arm into the workstation and 154729 is an ordinary
+    tuning run, and the section must call exactly one of them self-sustaining.
+    """
+
+    LOGS = pathlib.Path(__file__).resolve().parents[1] / "speedj_logs"
+
+    def _grew(self, name):
+        mod = _load()
+        rows, _meta = mod._read(str(self.LOGS / name))
+        phase = np.array([r["phase"] for r in rows])
+        live = phase == "live"
+        n = sum(1 for k in rows[0] if k.startswith("tau"))
+        tau = np.array([[float(r[f"tau{i}"]) for i in range(n)] for r in rows])
+        return mod.release_response(rows, live, tau, n)
+
+    def test_the_workstation_run_has_a_release_that_does_not_decay(self):
+        """t=49.63: 0.368 -> 0.922 rad/s with tau riding 40 -> 50 N.m.
+
+        0.16 s before the event, 0.56 s before the rail guard, and 1.1 s
+        before the 167 N peak.
+        """
+        self.assertGreaterEqual(self._grew("dtc_20260830_141034.csv"), 1)
+
+    def test_an_ordinary_tuning_run_decays_on_every_release(self):
+        self.assertEqual(self._grew("dtc_20260830_154729.csv"), 0)
+
+    def test_a_run_that_rings_while_driven_still_decays_when_released(self):
+        """19.4% of the qdot power at 15.1 Hz, and every release decays.
+
+        Excited, not self-sustaining -- the distinction the whole section
+        exists for, and the one that decides between D and fn.
+        """
+        self.assertEqual(self._grew("dtc_20260830_151553.csv"), 0)
+
+
+class WristTravelTest(unittest.TestCase):
+    """The roll axis moved 0.02-0.49 deg while sitting at its torque ceiling."""
+
+    LOGS = pathlib.Path(__file__).resolve().parents[1] / "speedj_logs"
+
+    def test_it_reports_a_wrist_that_never_moved(self):
+        mod = _load()
+        rows, _meta = mod._read(str(self.LOGS / "dtc_20260830_154729.csv"))
+        live = np.array([r["phase"] for r in rows]) == "live"
+        j = 5
+        q = np.array([float(r[f"q{j}"]) for r in rows])[live]
+        self.assertLess(float(np.degrees(q.max() - q.min())), 1.0)
+        tau = np.abs(np.array([float(r[f"tau{j}"]) for r in rows])[live])
+        # At the Lambda floor's ceiling: 0.02 * 355.3 * 0.2 = 1.42 N.m.
+        self.assertGreater(tau.max(), 1.4)
+
+
+if __name__ == "__main__":
+    unittest.main()
