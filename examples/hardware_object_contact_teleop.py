@@ -596,10 +596,11 @@ def build_arg_parser():
              "max(4/--dtc-hz, 40 ms).")
     parser.add_argument(
         "--dtc-log", default="auto", metavar="PATH",
-        help="per-tick CSV of the dtc seam (phase, safety mode, wrench, tau, q, "
-             "qdot, per-joint clip flags). 'auto' writes next to the speedj "
-             "logs, 'none' disables. Streamed to disk, so a protective-stopped "
-             "run keeps the record that explains it.")
+        help="per-tick CSV of the dtc seam (phase, safety mode, wrench, "
+             "spacemouse raw twist sm0..sm5 = [ang, lin], tau, q, qdot, "
+             "per-joint clip flags). 'auto' writes next to the speedj logs, "
+             "'none' disables. Streamed to disk, so a protective-stopped run "
+             "keeps the record that explains it.")
     parser.add_argument(
         "--dtc-payload-mass", type=float, default=None,
         help="override the pendant's installation payload for dtc (kg). Default "
@@ -1323,11 +1324,14 @@ def main():
 
     def on_twist(twist):
         lin = np.asarray(twist.get_linear(), dtype=float).reshape(3)
+        ang = np.asarray(twist.get_angular(), dtype=float).reshape(3)
         now = time.monotonic()
         stick["t"] = now
         stick["lin"] = lin
         stick["n"] = int(stick["n"]) + 1
         approach_controller.set_stick_linear(lin)
+        # Full Twist even when field-follow drops angular / contact zeros Z.
+        approach_controller.set_raw_twist(np.concatenate([ang, lin]))
         if float(np.linalg.norm(lin)) > 1e-12:
             stick["t_nz"] = now
             stick["nz"] = int(stick["nz"]) + 1

@@ -1293,6 +1293,8 @@ class DirectTorqueBackend:
         n = self._n
         cols = ["t", "dt_ms", "phase", "safety"]
         cols += [f"w{i}" for i in range(6)]
+        # SpaceMouse Twist blade order [ang(3), lin(3)]; see controller.raw_twist.
+        cols += [f"sm{i}" for i in range(6)]
         cols += [f"tau{i}" for i in range(n)]
         cols += [f"q{i}" for i in range(n)]
         cols += [f"qd{i}" for i in range(n)]
@@ -1309,6 +1311,16 @@ class DirectTorqueBackend:
             except Exception:
                 pass
 
+    def _raw_twist_for_log(self):
+        """Latest spacemouse Twist from the controller, or zeros if unset."""
+        ctrl = self._controller
+        if ctrl is None:
+            return np.zeros(6)
+        tw = getattr(ctrl, "raw_twist", None)
+        if tw is None:
+            return np.zeros(6)
+        return np.asarray(tw, dtype=float).reshape(-1)[:6]
+
     def _log_row(self, now, dt, phase, safety, tau, q, qd) -> None:
         fh = self._log_fh
         if fh is None:
@@ -1321,9 +1333,13 @@ class DirectTorqueBackend:
         q = zeros if q is None else np.asarray(q, dtype=float).reshape(-1)
         qd = zeros if qd is None else np.asarray(qd, dtype=float).reshape(-1)
         clip = np.abs(tau) >= self._law.tau_max - 1e-9
+        sm = self._raw_twist_for_log()
+        if sm.size < 6:
+            sm = np.pad(sm, (0, 6 - sm.size))
         fields = [f"{now - self._log_t0:.4f}",
                   "" if dt is None else f"{1e3 * dt:.2f}", phase, safety]
         fields += [f"{v:.4f}" for v in self._last_wrench]
+        fields += [f"{v:.5f}" for v in sm[:6]]
         fields += [f"{v:.4f}" for v in tau]
         fields += [f"{v:.5f}" for v in q[:n]]
         fields += [f"{v:.5f}" for v in qd[:n]]

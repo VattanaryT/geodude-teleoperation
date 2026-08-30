@@ -986,11 +986,30 @@ def test_the_log_records_one_row_per_tick_with_the_phase(tmp_path):
     rows = path.read_text().strip().splitlines()
     header = rows[0].split(",")
     assert header[:4] == ["t", "dt_ms", "phase", "safety"]
+    assert header[4:10] == [f"w{i}" for i in range(6)]
+    assert header[10:16] == [f"sm{i}" for i in range(6)]
     assert len(rows) == 3
     assert rows[1].split(",")[2] == "live"
     # dt is blank on the first row (no previous tick) and measured after.
     assert rows[1].split(",")[1] == ""
     assert float(rows[2].split(",")[1]) == pytest.approx(8.0, abs=0.1)
+
+
+def test_the_log_records_spacemouse_raw_twist(tmp_path):
+    """sm0..sm5 are the latest SpaceMouse Twist [ang(3), lin(3)]."""
+    path = tmp_path / "dtc.csv"
+    ctrl = FakeWrenchController([0.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+    ctrl.raw_twist = np.array([0.1, -0.2, 0.3, 0.001, -0.002, 0.003])
+    backend, _s, _h = _wrench_backend(ctrl, log_path=str(path))
+    backend.set_controller(ctrl)
+    backend._log_open()
+    backend.tick(now=1.0)
+    backend._log_close()
+    header = path.read_text().strip().splitlines()[0].split(",")
+    row = path.read_text().strip().splitlines()[1].split(",")
+    sm_idx = [header.index(f"sm{i}") for i in range(6)]
+    sm = [float(row[i]) for i in sm_idx]
+    assert sm == pytest.approx([0.1, -0.2, 0.3, 0.001, -0.002, 0.003], abs=1e-5)
 
 
 def test_the_log_says_when_the_tick_was_gated_or_held_at_zero(tmp_path):

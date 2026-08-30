@@ -246,6 +246,9 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         self._slide_slew_t = None
         self._command_trace = None
         self._stick_linear = np.zeros(3)
+        # Latest SpaceMouse Twist blade order [angular(3), linear(3)], for the
+        # dtc per-tick CSV. Independent of whether field-follow drops angular.
+        self._raw_twist = np.zeros(6)
         self._max_qddot = float(max_qddot)
         self._qdot_cmd = None
         self._qdot_des = None
@@ -293,6 +296,15 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         ``compute_control_command``; the wrench law is traced from the backend,
         which is outside this class and needs a public accessor."""
         return np.array(self._stick_linear, copy=True)
+
+    def set_raw_twist(self, twist):
+        """Latest SpaceMouse Twist [ang(3), lin(3)]. Log only; does not drive."""
+        self._raw_twist = np.asarray(twist, dtype=float).reshape(6).copy()
+
+    @property
+    def raw_twist(self):
+        """Read side of ``set_raw_twist``, for the dtc per-tick CSV."""
+        return np.array(self._raw_twist, copy=True)
 
     def set_input_active(self, active: bool) -> None:
         self._input_active = bool(active)
