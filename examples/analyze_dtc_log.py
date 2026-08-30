@@ -165,6 +165,51 @@ def lambda_floor(rows, live):
               "raising it would change nothing.")
 
 
+def peak_q(freq, power, pk_idx, floor_hz):
+    """Half-power Q of the spectral line at ``pk_idx``, or nan.
+
+    Band share cannot A/B a damping change and has now proved it: at an
+    identical D_lin = 12 and fn_lin = 4.0, dtc_20260830_134133.csv read 22.7%
+    of the qdot power above 2 Hz and dtc_20260830_135527.csv read 11.8%. The
+    difference is how hard the operator drove, because a *share* divides the
+    ring by the total motion and the operator owns the denominator.
+
+    A mode's Q does not: it is the width of the resonance, so it measures how
+    damped the mode is rather than how hard it was hit. `Q = f_pk / df_3dB`
+    and `zeta_mode ~= 1/(2Q)`, so more real damping at 15 Hz has to show up as
+    a lower Q whether or not the run happened to be a busy one. That is the
+    number to put beside a --dtc-damping-max change.
+
+    Returns nan when the line does not fall to half power inside the band --
+    a shoulder rather than a peak, which is not a resonance to measure.
+    """
+    if pk_idx <= 0 or pk_idx >= power.size - 1:
+        return float("nan")
+    half = power[pk_idx] / 2.0
+    lo = pk_idx
+    while lo > 0 and power[lo] > half and freq[lo] > floor_hz:
+        lo -= 1
+    hi = pk_idx
+    while hi < power.size - 1 and power[hi] > half:
+        hi += 1
+    if power[lo] > half or power[hi] > half:
+        return float("nan")
+
+    def _cross(i0, i1):
+        # Linear interpolation onto the half-power level between two bins.
+        p0, p1 = power[i0], power[i1]
+        if p1 == p0:
+            return freq[i1]
+        return freq[i0] + (freq[i1] - freq[i0]) * (half - p0) / (p1 - p0)
+
+    f_lo = _cross(lo, lo + 1)
+    f_hi = _cross(hi, hi - 1)
+    width = f_hi - f_lo
+    if not np.isfinite(width) or width <= 0:
+        return float("nan")
+    return float(freq[pk_idx] / width)
+
+
 def oscillation(rows, live, W, n):
     """Limit-cycle report: is the arm shaking at a frequency nobody commanded?
 
@@ -284,6 +329,26 @@ def oscillation(rows, live, W, n):
         pk = float("nan")
     print(f"\n  qdot power above {STICK_FLOOR_HZ:g} Hz (the stick cannot go "
           f"there): {share:.1%}, peaked at {pk:.2f} Hz")
+    # Share is drive-dependent; Q is not. See peak_q.
+    if np.isfinite(pk) and pk > RING_FLOOR_HZ:
+        qf = peak_q(freq, power,
+                    int(np.argmax(np.where(band, power, 0.0))), STICK_FLOOR_HZ)
+        if np.isfinite(qf):
+            width = pk / qf
+            print(f"     peak Q {qf:.1f} (half-power width {width:.2f} Hz), "
+                  f"so the mode's own zeta is ~{1.0 / (2.0 * qf):.3f}. "
+                  f"A/B a damping change on THIS, not on the share above: at "
+                  f"an identical D_lin the share ran 22.7% and 11.8% on two "
+                  f"runs, because the operator owns its denominator.")
+            # A Hann window's own main lobe is 1.44/T wide at half power, so a
+            # line narrower than that is measuring the record length, not the
+            # mode. Say so rather than quoting a Q the run cannot support.
+            res = 1.44 / (t.size * dt)
+            if width < 2.0 * res:
+                print(f"     ...but {width:.2f} Hz is within 2x the window's "
+                      f"own {res:.2f} Hz resolution over {t.size * dt:.0f} s, "
+                      f"so read that Q as a LOWER bound. A longer run "
+                      f"separates them.")
     # Share alone is the wrong discriminator and it has now missed twice, in
     # both directions. A share threshold cannot separate "the operator drove
     # briskly" from "the arm has a line in it": dtc_20260830_132204.csv is
