@@ -1083,3 +1083,104 @@ def test_no_log_path_costs_nothing(tmp_path):
     backend.tick(now=1.0)
     assert backend._log_fh is None
     assert not list(tmp_path.iterdir())
+
+
+# --- the joints tau = J.T @ W structurally cannot reach ---------------------
+
+
+class _Ctrl:
+    """Just enough controller for _joint_hold_tau: the input_active gate."""
+
+    def __init__(self, active=False):
+        self.input_active = active
+
+
+def _hold_backend(active=False, q=None, **kw):
+    backend, state, _h = _backend(**kw)
+    state.q = np.zeros(6) if q is None else np.asarray(q, dtype=float)
+    backend.tick(1.0)
+    backend._controller = _Ctrl(active)
+    return backend, state
+
+
+def test_joint_hold_defaults_to_the_last_driven_joint():
+    backend, _s, _h = _backend()
+    assert backend._joint_hold_idx.tolist() == [5]
+
+
+def test_joint_hold_is_silent_while_the_stick_is_quiet():
+    """Idle re-snaps the target onto live, so the spring has nothing to say.
+
+    Same discipline as _maybe_hold: idle is when "hold here" is a true
+    statement, so it can never wind up against a slow commanded turn.
+    """
+    backend, state = _hold_backend(active=False, q=np.full(6, 0.3))
+    assert np.allclose(backend._joint_hold_tau(np.zeros(6)), 0.0)
+
+
+def test_joint_hold_opposes_drift_once_the_stick_is_live():
+    """The failure this exists for: wrist 3 back-driving with tau = 0."""
+    backend, state = _hold_backend(active=False, q=np.zeros(6))
+    backend._joint_hold_tau(np.zeros(6))          # idle: latch the target at 0
+    backend._controller.input_active = True
+    state.q = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.2])
+    backend.tick(1.0)
+    tau = backend._joint_hold_tau(np.zeros(6))
+    assert tau[5] < 0.0, "must push back toward the held angle"
+    assert np.allclose(tau[:5], 0.0), "no other joint may be touched"
+
+
+def test_joint_hold_yields_where_the_wrench_owns_the_joint():
+    """The orthogonality that makes wrist 3 unreachable is a property of the
+    current pose and field, not a theorem. If the wrench does command that
+    joint, the hold must get out of the way rather than fight it."""
+    backend, state = _hold_backend(active=False, q=np.zeros(6))
+    backend._joint_hold_tau(np.zeros(6))
+    backend._controller.input_active = True
+    state.q = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.2])
+    backend.tick(1.0)
+    owned = np.zeros(6)
+    owned[5] = 5.0                                 # the task wrench wants it
+    assert np.allclose(backend._joint_hold_tau(owned), 0.0)
+
+
+def test_joint_hold_never_exceeds_its_own_cap():
+    backend, state = _hold_backend(active=False, q=np.zeros(6))
+    backend._joint_hold_tau(np.zeros(6))
+    backend._controller.input_active = True
+    state.q = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 100.0])
+    backend.tick(1.0)
+    tau = backend._joint_hold_tau(np.zeros(6))
+    assert abs(tau[5]) <= backend._joint_hold_tau_max + 1e-9
+
+
+def test_joint_hold_damps_with_no_target_at_all():
+    """kp=0 leaves only the damper, which needs no target and so can never
+    drive the arm anywhere. That is the reduction to the previous behavior."""
+    backend, state = _hold_backend(active=True, q=np.zeros(6),
+                                   joint_hold_kp=0.0)
+    state.qdot = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.5])
+    backend.tick(1.0)
+    tau = backend._joint_hold_tau(np.zeros(6))
+    assert tau[5] < 0.0
+    assert np.allclose(tau[:5], 0.0)
+
+
+def test_joint_hold_disabled_by_empty_joint_list():
+    backend, state = _hold_backend(active=True, q=np.full(6, 0.4),
+                                   joint_hold_joints=[])
+    assert np.allclose(backend._joint_hold_tau(np.zeros(6)), 0.0)
+
+
+def test_joint_hold_forgets_its_target_on_a_safety_reset():
+    """A pendant stop must not queue up a lunge back to a pre-stop angle."""
+    backend, state = _hold_backend(active=False, q=np.zeros(6))
+    backend._joint_hold_tau(np.zeros(6))
+    assert backend._joint_hold_q is not None
+    backend._joint_hold_reset()
+    assert backend._joint_hold_q is None
+
+
+def test_joint_hold_rejects_a_slot_outside_the_control_group():
+    with pytest.raises(ValueError, match="outside"):
+        _backend(joint_hold_joints=[9])

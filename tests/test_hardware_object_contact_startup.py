@@ -240,10 +240,17 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         self.assertTrue(args.dtc_lambda)
         self.assertTrue(args.dtc_friction_comp)
         self.assertAlmostEqual(args.dtc_fn_lin, 3.0)
-        self.assertAlmostEqual(args.dtc_fn_ang, 0.3)
+        # 0.3 put K_ang 100x under K_lin, so the angular command sat pinned at
+        # err_clip_rot on every tick and tool Z never reached the field normal
+        # (11.7 deg median, 38 at p95 on dtc_20260829_233332.csv). The re-arm
+        # step it was detuned for has its own fix in --rearm-slerp-s.
+        self.assertAlmostEqual(args.dtc_fn_ang, 1.5)
         self.assertAlmostEqual(args.dtc_err_clip_lin, 0.05)
         self.assertAlmostEqual(args.max_lead_m, 0.05)
-        self.assertEqual(list(args.dtc_tau_max), [50.0, 50.0, 50.0, 1.0, 1.0, 30.0])
+        # j3/j4 at 1.0 was below UR5e wrist breakaway: they clipped on 32.9%
+        # and 45.3% of ticks, so the two joints that carry a width traverse's
+        # rotation could not turn at all. 6.0 cleared it (1.0% / 0.1%).
+        self.assertEqual(list(args.dtc_tau_max), [50.0, 50.0, 50.0, 6.0, 6.0, 30.0])
         self.assertAlmostEqual(args.align_duration, 4.0)
 
     def test_speedj_backend_is_still_reachable(self):
@@ -607,7 +614,7 @@ class WrenchLawWiringTest(unittest.TestCase):
         self.assertAlmostEqual(kw["k_ang"], 50.0)
         self.assertTrue(kw["use_lambda"])
         self.assertAlmostEqual(kw["fn_lin"], 3.0)
-        self.assertAlmostEqual(kw["fn_ang"], 0.3)
+        self.assertAlmostEqual(kw["fn_ang"], 1.5)
         self.assertAlmostEqual(kw["err_clip_lin"], 0.05)
         # Split, not one number: the formula's assumed M differs by ~60x
         # between the blades, so one zeta cannot be right for both.

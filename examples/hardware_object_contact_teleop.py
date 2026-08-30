@@ -125,6 +125,8 @@ from geodude_teleoperation.direct_torque import print_dtc_rate_verification
 from geodude_teleoperation.torque_backend import (
     DEFAULT_DTC_HZ,
     DEFAULT_I_MAX,
+    DEFAULT_JOINT_HOLD_KD,
+    DEFAULT_JOINT_HOLD_KP,
     DEFAULT_KI,
     DEFAULT_KV,
     DirectTorqueBackend,
@@ -142,9 +144,17 @@ DEFAULT_VENTION_HEIGHT = 0.51
 # is the velocity law's (30/30/30/10/10/10) and stays where it is. Under the
 # wrench law the shoulders have to make real lateral newtons through J.T while
 # the wrists must not -- a railed wrist is the fault that ended in
-# `C283A2 wrist 1a, robot is moving when in stop mode`, so j3/j4 are pinned at
-# 1 N.m and only j5 (tool roll, which carries the chamfer) gets 30.
-WRENCH_TAU_MAX = (50.0, 50.0, 50.0, 1.0, 1.0, 30.0)
+# `C283A2 wrist 1a, robot is moving when in stop mode`.
+#
+# j3/j4 were pinned at 1.0 N.m for that reason and it was too low to move them:
+# on dtc_20260829_232839.csv (bare defaults) they clipped on **32.9% and 45.3%**
+# of ticks, which is below UR5e wrist breakaway -- the two joints that carry a
+# width traverse's rotation could not turn at all, so the field's orientation
+# was never reached and the linear blade shoved the misaligned tool instead.
+# 6.0 N.m cleared it (dtc_20260829_233332.csv: 1.0% and 0.1%) without any wrist
+# rail. The C283A2 fault it was guarding against was a *publish-side tau chop*,
+# fixed separately in the streamer's decay and --dtc-stale-tau-ms.
+WRENCH_TAU_MAX = (50.0, 50.0, 50.0, 6.0, 6.0, 30.0)
 
 STICK_LINEAR_SCALE = 0.0015
 STICK_ANGULAR_SCALE = 0.05
@@ -586,18 +596,58 @@ def build_arg_parser():
              "loop holds ~124 Hz and limit-cycled at 5.9 Hz when omega_n was "
              "7.1 Hz (default %(default)s)")
     parser.add_argument(
-        "--dtc-fn-ang", type=float, default=0.3, metavar="HZ",
+        "--dtc-fn-ang", type=float, default=1.5, metavar="HZ",
         help="--dtc-lambda: angular natural frequency (Hz). Lambda already "
              "carries the two blades' different apparent M, so in principle "
-             "the same number as the linear one is correct -- but measured on "
-             "this rig the angular blade is the one that rails the wrists on a "
-             "re-arm (|W_ang| 4.45 N.m against 0.07 on the good run), so it is "
-             "detuned an order of magnitude below the linear one "
+             "the same number as the linear one is correct. It was detuned to "
+             "0.3 because the angular blade railed the wrists on a re-arm "
+             "(|W_ang| 4.45 N.m against 0.07 on the good run) -- but that was a "
+             "*step*, and it now has its own fix in --rearm-slerp-s, so "
+             "detuning the steady-state loop 100x to suppress a transient was "
+             "the wrong lever. At 0.3 the angular command was pinned at its "
+             "clip on every tick: K_ang = (2*pi*0.3)^2 = 3.55 1/s^2 against "
+             "K_lin = 355, so 0.2 rad x 3.55 = 0.71 rad/s^2 needs ~1.4 s to "
+             "close the 0.66 rad of error measured at p95 while the stick moves "
+             "the carrot in tens of ms. Measured consequence on "
+             "dtc_20260829_233332.csv: tool Z sat 11.7 deg off the field normal "
+             "at the median and 38 deg at p95, and the 30-99 N linear blade "
+             "then dug a misaligned tool into the surface instead of sliding "
+             "it. Sweep this before anything else, and "
+             "stop raising it when |W_ang| rings or dt_max_ms climbs "
              "(default %(default)s)")
     parser.add_argument(
         "--dtc-err-clip-rot", type=float, default=0.2, metavar="RAD",
         help="--dtc-law wrench: angular pose error clip (rad) "
              "(default %(default)s)")
+    parser.add_argument(
+        "--dtc-joint-hold-kp", type=float, default=DEFAULT_JOINT_HOLD_KP,
+        metavar="NM_PER_RAD",
+        help="--dtc-law wrench: joint-space spring on the joints tau = J.T @ W "
+             "structurally cannot reach -- in practice wrist 3. Its jacobian "
+             "column is pure tool-Z angular (the TCP is on that axis: at "
+             "|W_lin| = 98.8 N the measured |tau5| was 4e-4 N.m, a moment arm "
+             "under 4 um) and the field constrains only the *direction* of tool "
+             "Z, never the roll about it -- so the wrench is orthogonal to that "
+             "column and tau5 was 0 on all 3056 ticks of "
+             "dtc_20260829_233332.csv and all 3545 of the run before it. Under "
+             "speedJ the UR position-servoed that joint; under torque nothing "
+             "does and it is held by friction alone. The target follows the "
+             "live angle while the stick is quiet and wherever the wrench does "
+             "own the joint, so this cannot fight a commanded roll. 0 leaves "
+             "only the damper (default %(default)s)")
+    parser.add_argument(
+        "--dtc-joint-hold-kd", type=float, default=DEFAULT_JOINT_HOLD_KD,
+        metavar="NM_PER_RADPS",
+        help="damping half of --dtc-joint-hold-kp. Needs no target, so it can "
+             "never drive the arm anywhere -- it only stops a free joint "
+             "running away (default %(default)s)")
+    parser.add_argument(
+        "--dtc-joint-hold-joints", type=int, nargs="*", default=None,
+        metavar="J",
+        help="control-group slots --dtc-joint-hold-kp/-kd act on "
+             "(default: the last driven joint, i.e. wrist 3). Empty disables. "
+             "Their torque shows up in the per-joint tau columns of --dtc-log "
+             "like any other; stats() reports n_joint_hold")
     parser.add_argument(
         "--dtc-friction-comp", dest="dtc_friction_comp",
         action=argparse.BooleanOptionalAction, default=True,
@@ -906,6 +956,9 @@ def main():
             use_lambda=args.dtc_lambda,
             hz=args.dtc_hz, hold_zero=args.dtc_hold_zero,
             hold_at_tick=args.dtc_hold_at_tick,
+            joint_hold_kp=args.dtc_joint_hold_kp,
+            joint_hold_kd=args.dtc_joint_hold_kd,
+            joint_hold_joints=args.dtc_joint_hold_joints,
             stale_tau_s=(
                 None if args.dtc_stale_tau_ms is None
                 else args.dtc_stale_tau_ms / 1000.0),
@@ -1216,7 +1269,12 @@ def main():
                         f"dtmax={st.get('dt_max_ms', 0.0):.0f}ms "
                         f"pub_stale={pub.get('n_stale', 0)}"
                         f"/{pub.get('n_zeroed', 0)}float "
-                        f"read_stale={st.get('n_stale', 0)}")
+                        f"read_stale={st.get('n_stale', 0)} "
+                        # Ticks the joint-space hold contributed anything on.
+                        # Stuck at 0 means the flag never reached the backend --
+                        # a typo would otherwise be invisible, because the joint
+                        # it holds is one the task wrench never touches either.
+                        f"jhold={st.get('n_joint_hold', 0)}")
                 else:
                     actuation = (
                         f"tau_peak={st.get('tau_peak', 0.0):.2f}Nm "

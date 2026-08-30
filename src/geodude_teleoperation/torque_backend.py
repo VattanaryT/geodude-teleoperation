@@ -59,6 +59,30 @@ DEFAULT_KP_HOLD = (200.0, 200.0, 200.0, 60.0, 60.0, 60.0)
 DEFAULT_KI = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 DEFAULT_I_MAX = (8.0, 8.0, 8.0, 3.0, 3.0, 3.0)
 
+# --- the joints tau = J.T @ W structurally cannot reach ---------------------
+#
+# Wrist 3's jacobian column is pure tool-Z angular: the TCP sits on that axis,
+# and the measurement says so far better than the CAD does -- on
+# dtc_20260829_233332.csv, |W_lin| reached 98.8 N while |tau5| never exceeded
+# 4e-4 N.m, a moment arm under 4 um. The orientation field constrains only the
+# *direction* of tool Z, never the roll about it, so the pose spring's wrench is
+# orthogonal to that column and tau5 was 0 on all 3056 ticks of that run, and on
+# all 3545 of the one before it. q5 moved 0.004 deg end to end.
+#
+# Under speedJ that joint was position-servoed by the UR. Under torque it is a
+# free, gravity-compensated joint held by nothing but its own friction -- which
+# held on those two runs and is not a control law. This PD is the hold the task
+# wrench cannot supply, and it is deliberately small: it shapes a joint nothing
+# else is asking for, and must never out-argue a roll the field does command.
+DEFAULT_JOINT_HOLD_KP = 2.0     # N.m per rad
+DEFAULT_JOINT_HOLD_KD = 0.1     # N.m per rad/s
+# Its own cap, well under any tau_max, so this can never be the term that rails.
+DEFAULT_JOINT_HOLD_TAU_MAX = 2.0
+# The task wrench is considered to own a joint above this, and the hold target
+# follows the joint instead of fighting it. 0.05 N.m is ~100x the largest tau5
+# either run produced and ~2% of the 2.5 N.m the wrists carry when working.
+DEFAULT_JOINT_HOLD_YIELD_NM = 0.05
+
 
 def _as_vec(value, n: int, name: str) -> np.ndarray:
     arr = np.asarray(value, dtype=float).reshape(-1)
@@ -399,6 +423,10 @@ class DirectTorqueBackend:
         i_max=DEFAULT_I_MAX,
         law: "JointVelocityTorqueLaw | None" = None,
         law_kind: str = "velocity",
+        joint_hold_kp: float = DEFAULT_JOINT_HOLD_KP,
+        joint_hold_kd: float = DEFAULT_JOINT_HOLD_KD,
+        joint_hold_joints: Sequence[int] | None = None,
+        joint_hold_tau_max: float = DEFAULT_JOINT_HOLD_TAU_MAX,
         hz: float = DEFAULT_DTC_HZ,
         hold_zero: bool = False,
         hold_at_tick: bool = True,
@@ -445,6 +473,15 @@ class DirectTorqueBackend:
         # 109.5 the damping ratio asks for. False restores the old behavior.
         self._hold_at_tick = bool(hold_at_tick)
         self._friction_comp = bool(friction_comp)
+        # Wrench law only. Joint-space PD on the joints tau = J.T @ W cannot
+        # reach -- see DEFAULT_JOINT_HOLD_KP. The joint list is resolved after
+        # the control group is sized, because the default is "the last one".
+        self._joint_hold_kp = max(0.0, float(joint_hold_kp))
+        self._joint_hold_kd = max(0.0, float(joint_hold_kd))
+        self._joint_hold_tau_max = abs(float(joint_hold_tau_max))
+        self._joint_hold_request = joint_hold_joints
+        self._joint_hold_q = None
+        self._n_joint_hold = 0
         # Inertia shaping: tau = J.T @ (Lambda @ a) instead of J.T @ W.
         # Opt-in because it changes what K means (N/m -> 1/s^2) and nothing
         # here can detect a gain left over from the un-shaped law.
@@ -500,6 +537,16 @@ class DirectTorqueBackend:
         )
         self._n = len(self._ur_slots)
         self._ur_global = self._joint_indices[np.asarray(self._ur_slots, dtype=int)]
+
+        # Default: the last driven joint (wrist 3). Named by control-group slot,
+        # not by global index, because that is the order tau is in.
+        req = ([self._n - 1] if self._joint_hold_request is None
+               else [int(j) for j in self._joint_hold_request])
+        bad = [j for j in req if not 0 <= j < self._n]
+        if bad:
+            raise ValueError(
+                f"joint_hold_joints {bad} outside the {self._n} driven joints")
+        self._joint_hold_idx = np.asarray(sorted(set(req)), dtype=int)
 
         self._law = law if law is not None else JointVelocityTorqueLaw(
             n_joints=self._n, kv=kv, tau_max=tau_max, kp_hold=kp_hold,
@@ -815,6 +862,7 @@ class DirectTorqueBackend:
         self._log_open()
         self._cmd_fail_logged = False
         self._law.reset()
+        self._joint_hold_reset()
         # Enter torque mode already holding zero, not whatever tau a previous
         # session left latched on the robot.
         streamer.set_tau(np.zeros(self._n))
@@ -853,6 +901,7 @@ class DirectTorqueBackend:
             except Exception:
                 pass
         self._law.reset()
+        self._joint_hold_reset()
 
         control, self._control = self._control, None
         receive, self._receive = self._receive, None
@@ -1060,6 +1109,75 @@ class DirectTorqueBackend:
                   f"sigma_min={sigma:.4f} alpha={alpha:.2f}", flush=True)
         return lam
 
+    def _joint_hold_tau(self, tau_task):
+        """Joint-space PD on the joints ``tau = J.T @ W`` structurally cannot reach.
+
+        Wrist 3 is the case this exists for, and the reasoning is at
+        ``DEFAULT_JOINT_HOLD_KP``: its jacobian column is pure tool-Z angular,
+        the orientation field constrains only the *direction* of tool Z, so the
+        pose spring's wrench is orthogonal to that column and the commanded
+        torque there was 0 on every tick of both hardware runs. Under speedJ the
+        UR's own position servo held that joint; under torque nothing does.
+
+        Three things keep this from becoming a second authority on an axis, the
+        fight that produces drift:
+
+        - **It yields.** Above ``DEFAULT_JOINT_HOLD_YIELD_NM`` of task torque on
+          a joint the wrench owns it, the target follows the live angle, and
+          only the damper is left. The condition that makes wrist 3 unreachable
+          is a property of the current pose and field, not a theorem.
+        - **The target snaps while the stick is quiet**, the same discipline as
+          ``_maybe_hold``, so it cannot wind up against a slow commanded turn.
+        - **Its contribution is capped** at ``joint_hold_tau_max``, well under
+          any ``tau_max``, so it shapes a joint nothing else is asking for
+          rather than owning one.
+
+        Damping needs no target and is always safe; the spring is what actually
+        undoes a drift, so both are on. ``--dtc-joint-hold-kp 0`` leaves the
+        damper alone and reduces this to the previously-running behavior.
+        """
+        idx = self._joint_hold_idx
+        zero = np.zeros(self._n)
+        if idx.size == 0 or (self._joint_hold_kp <= 0.0
+                             and self._joint_hold_kd <= 0.0):
+            return zero
+        with self._lock:
+            q6 = None if self._q6 is None else self._q6.copy()
+            qd6 = None if self._qd6 is None else self._qd6.copy()
+        if q6 is None or qd6 is None:
+            return zero
+
+        target = self._joint_hold_q
+        if target is None:
+            target = q6.copy()
+        # Re-snap where the wrench owns the joint, and everywhere while the
+        # stick is quiet -- idle is when "hold here" is a true statement.
+        idle = not bool(getattr(self._controller, "input_active", False))
+        owned = np.abs(np.asarray(tau_task, dtype=float).reshape(-1)) \
+            > DEFAULT_JOINT_HOLD_YIELD_NM
+        follow = owned.copy()
+        if idle:
+            follow[:] = True
+        target = np.where(follow, q6, target)
+        self._joint_hold_q = target
+
+        tau = zero.copy()
+        tau[idx] = (-self._joint_hold_kp * (q6[idx] - target[idx])
+                    - self._joint_hold_kd * qd6[idx])
+        np.clip(tau, -self._joint_hold_tau_max, self._joint_hold_tau_max,
+                out=tau)
+        if np.any(np.abs(tau) > 1e-9):
+            self._n_joint_hold += 1
+        return tau
+
+    def _joint_hold_reset(self):
+        """Forget the held angles. Paired with every ``law.reset()``.
+
+        A pendant stop must not queue up a lunge back to a target from before
+        it -- the same reason the velocity law's idle latch is reset there.
+        """
+        self._joint_hold_q = None
+
     def _compute_wrench(self):
         """One tick of the wrench law: ``tau = clip(J.T @ W, +/-tau_max)``.
 
@@ -1100,6 +1218,10 @@ class DirectTorqueBackend:
         self._last_wrench = wrench.copy()
         tau_max = self._law.tau_max
         tau = jacobian.T @ wrench
+        # Added *before* the clip, so the hold is bounded by the same tau_max as
+        # everything else and cannot smuggle torque past it. Its own cap keeps
+        # it small enough that it never changes which joint rails.
+        tau = tau + self._joint_hold_tau(tau)
         clipped = np.clip(tau, -tau_max, tau_max)
         railed = np.abs(tau) > tau_max + 1e-12
         if np.any(railed):
@@ -1209,6 +1331,7 @@ class DirectTorqueBackend:
             self._gated_now = gated
             # Zero *and* forget the latch -- see the class docstring.
             self._law.reset()
+            self._joint_hold_reset()
             tau = np.zeros(self._n, dtype=float)
         else:
             if self._gated_now:
@@ -1418,6 +1541,11 @@ class DirectTorqueBackend:
             "law": self._law_kind,
             "n_lambda_reject": self._n_lambda_reject,
             "lambda_alpha": self._last_lambda_alpha,
+            # Ticks on which the joint-space hold contributed anything. Its
+            # torque is already in the per-joint tau columns of --dtc-log (on
+            # wrist 3 it is the *only* thing there); this says whether it is
+            # running at all, which a flag typo would otherwise hide.
+            "n_joint_hold": self._n_joint_hold,
             # Wrench law only. |W_lin| is the commanded lateral force in N, and
             # it is the number to read against tau_peak: a healthy slide is a
             # sane |W_lin| with tau_peak well under tau_max. n_tau_clipped
@@ -1451,6 +1579,10 @@ __all__ = [
     "DEFAULT_KP_HOLD",
     "DEFAULT_KI",
     "DEFAULT_I_MAX",
+    "DEFAULT_JOINT_HOLD_KD",
+    "DEFAULT_JOINT_HOLD_KP",
+    "DEFAULT_JOINT_HOLD_TAU_MAX",
+    "DEFAULT_JOINT_HOLD_YIELD_NM",
     "DEFAULT_KV",
     "DEFAULT_STALE_AFTER_S",
     "DEFAULT_STALE_TAU_MIN_S",
