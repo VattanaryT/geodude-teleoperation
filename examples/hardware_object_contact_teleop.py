@@ -33,8 +33,9 @@ Z-overlay only.
 is now equivalent to::
 
     --contact-backend dtc --dtc-law wrench --dtc-lambda --dtc-friction-comp
-    --dtc-fn-lin 3.0 --dtc-fn-ang 0.3 --dtc-err-clip-lin 0.05 --max-lead-m 0.05
-    --dtc-tau-max 50 50 50 1 1 30 --align-duration 4
+    --dtc-fn-lin 3.0 --dtc-fn-ang 3.0 --dtc-damping-ratio 0.7
+    --dtc-damping-ratio-ang 0.7 --dtc-err-clip-lin 0.05 --max-lead-m 0.05
+    --dtc-tau-max 50 50 50 10 10 30 --align-duration 4
 
 To go back to the speedJ plant end-to-end, pass ``--contact-backend speedj
 --max-lead-m 0.005``: the 50 mm lead is a wrench-law force ceiling and is far
@@ -154,7 +155,74 @@ DEFAULT_VENTION_HEIGHT = 0.51
 # 6.0 N.m cleared it (dtc_20260829_233332.csv: 1.0% and 0.1%) without any wrist
 # rail. The C283A2 fault it was guarding against was a *publish-side tau chop*,
 # fixed separately in the streamer's decay and --dtc-stale-tau-ms.
-WRENCH_TAU_MAX = (50.0, 50.0, 50.0, 6.0, 6.0, 30.0)
+#
+# 6.0 then became the binding constraint again as soon as the angular blade was
+# allowed to do its job: at --dtc-fn-ang 3.0 (dtc_20260830_002759.csv) j3 clipped
+# on 4.2% of ticks overall and **14.7% of the third quartile**, with |W_ang|
+# reaching 39.4 N.m -- the wrist was asked to turn and the cap threw the request
+# away, the same failure 1.0 produced one order of magnitude down. 10.0 is still
+# well under the UR5e wrist joint rating (28 N.m), and it is what the velocity
+# law already uses for the same two joints.
+WRENCH_TAU_MAX = (50.0, 50.0, 50.0, 10.0, 10.0, 30.0)
+
+# --dtc-law wrench damping ratios and the no-Lambda angular frequency, resolved
+# by resolve_wrench_zeta / resolve_wrench_fn_ang. D = 2*sqrt(K)*zeta is critical
+# damping for M = 1, so what zeta *means* depends on whether Lambda is shaping
+# the inertia -- which is why these cannot be plain argparse defaults.
+WRENCH_ZETA_LIN = 0.3
+WRENCH_ZETA_ANG = 0.1
+WRENCH_ZETA_LAMBDA = 0.7
+WRENCH_FN_ANG_NO_LAMBDA = 1.5
+
+
+def resolve_wrench_zeta(use_lambda, zeta_lin=None, zeta_ang=None):
+    """(linear, angular) damping ratios for the pose spring under the wrench law.
+
+    ``D = 2*sqrt(K)*zeta`` is critical damping for **M = 1**, so zeta equals the
+    closed-loop damping ratio only when the apparent mass really is 1.
+
+    - **Without Lambda** it is not: ~3 kg on the linear blades, ~0.05 kg.m^2 on
+      the wrist. 0.3/0.1 are those two masses folded into the gain by hand and
+      must not move -- 1.0/1.0 is what drove tau to the rail 89 times and ended
+      in ROBOT_EMERGENCY_STOP.
+    - **With Lambda** (the default) it *is* 1 by construction: the whole point
+      of ``tau = J.T @ (Lambda @ a)`` is that the EE behaves as a unit mass in
+      every direction. So 0.3/0.1 stopped being a mass correction and became
+      literally a 37%-overshoot and a 73%-overshoot second-order system, the
+      wrist half ringing for ~30 cycles. K was re-derived for Lambda when it
+      landed; zeta never was. Measured on dtc_20260830_002254.csv and
+      dtc_20260830_002759.csv: peak |qdot| 1.5 -> 2.1 rad/s and |W_lin|
+      62 -> 123 N against err_lin maxima of only 23 and 34 mm, i.e. most of the
+      peak wrench was the *damper* feeding on motion it had itself made.
+
+      The same argument that ties --dtc-fn-ang to --dtc-fn-lin ties the two
+      zetas together here. 0.7 is 4.6% overshoot, and the delayed-damper
+      product that has to stay under ~1 is ``D*T = 2*zeta*omega_n*T`` = 0.21 at
+      this loop's 8.06 ms median tick, 0.40 at its 15 ms p95 and 0.48 at its
+      18 ms max -- against the 2.3 / 6.5 that shook the arm apart.
+    """
+    default = WRENCH_ZETA_LAMBDA if use_lambda else WRENCH_ZETA_LIN
+    lin = default if zeta_lin is None else float(zeta_lin)
+    if zeta_ang is not None:
+        return lin, float(zeta_ang)
+    return lin, (lin if use_lambda else WRENCH_ZETA_ANG)
+
+
+def resolve_wrench_fn_ang(use_lambda, fn_lin, fn_ang=None):
+    """Angular natural frequency (Hz), defaulting to the linear one under Lambda.
+
+    Lambda carries the two blades' different apparent M exactly, so under it
+    there is no reason left for the two frequencies to differ -- the 20:1 split
+    existed only to paper over that difference. Confirmed on hardware: the
+    bare-default run (dtc_20260830_002254.csv) held tool Z 4.17 deg off the
+    field normal at the median and 22.75 deg at p95, and re-running it with
+    --dtc-fn-ang 3.0 (= fn_lin) cut that to 1.33 / 5.28 deg, with err_ang
+    median 14.25 -> 6.95 deg. Without Lambda the split is doing real work and
+    this leaves it alone.
+    """
+    if fn_ang is not None:
+        return float(fn_ang)
+    return float(fn_lin) if use_lambda else WRENCH_FN_ANG_NO_LAMBDA
 
 STICK_LINEAR_SCALE = 0.0015
 STICK_ANGULAR_SCALE = 0.05
@@ -343,17 +411,20 @@ def _wrench_law_kwargs(args):
     """
     if getattr(args, "contact_backend", None) != "dtc" or args.dtc_law != "wrench":
         return {}
+    zeta_lin, zeta_ang = resolve_wrench_zeta(
+        args.dtc_lambda, args.dtc_damping_ratio, args.dtc_damping_ratio_ang)
     return dict(
         wrench_law=True,
         k_lin=args.dtc_k_lin,
         k_ang=args.dtc_k_ang,
-        damping_ratio=args.dtc_damping_ratio,
-        damping_ratio_ang=args.dtc_damping_ratio_ang,
+        damping_ratio=zeta_lin,
+        damping_ratio_ang=zeta_ang,
         err_clip_lin=args.dtc_err_clip_lin,
         err_clip_rot=args.dtc_err_clip_rot,
         use_lambda=args.dtc_lambda,
         fn_lin=args.dtc_fn_lin,
-        fn_ang=args.dtc_fn_ang,
+        fn_ang=resolve_wrench_fn_ang(
+            args.dtc_lambda, args.dtc_fn_lin, args.dtc_fn_ang),
     )
 
 
@@ -548,18 +619,24 @@ def build_arg_parser():
              "reference UR OSC loop uses; a flat 3000 here is violent "
              "(default %(default)s)")
     parser.add_argument(
-        "--dtc-damping-ratio", type=float, default=0.3, metavar="ZETA",
+        "--dtc-damping-ratio", type=float, default=None, metavar="ZETA",
         help="--dtc-law wrench: LINEAR damping as D = 2*sqrt(K_lin)*zeta. The "
-             "formula is critical damping for M=1 kg; apparent end-point mass "
-             "here is ~3 kg, so 1.0 is over-damped and unstable once the loop "
-             "delay is counted (default %(default)s)")
+             "formula is critical damping for M=1, so zeta is the real damping "
+             f"ratio only under --dtc-lambda. Default {WRENCH_ZETA_LAMBDA} "
+             f"with Lambda, {WRENCH_ZETA_LIN} without (~3 kg of apparent "
+             "end-point mass folded into the gain by hand) -- see "
+             "resolve_wrench_zeta")
     parser.add_argument(
-        "--dtc-damping-ratio-ang", type=float, default=0.1, metavar="ZETA",
+        "--dtc-damping-ratio-ang", type=float, default=None, metavar="ZETA",
         help="--dtc-law wrench: ANGULAR damping as D = 2*sqrt(K_ang)*zeta. "
-             "Separate from --dtc-damping-ratio because the M the formula "
-             "assumes is 1 kg.m^2 while the wrist is ~0.05: at zeta=1 the "
-             "delayed-damper product (D/M)*T reached 6.5 and shook the arm into "
-             "an emergency stop (default %(default)s)")
+             f"Default {WRENCH_ZETA_ANG} without --dtc-lambda, because the M "
+             "the formula assumes is 1 kg.m^2 while the wrist is ~0.05 and at "
+             "zeta=1 the delayed-damper product (D/M)*T reached 6.5 and shook "
+             "the arm into an emergency stop. *With* Lambda that mismatch is "
+             "gone by construction, so this follows --dtc-damping-ratio "
+             f"({WRENCH_ZETA_LAMBDA}) -- 0.1 there is a 73%% -overshoot system "
+             "that rings for ~30 cycles, which is what made the wrench peak at "
+             "123 N against a 34 mm error on dtc_20260830_002759.csv")
     parser.add_argument(
         "--no-dtc-hold-at-tick", dest="dtc_hold_at_tick",
         action="store_false", default=True,
@@ -594,27 +671,32 @@ def build_arg_parser():
         help="--dtc-lambda: linear closed-loop natural frequency (Hz). K = "
              "(2*pi*f)^2 in 1/s^2. Must sit well under the control rate; this "
              "loop holds ~124 Hz and limit-cycled at 5.9 Hz when omega_n was "
-             "7.1 Hz (default %(default)s)")
+             "7.1 Hz. This is also the lever on *tracking lag*, which is not a "
+             "gain-scheduling artifact but a-over-K: the arm sits err = "
+             "a_needed/K behind the carrot, so the 10.5 mm median error "
+             "measured at 3.0 halves at 4.24 and doubles at 2.1. Confirmed "
+             "both ways on hardware -- 1.5 was reported worse (more lag), 3.0 "
+             "better. Sweep it up, not down, and stop when |W_lin| rings or "
+             "dt_max_ms climbs (default %(default)s)")
     parser.add_argument(
-        "--dtc-fn-ang", type=float, default=1.5, metavar="HZ",
+        "--dtc-fn-ang", type=float, default=None, metavar="HZ",
         help="--dtc-lambda: angular natural frequency (Hz). Lambda already "
-             "carries the two blades' different apparent M, so in principle "
-             "the same number as the linear one is correct. It was detuned to "
-             "0.3 because the angular blade railed the wrists on a re-arm "
-             "(|W_ang| 4.45 N.m against 0.07 on the good run) -- but that was a "
-             "*step*, and it now has its own fix in --rearm-slerp-s, so "
-             "detuning the steady-state loop 100x to suppress a transient was "
-             "the wrong lever. At 0.3 the angular command was pinned at its "
-             "clip on every tick: K_ang = (2*pi*0.3)^2 = 3.55 1/s^2 against "
-             "K_lin = 355, so 0.2 rad x 3.55 = 0.71 rad/s^2 needs ~1.4 s to "
-             "close the 0.66 rad of error measured at p95 while the stick moves "
-             "the carrot in tens of ms. Measured consequence on "
-             "dtc_20260829_233332.csv: tool Z sat 11.7 deg off the field normal "
-             "at the median and 38 deg at p95, and the 30-99 N linear blade "
-             "then dug a misaligned tool into the surface instead of sliding "
-             "it. Sweep this before anything else, and "
-             "stop raising it when |W_ang| rings or dt_max_ms climbs "
-             "(default %(default)s)")
+             "carries the two blades' different apparent M, so the same number "
+             "as the linear one is correct -- hence this now DEFAULTS to "
+             "--dtc-fn-lin under --dtc-lambda (see resolve_wrench_fn_ang) and "
+             "to 1.5 without it. It was detuned to 0.3 because the angular "
+             "blade railed the wrists on a re-arm, but that was a *step* with "
+             "its own fix in --rearm-slerp-s, and detuning a steady-state loop "
+             "to kill a transient is the wrong lever: at 0.3 the angular "
+             "command was pinned at its clip on every tick (K_ang = "
+             "(2*pi*0.3)^2 = 3.55 1/s^2 against K_lin = 355, so 0.2 rad gives "
+             "0.71 rad/s^2 and needs ~1.4 s to close the p95 error while the "
+             "stick moves the carrot in tens of ms), and tool Z sat 11.7 deg "
+             "off the field normal at the median. Hardware then confirmed the "
+             "tie: at 1.5 (dtc_20260830_002254.csv) tool Z sat 4.17 deg / "
+             "22.75 deg p95 off the normal, and at 3.0 = fn_lin "
+             "(dtc_20260830_002759.csv) 1.33 / 5.28 deg. Stop raising it when "
+             "|W_ang| rings or dt_max_ms climbs")
     parser.add_argument(
         "--dtc-err-clip-rot", type=float, default=0.2, metavar="RAD",
         help="--dtc-law wrench: angular pose error clip (rad) "

@@ -234,7 +234,8 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         --dtc-lambda, and --max-lead-m 0.05 is a force ceiling that is only
         sane under --dtc-law wrench.
         """
-        args = _load_example().build_arg_parser().parse_args([])
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args([])
         self.assertEqual(args.contact_backend, "dtc")
         self.assertEqual(args.dtc_law, "wrench")
         self.assertTrue(args.dtc_lambda)
@@ -243,14 +244,25 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         # 0.3 put K_ang 100x under K_lin, so the angular command sat pinned at
         # err_clip_rot on every tick and tool Z never reached the field normal
         # (11.7 deg median, 38 at p95 on dtc_20260829_233332.csv). The re-arm
-        # step it was detuned for has its own fix in --rearm-slerp-s.
-        self.assertAlmostEqual(args.dtc_fn_ang, 1.5)
+        # step it was detuned for has its own fix in --rearm-slerp-s. 1.5 was
+        # still not enough (4.17 deg median / 22.75 p95 on
+        # dtc_20260830_002254.csv); at fn_lin it is 1.33 / 5.28, so under
+        # Lambda -- which carries the apparent-M difference the split was
+        # papering over -- the two frequencies are tied.
+        self.assertIsNone(args.dtc_fn_ang)
+        self.assertAlmostEqual(
+            mod.resolve_wrench_fn_ang(True, args.dtc_fn_lin, args.dtc_fn_ang),
+            3.0)
         self.assertAlmostEqual(args.dtc_err_clip_lin, 0.05)
         self.assertAlmostEqual(args.max_lead_m, 0.05)
         # j3/j4 at 1.0 was below UR5e wrist breakaway: they clipped on 32.9%
         # and 45.3% of ticks, so the two joints that carry a width traverse's
-        # rotation could not turn at all. 6.0 cleared it (1.0% / 0.1%).
-        self.assertEqual(list(args.dtc_tau_max), [50.0, 50.0, 50.0, 6.0, 6.0, 30.0])
+        # rotation could not turn at all. 6.0 cleared it (1.0% / 0.1%) -- and
+        # then bound again once fn_ang was untied (4.2% overall, 14.7% of Q3 on
+        # dtc_20260830_002759.csv). 10.0 is the velocity law's own wrist cap
+        # and far under the UR5e joint rating of 28 N.m.
+        self.assertEqual(
+            list(args.dtc_tau_max), [50.0, 50.0, 50.0, 10.0, 10.0, 30.0])
         self.assertAlmostEqual(args.align_duration, 4.0)
 
     def test_speedj_backend_is_still_reachable(self):
@@ -614,12 +626,29 @@ class WrenchLawWiringTest(unittest.TestCase):
         self.assertAlmostEqual(kw["k_ang"], 50.0)
         self.assertTrue(kw["use_lambda"])
         self.assertAlmostEqual(kw["fn_lin"], 3.0)
-        self.assertAlmostEqual(kw["fn_ang"], 1.5)
+        # Under Lambda the two blades share a frequency and a damping ratio:
+        # Lambda carries the apparent-M difference the 20:1 split and the 0.3/0.1
+        # zeta split were both papering over, so neither correction is still
+        # doing work. See resolve_wrench_fn_ang / resolve_wrench_zeta.
+        self.assertAlmostEqual(kw["fn_ang"], 3.0)
         self.assertAlmostEqual(kw["err_clip_lin"], 0.05)
-        # Split, not one number: the formula's assumed M differs by ~60x
-        # between the blades, so one zeta cannot be right for both.
-        self.assertAlmostEqual(kw["damping_ratio"], 0.3)
-        self.assertAlmostEqual(kw["damping_ratio_ang"], 0.1)
+        self.assertAlmostEqual(kw["damping_ratio"], mod.WRENCH_ZETA_LAMBDA)
+        self.assertAlmostEqual(kw["damping_ratio_ang"], mod.WRENCH_ZETA_LAMBDA)
+        # Without Lambda both splits come back and mean what they used to.
+        no_lambda = mod._wrench_law_kwargs(self._args(
+            ["--contact-backend", "dtc", "--dtc-law", "wrench",
+             "--no-dtc-lambda"]))
+        self.assertFalse(no_lambda["use_lambda"])
+        self.assertAlmostEqual(no_lambda["fn_ang"], mod.WRENCH_FN_ANG_NO_LAMBDA)
+        self.assertAlmostEqual(no_lambda["damping_ratio"], mod.WRENCH_ZETA_LIN)
+        self.assertAlmostEqual(
+            no_lambda["damping_ratio_ang"], mod.WRENCH_ZETA_ANG)
+        # An explicit flag still wins over either default.
+        explicit = mod._wrench_law_kwargs(self._args(
+            ["--contact-backend", "dtc", "--dtc-law", "wrench",
+             "--dtc-fn-ang", "0.3", "--dtc-damping-ratio-ang", "0.1"]))
+        self.assertAlmostEqual(explicit["fn_ang"], 0.3)
+        self.assertAlmostEqual(explicit["damping_ratio_ang"], 0.1)
 
     def test_handoff_and_reopen_pass_wrench_kwargs(self):
         """Align uses speedJ defaults; wrench kwargs only at DTC handoff + reopen."""
@@ -715,18 +744,38 @@ class WrenchLawWiringTest(unittest.TestCase):
         The run that ended in ROBOT_EMERGENCY_STOP was measured at a 23 ms tick
         against an 8 ms nominal, and zeta=1 put the angular product at 6.5 --
         a delayed damper diverges past ~1. Both blades must stay under 1 there.
+
+        Under --dtc-lambda M is 1 by construction on both blades, so the same
+        product is just D*T = 2*zeta*omega_n*T and the two zetas no longer have
+        to differ -- but the bound still has to hold at the worst measured tick.
         """
         import math
 
         mod = _load_example()
         t_worst = 0.023
         for zeta, k, m, blade in (
-                (0.3, 3000.0, 3.0, "linear"),
-                (0.1, 50.0, 0.05, "angular")):
+                (mod.WRENCH_ZETA_LIN, 3000.0, 3.0, "linear"),
+                (mod.WRENCH_ZETA_ANG, 50.0, 0.05, "angular")):
             d = 2.0 * math.sqrt(k) * zeta
             self.assertLess(d / m * t_worst, 1.0, blade)
-        self.assertAlmostEqual(
-            mod.build_arg_parser().parse_args([]).dtc_damping_ratio_ang, 0.1)
+        args = mod.build_arg_parser().parse_args([])
+        self.assertIsNone(args.dtc_damping_ratio)
+        self.assertIsNone(args.dtc_damping_ratio_ang)
+        # No Lambda: the hand-folded mass correction is untouched.
+        self.assertEqual(
+            mod.resolve_wrench_zeta(False, None, None),
+            (mod.WRENCH_ZETA_LIN, mod.WRENCH_ZETA_ANG))
+        # Lambda: one zeta, and it means what it says.
+        self.assertEqual(
+            mod.resolve_wrench_zeta(True, None, None),
+            (mod.WRENCH_ZETA_LAMBDA, mod.WRENCH_ZETA_LAMBDA))
+        # An explicit flag still wins on either blade, either way.
+        self.assertEqual(mod.resolve_wrench_zeta(True, 0.2, None), (0.2, 0.2))
+        self.assertEqual(mod.resolve_wrench_zeta(True, None, 0.05),
+                         (mod.WRENCH_ZETA_LAMBDA, 0.05))
+        for fn in (3.0, 4.5):
+            d = 2.0 * mod.WRENCH_ZETA_LAMBDA * (2.0 * math.pi * fn)
+            self.assertLess(d * 0.018, 1.0, fn)  # M = 1 under Lambda
 
     def test_contact_is_refused_under_the_wrench_law(self):
         """The press reaches the arm through set_tool_z_velocity, which the
