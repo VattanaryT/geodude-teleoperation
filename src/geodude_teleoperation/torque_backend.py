@@ -1419,6 +1419,15 @@ class DirectTorqueBackend:
             print(f"\033[93mdtc: could not open --dtc-log ({exc}); "
                   f"running without the per-tick record\033[0m", flush=True)
             return
+        meta = self._gain_note()
+        if meta:
+            # One '#' line before the header, so a run's gains travel with its
+            # ticks. Three runs on 2026-08-30 used three different gain sets and
+            # nothing in the CSV distinguished them -- including the zeta the
+            # damping cap actually applied, which is not the zeta on the command
+            # line (at --dtc-fn-lin 4.0 the cap took 0.30 down to 0.239, and the
+            # only record of that was a startup warning in the scrollback).
+            self._log_fh.write(f"# {meta}\n")
         n = self._n
         cols = ["t", "dt_ms", "phase", "safety"]
         cols += [f"w{i}" for i in range(6)]
@@ -1440,6 +1449,41 @@ class DirectTorqueBackend:
         self._log_fh.write(",".join(cols) + "\n")
         self._log_t0 = None
         print(f"dtc log: {self._log_path}", flush=True)
+
+    def _gain_note(self) -> str:
+        """The gains actually in force, for the log header.
+
+        Read off the live matrices rather than off the CLI args on purpose:
+        every resolver and cap sits between the two, and the cap is the half
+        that has bitten. ``K`` is 1/s^2 under Lambda and N/m without it, which
+        is why the flag is recorded next to the numbers.
+        """
+        bits = [f"law={self._law_kind}", f"hz={self._hz:g}",
+                f"lambda={'on' if self._use_lambda else 'off'}"]
+        ctrl = self._controller
+        for name, attr in (("K", "_stiffness"), ("D", "_damping")):
+            m = getattr(ctrl, attr, None)
+            if m is None:
+                continue
+            try:
+                d = np.asarray(m, dtype=float)
+                d = np.diag(d) if d.ndim == 2 else d.reshape(-1)
+            except Exception:
+                continue
+            bits.append(f"{name}_ang={d[0]:.4g},{d[1]:.4g},{d[2]:.4g}")
+            bits.append(f"{name}_lin={d[3]:.4g},{d[4]:.4g},{d[5]:.4g}")
+        for name, attr in (("err_clip_lin", "_err_clip_lin"),
+                           ("err_clip_rot", "_err_clip_rot"),
+                           ("rearm_wrench_s", "_rearm_wrench_s")):
+            v = getattr(ctrl, attr, None)
+            if v is not None:
+                bits.append(f"{name}={float(v):g}")
+        try:
+            bits.append("tau_max=" + ",".join(
+                f"{v:g}" for v in np.asarray(self._law.tau_max, dtype=float)))
+        except Exception:
+            pass
+        return "  ".join(bits)
 
     def _log_close(self) -> None:
         fh, self._log_fh = self._log_fh, None

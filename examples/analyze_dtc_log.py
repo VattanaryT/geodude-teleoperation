@@ -24,13 +24,40 @@ def q(a, p):
     return float(np.percentile(a, p)) if len(a) else float("nan")
 
 
+# A SpaceMouse cannot be driven above a couple of Hz, so everything below this
+# is the operator and everything above it is the loop talking to itself. Every
+# frequency-domain verdict here is taken *above* this floor -- the plain argmax
+# of the qdot spectrum is always the stick, which is what made a run with 75%
+# of its qdot power at 8.45 Hz print "no limit cycle".
+STICK_FLOOR_HZ = 2.0
+# Ticks of coast-down to drop after the stick is released. The arm is still
+# decelerating there, and that transient is not a limit cycle: on
+# dtc_20260830_123245.csv the "quiet" |qdot| p95 read 1.111 rad/s, which looked
+# like a hold failure and was entirely the first 0.1 s after each release
+# (median 1.03 rad/s under 0.1 s, 0.0000 past 0.5 s -- the same shape as a run
+# with a clean hold, which differed only in how many short stick bursts it had).
+QUIET_SETTLE_S = 0.25
+
+
+def _read(path):
+    """Rows plus the leading '# ...' gain header the backend writes, if any."""
+    meta = []
+    with open(path) as fh:
+        lines = fh.readlines()
+    while lines and lines[0].lstrip().startswith("#"):
+        meta.append(lines.pop(0).lstrip().lstrip("#").strip())
+    return list(csv.DictReader(lines)), meta
+
+
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else newest()
-    rows = list(csv.DictReader(open(path)))
+    rows, meta = _read(path)
     if not rows:
         sys.exit(f"{path}: empty")
     n = sum(1 for k in rows[0] if k.startswith("tau"))
     print(f"{path}: {len(rows)} ticks, {n} joints")
+    for line in meta:
+        print(f"  {line}")
 
     phase = np.array([r["phase"] for r in rows])
     for p in sorted(set(phase)):
@@ -88,6 +115,28 @@ def oscillation(rows, live, n):
     So the two numbers that matter are the peak frequency and how much of the
     motion sits there -- and both must be read against a *quiet stick*, because
     a peak while the operator is driving may just be the operator.
+
+    **Both of those numbers were wrong, and 2026-08-30 proved it twice.**
+
+    - The dominant frequency was the plain argmax of the summed qdot spectrum,
+      which is *always* the stick: a SpaceMouse lives under 2 Hz and carries
+      most of the power. `--dtc-fn-lin 4.0` (dtc_20260830_123040.csv) put
+      **75.6% of the qdot power into 2-40 Hz, peaked at 8.45 Hz on j0/j3/j4**,
+      and this section printed "no limit cycle" because the argmax was still
+      0.2 Hz. Everything frequency-domain is now measured above STICK_FLOOR_HZ.
+    - The "quiet stick" population included coast-down. On
+      dtc_20260830_123245.csv it read |qdot| p95 = 1.111 rad/s, which looks
+      like the arm not holding still and is not: median 1.03 rad/s within
+      0.1 s of a release and 0.0000 past 0.5 s, the same profile as a run that
+      read 0.012 -- the two differed only in how many short stick bursts they
+      had, so the metric was reporting the operator's cadence. QUIET_SETTLE_S
+      of each release is dropped.
+
+    The two failures are different and the report must not blur them: an
+    above-floor band share says the *closed loop* is ringing (fix it with the
+    gains -- lower fn, or lower D if it is up near the delay crossover), while
+    motion long after a release says the *hold* is failing (a different bug,
+    and coast-down is not evidence of it).
     """
     if f"qd{n - 1}" not in rows[0]:
         print("\n  (no qd* columns -- log predates them; no oscillation report)")
@@ -106,14 +155,23 @@ def oscillation(rows, live, n):
     win = np.hanning(t.size)
     freq = np.fft.rfftfreq(t.size, dt)
 
+    # Above the stick floor: the plain argmax of a joint's spectrum is the
+    # operator on every joint the operator is driving, which made this column
+    # read 0.1-0.3 Hz on a run that was ringing at 8.45 Hz.
+    above = freq >= STICK_FLOOR_HZ
+
     def peak(x):
         spec = np.abs(np.fft.rfft((x - x.mean()) * win))
         spec[0] = 0.0
-        k = int(np.argmax(spec))
+        if not above.any() or np.where(above, spec, 0.0).max() <= 0:
+            return float("nan"), spec, 0
+        k = int(np.argmax(np.where(above, spec, 0.0)))
         return freq[k], spec, k
 
     print(f"\n  oscillation (FFT over {t.size} live ticks at {1/dt:.0f} Hz, "
           f"Nyquist {0.5/dt:.0f} Hz)")
+    print(f"  peaks are the strongest line above {STICK_FLOOR_HZ:g} Hz, "
+          f"not the argmax (which is always the stick)")
     print("  joint   tau peak Hz   qdot peak Hz   |qdot| p95 quiet   |tau| p95 quiet")
     quiet = ~act
     peaks = []
@@ -135,30 +193,71 @@ def oscillation(rows, live, n):
         x = qd[:, j]
         power += np.abs(np.fft.rfft((x - x.mean()) * win)) ** 2
     power[0] = 0.0
-    dom = float(freq[int(np.argmax(power))])
-    share = float(power[np.abs(freq - dom) < 2.0].sum() / max(power.sum(), 1e-30))
-    print(f"\n  dominant qdot frequency (energy-weighted over joints): "
-          f"{dom:.1f} Hz, carrying {share:.0%} of the qdot power")
+    total = max(power.sum(), 1e-30)
     del peaks
-    if quiet.any():
-        moved = float(np.percentile(np.linalg.norm(qd[quiet], axis=1), 95))
-        print(f"  |qdot| p95 with the stick QUIET: {moved:.3f} rad/s "
-              f"({quiet.mean():.0%} of live ticks)")
-        if moved > 0.05 and dom > 8.0:
-            print("     \033[93mLIMIT CYCLE: the arm is moving fast at a single "
-                  "frequency with nothing commanding it.\033[0m")
-            print(f"     A damper is -D*v applied one loop delay late, so past "
-                  f"90 deg of lag it ADDS energy. At {dom:.1f} Hz that is a "
-                  f"delay of {1000/(4*dom):.0f} ms, i.e. ~{1/(4*dom*dt):.1f} "
-                  f"control ticks -- about what this loop plus its republish "
-                  f"thread actually holds.")
-            print("     Lower D, not K: --dtc-damping-ratio / "
-                  "--dtc-damping-ratio-ang, or --dtc-damping-max which bounds "
-                  "D = 2*zeta*omega_n directly. Raising --dtc-tau-max here only "
-                  "raises the amplitude.")
+    # Above the stick floor and below Nyquist. The upper edge is only there to
+    # keep the very top of the band -- where the anti-alias story is worst and
+    # a real mode would fold in from above -- from naming the peak.
+    band = (freq >= STICK_FLOOR_HZ) & (freq <= min(40.0, 0.45 / dt))
+    share = float(power[band].sum() / total)
+    if band.any() and power[band].max() > 0:
+        pk = float(freq[int(np.argmax(np.where(band, power, 0.0)))])
+    else:
+        pk = float("nan")
+    print(f"\n  qdot power above {STICK_FLOOR_HZ:g} Hz (the stick cannot go "
+          f"there): {share:.1%}, peaked at {pk:.2f} Hz")
+    if share > 0.35:
+        print("     \033[93mRINGING: most of the joint motion is at a frequency "
+              "nobody commanded.\033[0m")
+        phase = 360.0 * pk * 1.5 * dt
+        print(f"     At {pk:.2f} Hz one loop delay T_d is {phase:.0f} deg of "
+              f"phase (1.5 ticks of {1e3*dt:.1f} ms plus the republish "
+              f"thread).")
+        if phase > 90.0:
+            # dtc_20260830_005006.csv: 24.5 Hz, 107 deg, D_ang 26.4. The damper
+            # is the source there -- it needs no input to pump, it feeds on the
+            # motion it made -- so cutting K does nothing and cutting D does.
+            print("     Past 90 deg a damper is NEGATIVE damping: -D*v applied "
+                  "that late adds energy instead of removing it, and it needs "
+                  "no input to keep going.")
+            print("     Lower D: --dtc-damping-max, or the two "
+                  "--dtc-damping-ratio flags. Do NOT reach for fn here, and "
+                  "raising --dtc-tau-max only raises the amplitude.")
         else:
-            print("     no limit cycle (quiet-stick motion is small or "
-                  "low-frequency).")
+            # dtc_20260830_123040.csv: 8.45 Hz, 37 deg, at --dtc-fn-lin 4.0.
+            # The damper is still removing energy; the loop is simply asking
+            # for a bandwidth its sample rate and delay cannot deliver.
+            print("     Under 90 deg the damper is still damping -- this is an "
+                  "under-damped closed loop, not a delayed damper, so the "
+                  "lever is fn and not D.")
+            print(f"     Lower --dtc-fn-lin (K = (2*pi*fn)^2). This loop's "
+                  f"usable crossover is about f_s/12 = {1.0/(12*dt):.0f} Hz, "
+                  f"and a second-order target has to sit well under that; "
+                  f"raising --dtc-hz is the only way to move the ceiling.")
+    else:
+        print("     no ringing (the motion is where the operator put it).")
+
+    if quiet.any():
+        # Drop the coast-down after each release: the arm is still decelerating
+        # there and that is not the hold failing. See QUIET_SETTLE_S.
+        settle = max(1, int(round(QUIET_SETTLE_S / dt)))
+        since = np.full(t.size, settle + 1, int)
+        c = settle + 1
+        for i in range(t.size):
+            c = 0 if (quiet[i] and i > 0 and act[i - 1]) else (
+                c + 1 if quiet[i] else settle + 1)
+            since[i] = c
+        held = quiet & (since >= settle)
+        if held.any():
+            moved = float(np.percentile(np.linalg.norm(qd[held], axis=1), 95))
+            print(f"  |qdot| p95 with the stick QUIET and settled: "
+                  f"{moved:.3f} rad/s ({held.mean():.0%} of live ticks, "
+                  f"{QUIET_SETTLE_S:g} s of coast-down dropped)")
+            if moved > 0.05:
+                print("     \033[93mTHE HOLD IS NOT HOLDING: the arm keeps "
+                      "moving long after the stick was released.\033[0m")
+        else:
+            print(f"  (no quiet ticks past {QUIET_SETTLE_S:g} s of coast-down)")
 
 
 def stall(rows, live, W, n):
