@@ -33,9 +33,9 @@ Z-overlay only.
 is now equivalent to::
 
     --contact-backend dtc --dtc-law wrench --dtc-lambda --dtc-friction-comp
-    --dtc-fn-lin 3.0 --dtc-fn-ang 3.0 --dtc-damping-ratio 0.7
-    --dtc-damping-ratio-ang 0.7 --dtc-err-clip-lin 0.05 --max-lead-m 0.05
-    --dtc-tau-max 50 50 50 10 10 30 --align-duration 4
+    --dtc-fn-lin 3.0 --dtc-fn-ang 3.0 --dtc-damping-ratio 0.3
+    --dtc-damping-ratio-ang 0.1 --dtc-damping-max 12 --dtc-err-clip-lin 0.05
+    --max-lead-m 0.05 --dtc-tau-max 50 50 50 6 6 30 --align-duration 4
 
 To go back to the speedJ plant end-to-end, pass ``--contact-backend speedj
 --max-lead-m 0.005``: the 50 mm lead is a wrench-law force ceiling and is far
@@ -156,56 +156,99 @@ DEFAULT_VENTION_HEIGHT = 0.51
 # rail. The C283A2 fault it was guarding against was a *publish-side tau chop*,
 # fixed separately in the streamer's decay and --dtc-stale-tau-ms.
 #
-# 6.0 then became the binding constraint again as soon as the angular blade was
-# allowed to do its job: at --dtc-fn-ang 3.0 (dtc_20260830_002759.csv) j3 clipped
-# on 4.2% of ticks overall and **14.7% of the third quartile**, with |W_ang|
-# reaching 39.4 N.m -- the wrist was asked to turn and the cap threw the request
-# away, the same failure 1.0 produced one order of magnitude down. 10.0 is still
-# well under the UR5e wrist joint rating (28 N.m), and it is what the velocity
-# law already uses for the same two joints.
-WRENCH_TAU_MAX = (50.0, 50.0, 50.0, 10.0, 10.0, 30.0)
+# 6.0 does still bind once the angular blade can do its job -- at --dtc-fn-ang
+# 3.0 (dtc_20260830_002759.csv) j3 clipped on 4.2% of ticks and 14.7% of the
+# third quartile -- and it was briefly raised to 10.0 for that reason. It went
+# straight back: on dtc_20260830_005006.csv the arm ran a 24.5 Hz limit cycle
+# (see resolve_wrench_zeta) and j4 sat on the 10 N.m rail for 18.9% of ticks,
+# which is the *amplitude* of that cycle. During an oscillation tau_max is the
+# only thing bounding how hard the wrist shakes, so it goes back to the last
+# value that was measured on a stable arm and is re-raised only after the
+# oscillation is confirmed gone. One variable at a time.
+WRENCH_TAU_MAX = (50.0, 50.0, 50.0, 6.0, 6.0, 30.0)
 
 # --dtc-law wrench damping ratios and the no-Lambda angular frequency, resolved
-# by resolve_wrench_zeta / resolve_wrench_fn_ang. D = 2*sqrt(K)*zeta is critical
-# damping for M = 1, so what zeta *means* depends on whether Lambda is shaping
-# the inertia -- which is why these cannot be plain argparse defaults.
+# by resolve_wrench_zeta / resolve_wrench_fn_ang.
 WRENCH_ZETA_LIN = 0.3
 WRENCH_ZETA_ANG = 0.1
-WRENCH_ZETA_LAMBDA = 0.7
 WRENCH_FN_ANG_NO_LAMBDA = 1.5
 
+# Ceiling on the pose spring's damping coefficient D = 2*zeta*omega_n, in 1/s,
+# under --dtc-lambda only (without Lambda D is N.s/m and N.m.s/rad and this
+# number means nothing). This is NOT the rigid-body delayed-damper bound
+# (D*T ~ 1) that CLAUDE.md carries -- that bound is far too permissive, because
+# the frequency that actually limits D is a *structural* one. See
+# resolve_wrench_zeta. 12.0 admits the two ratios measured stable on this rig
+# (D_lin = 11.3 at zeta 0.3 / fn 3.0, D_ang = 3.8 at zeta 0.1) and refuses the
+# 26.4 that limit-cycled.
+WRENCH_DAMPING_MAX_1_S = 12.0
 
-def resolve_wrench_zeta(use_lambda, zeta_lin=None, zeta_ang=None):
+
+def _cap_zeta(zeta, fn, damping_max, blade, warn):
+    """Clamp one blade's zeta so D = 2*zeta*omega_n stays under ``damping_max``."""
+    if fn is None or float(fn) <= 0.0 or damping_max is None or damping_max <= 0:
+        return float(zeta)
+    omega_n = 2.0 * math.pi * float(fn)
+    d = 2.0 * float(zeta) * omega_n
+    if d <= float(damping_max):
+        return float(zeta)
+    capped = float(damping_max) / (2.0 * omega_n)
+    if warn is not None:
+        warn(f"\033[93mdtc: {blade} damping clamped, zeta {float(zeta):.3f} -> "
+             f"{capped:.3f} (D {d:.1f} -> {damping_max:.1f} 1/s at fn={float(fn):g} Hz). "
+             f"Velocity feedback through this loop's delay is NEGATIVE damping "
+             f"at the rig's 24.5 Hz mode; raise --dtc-damping-max only with a "
+             f"log that shows no limit cycle.\033[0m")
+    return capped
+
+
+def resolve_wrench_zeta(use_lambda, zeta_lin=None, zeta_ang=None,
+                        fn_lin=None, fn_ang=None, damping_max=None,
+                        warn=None):
     """(linear, angular) damping ratios for the pose spring under the wrench law.
 
-    ``D = 2*sqrt(K)*zeta`` is critical damping for **M = 1**, so zeta equals the
-    closed-loop damping ratio only when the apparent mass really is 1.
+    ``D = 2*sqrt(K)*zeta`` is critical damping for **M = 1**. Without Lambda
+    that is false (~3 kg on the linear blades, ~0.05 kg.m^2 on the wrist) and
+    0.3/0.1 are those two masses folded into the gain by hand. Under Lambda the
+    EE really is a unit mass in every direction, so the same numbers read as a
+    37%- and a 73%-overshoot second-order system and look badly under-damped.
 
-    - **Without Lambda** it is not: ~3 kg on the linear blades, ~0.05 kg.m^2 on
-      the wrist. 0.3/0.1 are those two masses folded into the gain by hand and
-      must not move -- 1.0/1.0 is what drove tau to the rail 89 times and ended
-      in ROBOT_EMERGENCY_STOP.
-    - **With Lambda** (the default) it *is* 1 by construction: the whole point
-      of ``tau = J.T @ (Lambda @ a)`` is that the EE behaves as a unit mass in
-      every direction. So 0.3/0.1 stopped being a mass correction and became
-      literally a 37%-overshoot and a 73%-overshoot second-order system, the
-      wrist half ringing for ~30 cycles. K was re-derived for Lambda when it
-      landed; zeta never was. Measured on dtc_20260830_002254.csv and
-      dtc_20260830_002759.csv: peak |qdot| 1.5 -> 2.1 rad/s and |W_lin|
-      62 -> 123 N against err_lin maxima of only 23 and 34 mm, i.e. most of the
-      peak wrench was the *damper* feeding on motion it had itself made.
+    **They are not, and raising them is what broke the arm.** Set to 0.7/0.7 on
+    that reasoning, dtc_20260830_005006.csv ran a **24.5 Hz limit cycle** with
+    the stick at rest: tau and qdot on every joint peak at 24.5 Hz in the FFT,
+    j4 sat on its rail 18.9% of ticks and reached 1.0 rad/s of joint velocity
+    that nobody commanded, while the *tracking* numbers looked excellent
+    (conformity 0.59 deg median, re-arm edges 2 and under 2 N). The rigid-body
+    bound in CLAUDE.md said this was safe -- ``D*T`` was only 0.21 at the
+    median tick -- and it was wrong, because the frequency that limits D is not
+    the 3 Hz rigid-body mode:
 
-      The same argument that ties --dtc-fn-ang to --dtc-fn-lin ties the two
-      zetas together here. 0.7 is 4.6% overshoot, and the delayed-damper
-      product that has to stay under ~1 is ``D*T = 2*zeta*omega_n*T`` = 0.21 at
-      this loop's 8.06 ms median tick, 0.40 at its 15 ms p95 and 0.48 at its
-      18 ms max -- against the 2.3 / 6.5 that shook the arm apart.
+    - A damper is ``-D*v`` applied one loop delay late. At frequency ``f`` that
+      is a phase lag of ``2*pi*f*T_d``, and past 90 deg the term is **negative**
+      damping. This loop holds 8.06 ms with a republish thread behind it, so
+      ``T_d`` is ~1.5 ticks = ~12 ms and the lag reaches 90 deg at ~20 Hz.
+    - The rig has a lightly damped structural mode at **24.5 Hz** (measured: it
+      is the FFT peak of both tau and qdot on all six joints, and it is common
+      to every joint, which a control-law mode would not be). There the lag is
+      ~108 deg, so ``D*cos(108 deg)`` = -0.31*D of damping is being pumped
+      straight into it. At D_ang 3.8 (zeta 0.1) that is -1.2 and the mode's own
+      damping absorbs it; at 26.4 (zeta 0.7) it is -8.2 and it does not.
+
+    So zeta under Lambda is bounded by ``D <= damping_max``, not by overshoot,
+    and the defaults go back to the two values measured stable on this rig.
+    This also makes a --dtc-fn-lin sweep safe: D = 2*zeta*omega_n grows with
+    fn, so raising fn at fixed zeta walks straight back into the cycle, and the
+    cap takes zeta down instead. Without Lambda nothing is capped -- D is in
+    physical units there and ``damping_max`` does not apply.
     """
-    default = WRENCH_ZETA_LAMBDA if use_lambda else WRENCH_ZETA_LIN
-    lin = default if zeta_lin is None else float(zeta_lin)
-    if zeta_ang is not None:
-        return lin, float(zeta_ang)
-    return lin, (lin if use_lambda else WRENCH_ZETA_ANG)
+    lin = WRENCH_ZETA_LIN if zeta_lin is None else float(zeta_lin)
+    ang = WRENCH_ZETA_ANG if zeta_ang is None else float(zeta_ang)
+    if not use_lambda:
+        return lin, ang
+    if damping_max is None:
+        damping_max = WRENCH_DAMPING_MAX_1_S
+    return (_cap_zeta(lin, fn_lin, damping_max, "linear", warn),
+            _cap_zeta(ang, fn_ang, damping_max, "angular", warn))
 
 
 def resolve_wrench_fn_ang(use_lambda, fn_lin, fn_ang=None):
@@ -411,8 +454,13 @@ def _wrench_law_kwargs(args):
     """
     if getattr(args, "contact_backend", None) != "dtc" or args.dtc_law != "wrench":
         return {}
+    fn_ang = resolve_wrench_fn_ang(
+        args.dtc_lambda, args.dtc_fn_lin, args.dtc_fn_ang)
     zeta_lin, zeta_ang = resolve_wrench_zeta(
-        args.dtc_lambda, args.dtc_damping_ratio, args.dtc_damping_ratio_ang)
+        args.dtc_lambda, args.dtc_damping_ratio, args.dtc_damping_ratio_ang,
+        fn_lin=args.dtc_fn_lin, fn_ang=fn_ang,
+        damping_max=args.dtc_damping_max,
+        warn=lambda m: print(m, flush=True))
     return dict(
         wrench_law=True,
         k_lin=args.dtc_k_lin,
@@ -423,8 +471,7 @@ def _wrench_law_kwargs(args):
         err_clip_rot=args.dtc_err_clip_rot,
         use_lambda=args.dtc_lambda,
         fn_lin=args.dtc_fn_lin,
-        fn_ang=resolve_wrench_fn_ang(
-            args.dtc_lambda, args.dtc_fn_lin, args.dtc_fn_ang),
+        fn_ang=fn_ang,
     )
 
 
@@ -620,23 +667,34 @@ def build_arg_parser():
              "(default %(default)s)")
     parser.add_argument(
         "--dtc-damping-ratio", type=float, default=None, metavar="ZETA",
-        help="--dtc-law wrench: LINEAR damping as D = 2*sqrt(K_lin)*zeta. The "
-             "formula is critical damping for M=1, so zeta is the real damping "
-             f"ratio only under --dtc-lambda. Default {WRENCH_ZETA_LAMBDA} "
-             f"with Lambda, {WRENCH_ZETA_LIN} without (~3 kg of apparent "
-             "end-point mass folded into the gain by hand) -- see "
-             "resolve_wrench_zeta")
+        help="--dtc-law wrench: LINEAR damping as D = 2*sqrt(K_lin)*zeta "
+             f"(default {WRENCH_ZETA_LIN}). Under --dtc-lambda M is 1, so this "
+             "reads as badly under-damped and is not: raising it to 0.7 put "
+             "the arm into a 24.5 Hz limit cycle with the stick at rest "
+             "(dtc_20260830_005006.csv). zeta here is bounded by the loop "
+             "delay against a structural mode, not by overshoot -- see "
+             "resolve_wrench_zeta and --dtc-damping-max")
     parser.add_argument(
         "--dtc-damping-ratio-ang", type=float, default=None, metavar="ZETA",
-        help="--dtc-law wrench: ANGULAR damping as D = 2*sqrt(K_ang)*zeta. "
-             f"Default {WRENCH_ZETA_ANG} without --dtc-lambda, because the M "
-             "the formula assumes is 1 kg.m^2 while the wrist is ~0.05 and at "
-             "zeta=1 the delayed-damper product (D/M)*T reached 6.5 and shook "
-             "the arm into an emergency stop. *With* Lambda that mismatch is "
-             "gone by construction, so this follows --dtc-damping-ratio "
-             f"({WRENCH_ZETA_LAMBDA}) -- 0.1 there is a 73%% -overshoot system "
-             "that rings for ~30 cycles, which is what made the wrench peak at "
-             "123 N against a 34 mm error on dtc_20260830_002759.csv")
+        help="--dtc-law wrench: ANGULAR damping as D = 2*sqrt(K_ang)*zeta "
+             f"(default {WRENCH_ZETA_ANG}). Kept separate from "
+             "--dtc-damping-ratio even under --dtc-lambda, where Lambda does "
+             "remove the apparent-M difference the split was for: the wrist is "
+             "the joint that rails first when the damper turns negative at the "
+             "rig's 24.5 Hz mode (j4 on its cap for 18.9% of ticks at 0.7), so "
+             "this half keeps its own, smaller, measured-stable number")
+    parser.add_argument(
+        "--dtc-damping-max", type=float, default=WRENCH_DAMPING_MAX_1_S,
+        metavar="PER_S",
+        help="--dtc-law wrench + --dtc-lambda: ceiling on the damping "
+             "coefficient D = 2*zeta*omega_n in 1/s, applied to both blades "
+             "after --dtc-damping-ratio* and --dtc-fn-* are resolved. This is "
+             "the knob that actually bounds the damper, because D grows with "
+             "fn as well as zeta -- a --dtc-fn-lin sweep at fixed zeta walks "
+             "into the same limit cycle, and this takes zeta down instead of "
+             "letting it. It is NOT the rigid-body D*T ~ 1 bound, which said "
+             "0.21 was safe on the run that oscillated. 0 disables the cap "
+             "(default %(default)s)")
     parser.add_argument(
         "--no-dtc-hold-at-tick", dest="dtc_hold_at_tick",
         action="store_false", default=True,
@@ -676,8 +734,12 @@ def build_arg_parser():
              "a_needed/K behind the carrot, so the 10.5 mm median error "
              "measured at 3.0 halves at 4.24 and doubles at 2.1. Confirmed "
              "both ways on hardware -- 1.5 was reported worse (more lag), 3.0 "
-             "better. Sweep it up, not down, and stop when |W_lin| rings or "
-             "dt_max_ms climbs (default %(default)s)")
+             "better. Sweep it up, not down. Note raising it also raises "
+             "D = 2*zeta*omega_n, which is the coefficient that limit-cycled "
+             "this rig at 24.5 Hz; --dtc-damping-max holds D fixed and lowers "
+             "zeta as fn rises, so the sweep is safe but gets progressively "
+             "less damped -- watch the oscillation section of "
+             "analyze_dtc_log.py, not just |W_lin| (default %(default)s)")
     parser.add_argument(
         "--dtc-fn-ang", type=float, default=None, metavar="HZ",
         help="--dtc-lambda: angular natural frequency (Hz). Lambda already "

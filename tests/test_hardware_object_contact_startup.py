@@ -257,12 +257,13 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
         self.assertAlmostEqual(args.max_lead_m, 0.05)
         # j3/j4 at 1.0 was below UR5e wrist breakaway: they clipped on 32.9%
         # and 45.3% of ticks, so the two joints that carry a width traverse's
-        # rotation could not turn at all. 6.0 cleared it (1.0% / 0.1%) -- and
-        # then bound again once fn_ang was untied (4.2% overall, 14.7% of Q3 on
-        # dtc_20260830_002759.csv). 10.0 is the velocity law's own wrist cap
-        # and far under the UR5e joint rating of 28 N.m.
+        # rotation could not turn at all. 6.0 cleared it (1.0% / 0.1%). It was
+        # briefly 10.0 because 6.0 binds again once fn_ang is untied, and went
+        # straight back: during the 24.5 Hz limit cycle on
+        # dtc_20260830_005006.csv, tau_max was the only thing bounding how hard
+        # the wrist shook, and j4 sat on the 10 N.m rail for 18.9% of ticks.
         self.assertEqual(
-            list(args.dtc_tau_max), [50.0, 50.0, 50.0, 10.0, 10.0, 30.0])
+            list(args.dtc_tau_max), [50.0, 50.0, 50.0, 6.0, 6.0, 30.0])
         self.assertAlmostEqual(args.align_duration, 4.0)
 
     def test_speedj_backend_is_still_reachable(self):
@@ -632,8 +633,8 @@ class WrenchLawWiringTest(unittest.TestCase):
         # doing work. See resolve_wrench_fn_ang / resolve_wrench_zeta.
         self.assertAlmostEqual(kw["fn_ang"], 3.0)
         self.assertAlmostEqual(kw["err_clip_lin"], 0.05)
-        self.assertAlmostEqual(kw["damping_ratio"], mod.WRENCH_ZETA_LAMBDA)
-        self.assertAlmostEqual(kw["damping_ratio_ang"], mod.WRENCH_ZETA_LAMBDA)
+        self.assertAlmostEqual(kw["damping_ratio"], mod.WRENCH_ZETA_LIN)
+        self.assertAlmostEqual(kw["damping_ratio_ang"], mod.WRENCH_ZETA_ANG)
         # Without Lambda both splits come back and mean what they used to.
         no_lambda = mod._wrench_law_kwargs(self._args(
             ["--contact-backend", "dtc", "--dtc-law", "wrench",
@@ -761,21 +762,56 @@ class WrenchLawWiringTest(unittest.TestCase):
         args = mod.build_arg_parser().parse_args([])
         self.assertIsNone(args.dtc_damping_ratio)
         self.assertIsNone(args.dtc_damping_ratio_ang)
-        # No Lambda: the hand-folded mass correction is untouched.
+        # Same two ratios with and without Lambda. They were briefly 0.7/0.7
+        # under Lambda on the argument that Lambda makes M = 1 so zeta reads as
+        # the true damping ratio -- which is correct and beside the point, see
+        # the limit-cycle test below.
+        for use_lambda in (False, True):
+            self.assertEqual(
+                mod.resolve_wrench_zeta(use_lambda, None, None, fn_lin=3.0,
+                                        fn_ang=3.0),
+                (mod.WRENCH_ZETA_LIN, mod.WRENCH_ZETA_ANG), use_lambda)
+
+    def test_the_damping_cap_refuses_what_limit_cycled_the_arm(self):
+        """D, not zeta, is the bounded quantity -- and fn raises D too.
+
+        dtc_20260830_005006.csv ran a 24.5 Hz limit cycle with the stick at
+        rest at zeta 0.7/0.7. A damper is -D*v applied one loop delay late, so
+        past 90 deg of phase it is *negative* damping; at ~12 ms of delay that
+        is everything above ~20 Hz, and this rig has a structural mode right
+        there. The rigid-body bound (D*T ~ 1) said 0.21 and was useless.
+        """
+        import math
+
+        mod = _load_example()
+        fn = 3.0
+        d = lambda z: 2.0 * z * 2.0 * math.pi * fn
+        # The two measured-stable ratios fit under the cap; 0.7 does not.
+        self.assertLessEqual(d(mod.WRENCH_ZETA_LIN), mod.WRENCH_DAMPING_MAX_1_S)
+        self.assertLessEqual(d(mod.WRENCH_ZETA_ANG), mod.WRENCH_DAMPING_MAX_1_S)
+        self.assertGreater(d(0.7), mod.WRENCH_DAMPING_MAX_1_S)
+        lin, ang = mod.resolve_wrench_zeta(True, 0.7, 0.7, fn_lin=fn, fn_ang=fn)
+        self.assertAlmostEqual(d(lin), mod.WRENCH_DAMPING_MAX_1_S)
+        self.assertAlmostEqual(d(ang), mod.WRENCH_DAMPING_MAX_1_S)
+        # Raising fn at a fixed zeta walks back into the cycle, so the cap has
+        # to take zeta *down* as fn goes up. This is what makes the planned
+        # --dtc-fn-lin sweep safe.
+        hi, _ = mod.resolve_wrench_zeta(True, None, None, fn_lin=6.0, fn_ang=6.0)
+        self.assertLess(hi, mod.WRENCH_ZETA_LIN)
+        self.assertAlmostEqual(
+            2.0 * hi * 2.0 * math.pi * 6.0, mod.WRENCH_DAMPING_MAX_1_S)
+        # Without Lambda D is in N.s/m and the cap must not touch it.
         self.assertEqual(
-            mod.resolve_wrench_zeta(False, None, None),
-            (mod.WRENCH_ZETA_LIN, mod.WRENCH_ZETA_ANG))
-        # Lambda: one zeta, and it means what it says.
+            mod.resolve_wrench_zeta(False, 0.7, 0.7, fn_lin=fn, fn_ang=fn),
+            (0.7, 0.7))
+        # 0 disables it, for a deliberate experiment.
         self.assertEqual(
-            mod.resolve_wrench_zeta(True, None, None),
-            (mod.WRENCH_ZETA_LAMBDA, mod.WRENCH_ZETA_LAMBDA))
-        # An explicit flag still wins on either blade, either way.
-        self.assertEqual(mod.resolve_wrench_zeta(True, 0.2, None), (0.2, 0.2))
-        self.assertEqual(mod.resolve_wrench_zeta(True, None, 0.05),
-                         (mod.WRENCH_ZETA_LAMBDA, 0.05))
-        for fn in (3.0, 4.5):
-            d = 2.0 * mod.WRENCH_ZETA_LAMBDA * (2.0 * math.pi * fn)
-            self.assertLess(d * 0.018, 1.0, fn)  # M = 1 under Lambda
+            mod.resolve_wrench_zeta(True, 0.7, 0.7, fn_lin=fn, fn_ang=fn,
+                                    damping_max=0.0),
+            (0.7, 0.7))
+        self.assertAlmostEqual(
+            mod.build_arg_parser().parse_args([]).dtc_damping_max,
+            mod.WRENCH_DAMPING_MAX_1_S)
 
     def test_contact_is_refused_under_the_wrench_law(self):
         """The press reaches the arm through set_tool_z_velocity, which the

@@ -64,8 +64,101 @@ def main():
     print("\n  rising left-to-right = still capped, raise --dtc-tau-max on that joint.")
     print("  flat/zero while the TCP will not slide = not the cap; look at |W_lin|.")
 
+    oscillation(rows, live, n)
     stall(rows, live, W, n)
     tracking(rows, live, W)
+
+
+def oscillation(rows, live, n):
+    """Limit-cycle report: is the arm shaking at a frequency nobody commanded?
+
+    This exists because dtc_20260830_005006.csv passed every other section of
+    this script -- conformity 0.59 deg median, 2 re-arm edges under 2 N, err_lin
+    6 mm -- while the operator watched the arm oscillate violently with the
+    stick at rest. The only hint anywhere in the old output was j4's clip%, and
+    a clip% reads as "cap too low", which is the opposite of the truth.
+
+    A limit cycle is obvious the moment you look in the frequency domain and
+    invisible in every percentile: tau and qdot on all six joints peaked at
+    **24.5 Hz**, common to every joint, which is a structural mode rather than
+    anything the control law has a pole at. What sustains it is the damper:
+    -D*v applied one loop delay late is *negative* damping at any frequency
+    past 90 deg of lag, and at ~12 ms of delay that is everything above ~20 Hz.
+
+    So the two numbers that matter are the peak frequency and how much of the
+    motion sits there -- and both must be read against a *quiet stick*, because
+    a peak while the operator is driving may just be the operator.
+    """
+    if f"qd{n - 1}" not in rows[0]:
+        print("\n  (no qd* columns -- log predates them; no oscillation report)")
+        return
+    t = np.array([float(r["t"]) for r in rows])[live]
+    if t.size < 64:
+        print("\n  (too few live ticks for an oscillation report)")
+        return
+    dt = float(np.median(np.diff(t)))
+    if not np.isfinite(dt) or dt <= 0:
+        return
+    tau = np.array([[float(r[f"tau{j}"]) for j in range(n)] for r in rows])[live]
+    qd = np.array([[float(r[f"qd{j}"]) for j in range(n)] for r in rows])[live]
+    act = (np.array([r["act"] == "1" for r in rows])[live]
+           if "act" in rows[0] else np.ones(t.size, bool))
+    win = np.hanning(t.size)
+    freq = np.fft.rfftfreq(t.size, dt)
+
+    def peak(x):
+        spec = np.abs(np.fft.rfft((x - x.mean()) * win))
+        spec[0] = 0.0
+        k = int(np.argmax(spec))
+        return freq[k], spec, k
+
+    print(f"\n  oscillation (FFT over {t.size} live ticks at {1/dt:.0f} Hz, "
+          f"Nyquist {0.5/dt:.0f} Hz)")
+    print("  joint   tau peak Hz   qdot peak Hz   |qdot| p95 quiet   |tau| p95 quiet")
+    quiet = ~act
+    peaks = []
+    for j in range(n):
+        f_tau, _, _ = peak(tau[:, j])
+        f_qd, _, _ = peak(qd[:, j])
+        peaks.append(f_qd)
+        qq = (f"{q(np.abs(qd[quiet, j]), 95):10.3f}" if quiet.any() else "         -")
+        tq = (f"{q(np.abs(tau[quiet, j]), 95):11.2f}" if quiet.any() else "          -")
+        print(f"   j{j}      {f_tau:8.1f}       {f_qd:8.1f}       {qq}       {tq}")
+
+    # Energy-weighted, not a median over joints: on the run this was written
+    # for, three joints were barely moving and their peaks sat near DC, which
+    # dragged a median from the true 24.5 Hz down to 19.4. Sum the per-joint
+    # power first, then take the peak of the total -- the joints that are
+    # actually shaking are the ones that should name the frequency.
+    power = np.zeros(freq.size)
+    for j in range(n):
+        x = qd[:, j]
+        power += np.abs(np.fft.rfft((x - x.mean()) * win)) ** 2
+    power[0] = 0.0
+    dom = float(freq[int(np.argmax(power))])
+    share = float(power[np.abs(freq - dom) < 2.0].sum() / max(power.sum(), 1e-30))
+    print(f"\n  dominant qdot frequency (energy-weighted over joints): "
+          f"{dom:.1f} Hz, carrying {share:.0%} of the qdot power")
+    del peaks
+    if quiet.any():
+        moved = float(np.percentile(np.linalg.norm(qd[quiet], axis=1), 95))
+        print(f"  |qdot| p95 with the stick QUIET: {moved:.3f} rad/s "
+              f"({quiet.mean():.0%} of live ticks)")
+        if moved > 0.05 and dom > 8.0:
+            print("     \033[93mLIMIT CYCLE: the arm is moving fast at a single "
+                  "frequency with nothing commanding it.\033[0m")
+            print(f"     A damper is -D*v applied one loop delay late, so past "
+                  f"90 deg of lag it ADDS energy. At {dom:.1f} Hz that is a "
+                  f"delay of {1000/(4*dom):.0f} ms, i.e. ~{1/(4*dom*dt):.1f} "
+                  f"control ticks -- about what this loop plus its republish "
+                  f"thread actually holds.")
+            print("     Lower D, not K: --dtc-damping-ratio / "
+                  "--dtc-damping-ratio-ang, or --dtc-damping-max which bounds "
+                  "D = 2*zeta*omega_n directly. Raising --dtc-tau-max here only "
+                  "raises the amplitude.")
+        else:
+            print("     no limit cycle (quiet-stick motion is small or "
+                  "low-frequency).")
 
 
 def stall(rows, live, W, n):
