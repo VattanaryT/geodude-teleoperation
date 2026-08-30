@@ -1,10 +1,13 @@
-"""Outer-loop field follow: live TCP + stick step, then project() at 15–50 Hz.
+"""Outer-loop field follow: live TCP + field-frame stick, full field R carrot.
 
-Like free-space teleop, the carrot is a small increment from the live tip so
-lag cannot compound. ``compute_control_command`` stays a pose-spring tracker.
-Hardware follow runs ``project()`` in a helper process so the 500 Hz speedJ
-thread is not stalled by a ~7 ms query (parent waits on a queue, which
-releases the GIL).
+Like the orange viser ghost (``ghost_flange_world(..., alpha=1)``): stick linear
+is expressed in ``approach_basis_at`` / field axes, and the commanded orientation
+is the field at the tip — not a 0.02 rad crawl from the live wrist. A live-based
+``max_dR`` cap used to pin ``R_err`` at ~1.1° forever. Rate-limiting (when
+``max_dR_rad>0``) is field→field only, to blunt a single project() flip.
+``compute_control_command`` stays a pose-spring tracker. Hardware follow runs
+``project()`` in a helper process so the 500 Hz speedJ thread is not stalled
+by a ~7 ms query (parent waits on a queue, which releases the GIL).
 """
 from __future__ import annotations
 
@@ -340,21 +343,24 @@ class FieldFollow:
         if (self._rebase_on_live and live_xyz is not None
                 and _is_finite_xyz(live_xyz)):
             base = np.asarray(live_xyz, dtype=float).reshape(3)
-        # Stick in the live tool frame. Slerp field R from live R so the carrot
-        # cannot run ahead and dump leftover wrist error into TCP (chamfer lever).
-        R_from = self._undo[1]
-        if live_R is not None:
-            R_live = np.asarray(live_R, dtype=float).reshape(3, 3)
-            if _is_rotation(R_live):
-                R_from = R_live
-        step = R_from @ delta
+        # Stick + carrot R match the orange viser ghost: field axes at the tip
+        # (approach_basis_at / project), not a slerp from the live wrist.
+        # max_dR_rad only rate-limits field→field (mesh flips); 0 = full snap.
+        R_prev = self._undo[1]
+        R_field = R_prev
+        basis_fn = getattr(self._vf, "approach_basis_at", None)
+        if callable(basis_fn):
+            R_at = np.asarray(basis_fn(base), dtype=float).reshape(3, 3)
+            if _is_rotation(R_at):
+                R_field = R_at
+        step = R_field @ delta
         if tangent:
-            z_hat = R_from[:, 2]
+            z_hat = R_field[:, 2]
             step = step - z_hat * float(np.dot(step, z_hat))
         self._xyz = base + step
         self._clamp_lead(live_xyz)
         stick_xyz = self._xyz.copy()
-        target, project_ms = self._project(stick_xyz, R_from)
+        target, project_ms = self._project(stick_xyz, R_field)
         T = np.asarray(target.to_transformation_matrix(), dtype=float)
         R_raw = T[:3, :3]
         xyz_proj = T[:3, 3].copy()
@@ -367,7 +373,7 @@ class FieldFollow:
                 and _is_rotation(R_raw) and live_ok):
             self.revert_tick()
             return FollowTick(idle=True)
-        R_new = _limit_rotation(R_from, R_raw, self._max_dR_rad)
+        R_new = _limit_rotation(R_prev, R_raw, self._max_dR_rad)
         if not _is_rotation(R_new):
             self.revert_tick()
             return FollowTick(idle=True)
@@ -438,9 +444,10 @@ def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
                        tangent=False):
     """Apply a follow tick to the pose spring.
 
-    Stick tick: live TCP + body linear, field R slerped from live R.
-    Quiet stick freezes (clears pending) so leftover R cannot keep pushing.
-    Stick-live leftover snaps xyz; commanded R is live so the wrist cannot run ahead.
+    Stick tick: live TCP + field-frame linear; commanded R is the field at the
+    tip (orange-ghost contract). Quiet stick freezes (clears pending) so
+    leftover R cannot keep pushing. Stick-live leftover snaps xyz; catch-up
+    holds use live R so a stalled wrist is not yanked by field orientation.
     """
     del err_rad, max_ee_jump_m
     R_live = _rotation_or_none(live_R)

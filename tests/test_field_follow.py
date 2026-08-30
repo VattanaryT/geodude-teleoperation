@@ -379,7 +379,7 @@ class FieldFollowTest(unittest.TestCase):
         np.testing.assert_allclose(follow.xyz, [0.015, 0.0, 1.0], atol=1e-9)
 
     def test_tangent_stick_has_no_tool_z_step(self):
-        """Contact slide must stay in the tool XY plane so DualLoop owns depth."""
+        """Contact slide must stay in the field XY plane so DualLoop owns depth."""
         from scipy.spatial.transform import Rotation
 
         R = Rotation.from_rotvec([0.0, 0.4, 0.0]).as_matrix()
@@ -394,6 +394,33 @@ class FieldFollowTest(unittest.TestCase):
         z_hat = R[:, 2]
         self.assertAlmostEqual(float(np.dot(step, z_hat)), 0.0, places=9)
         self.assertGreater(float(np.linalg.norm(step)), 1e-6)
+
+    def test_stick_step_uses_approach_basis_at_not_lagged_carrot(self):
+        """Retract/slide axes come from the object field at the tip (viser contract)."""
+        from scipy.spatial.transform import Rotation
+
+        R_at = Rotation.from_rotvec([0.0, 0.5, 0.0]).as_matrix()
+        R_stale = np.eye(3)
+
+        class BasisVf(FakeVf):
+            def approach_basis_at(self, position):
+                return R_at
+
+            def project(self, motor):
+                T = np.asarray(motor.to_transformation_matrix(), dtype=float)
+                T[:3, :3] = R_at
+                return motor_from_matrix(T)
+
+        follow = FieldFollow(
+            BasisVf(), hz=50.0, max_dR_rad=0.0, snap_to_surface=False)
+        live = np.array([0.0, 0.0, 1.0])
+        follow.seed(live, R_stale)
+        follow.add_body_linear(np.array([0.0, 0.0, 0.01]))
+        follow.tick(0.0, _motor_at(live), live_xyz=live, live_R=np.eye(3))
+        # Stick Z along field approach (= R_at[:,2]), not stale identity Z.
+        np.testing.assert_allclose(
+            follow.xyz, live + R_at @ np.array([0.0, 0.0, 0.01]), atol=1e-9)
+        np.testing.assert_allclose(follow._R, R_at, atol=1e-9)
 
     def test_lead_is_capped_to_live_tcp(self):
         vf = FakeVf()
@@ -427,7 +454,7 @@ class FieldFollowTest(unittest.TestCase):
         self.assertLessEqual(err, 0.12 + 1e-9)
         np.testing.assert_allclose(follow.xyz, [0.01, 0.0, 1.0], atol=1e-9)
 
-    def test_field_R_is_slerped_xyz_stays_stick(self):
+    def test_field_R_is_rate_limited_field_to_field(self):
         from scipy.spatial.transform import Rotation
 
         R_field = Rotation.from_rotvec([0.2, 0.0, 0.0]).as_matrix()
@@ -439,9 +466,9 @@ class FieldFollowTest(unittest.TestCase):
                 T[:3, 3] = [9.0, 9.0, 9.0]
                 return motor_from_matrix(T)
 
-        # snap_to_surface off: this case is about the R slerp, and its vf parks
-        # the projected position at [9,9,9] purely to prove position did not
-        # come from project(). SurfaceSnapTest below covers the snap itself.
+        # snap_to_surface off: this case is about the R rate limit, and its vf
+        # parks the projected position at [9,9,9] purely to prove position did
+        # not come from project(). SurfaceSnapTest below covers the snap itself.
         follow = FieldFollow(
             TiltVf(), hz=50.0, max_dR_rad=0.02, snap_to_surface=False)
         follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
@@ -451,26 +478,32 @@ class FieldFollowTest(unittest.TestCase):
             orientation_error_rad(np.eye(3), follow._R), 0.02, places=6)
         np.testing.assert_allclose(follow.xyz, [0.01, 0.0, 1.0], atol=1e-9)
 
-    def test_field_R_slerps_from_live_not_ahead_carrot(self):
-        """Carrot R ahead of the wrist must not become the spring error (TCP lever)."""
+    def test_field_R_snaps_full_like_orange_ghost(self):
+        """Commanded R is the field at the tip, not a crawl from live wrist.
+
+        Old live-based max_dR=0.02 pinned R_err at ~1.1° forever while the
+        orange ghost already showed full field orientation.
+        """
         from scipy.spatial.transform import Rotation
 
-        R_ahead = Rotation.from_rotvec([0.2, 0.0, 0.0]).as_matrix()
+        R_field = Rotation.from_rotvec([0.2, 0.0, 0.0]).as_matrix()
 
         class TiltVf:
             def project(self, motor):
                 T = np.asarray(motor.to_transformation_matrix(), dtype=float)
-                T[:3, :3] = R_ahead
+                T[:3, :3] = R_field
                 return motor_from_matrix(T)
 
-        follow = FieldFollow(TiltVf(), hz=50.0, max_dR_rad=0.02)
-        follow.seed(np.array([0.0, 0.0, 1.0]), R_ahead)
+        follow = FieldFollow(TiltVf(), hz=50.0, max_dR_rad=0.0)
+        follow.seed(np.array([0.0, 0.0, 1.0]), R_field)
         follow.add_body_linear(np.array([0.01, 0.0, 0.0]))
         follow.tick(
             0.0, _motor_at([0.0, 0.0, 1.0]),
             live_xyz=np.array([0.0, 0.0, 1.0]), live_R=np.eye(3))
         self.assertAlmostEqual(
-            orientation_error_rad(np.eye(3), follow._R), 0.02, places=6)
+            orientation_error_rad(R_field, follow._R), 0.0, places=6)
+        self.assertGreater(
+            orientation_error_rad(np.eye(3), follow._R), 0.15)
 
     def test_mapped_ee_lever_does_not_kill_tracker(self):
         """Chamfer flange lever from field R vs live R can exceed 8 cm EE.
@@ -678,7 +711,7 @@ class HardwareFollowRoutingTest(unittest.TestCase):
         self.assertIn("FieldFollow", src)
         self.assertIn("drive_field_follow", src)
         self.assertIn("project_in_process=True", src)
-        self.assertIn("max_dR_rad=0.02", src)
+        self.assertIn("max_dR_rad=0.0", src)
         self.assertIn("max_qddot=5.0", src)
         self.assertNotIn("set_orientation_compliant", src)
         self.assertIn("live_R=", src)

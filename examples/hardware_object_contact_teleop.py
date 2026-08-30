@@ -908,7 +908,7 @@ def main():
     field_preview = FieldAlignPreview(vf)
     follow = FieldFollow(
         vf, hz=args.follow_hz, project_in_process=True, mesh=object_surface,
-        max_lead_m=args.max_lead_m, max_step_m=0.004, max_dR_rad=0.02,
+        max_lead_m=args.max_lead_m, max_step_m=0.004, max_dR_rad=0.0,
         snap_to_surface=args.snap_follow_to_surface,
         # speedJ keeps the re-based carrot: it is a velocity command and the
         # position servo underneath wants exactly that. The wrench law turns
