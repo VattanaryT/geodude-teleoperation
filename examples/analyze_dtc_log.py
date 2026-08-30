@@ -247,6 +247,11 @@ def oscillation(rows, live, W, n):
     # against an aggregate of 0.069 -- an order of magnitude apart, on the same
     # run, under the same word.
     quiet = _settled(~act, act, dt)
+    # Needed by the ringing verdict below as well as by its own section: a ring
+    # that survives the operator letting go and one that dies with them take
+    # opposite fixes.
+    moved = (float(np.percentile(np.linalg.norm(qd[quiet], axis=1), 95))
+             if quiet.any() else float("nan"))
     peaks = []
     for j in range(n):
         f_tau, _, _ = peak(tau[:, j])
@@ -313,12 +318,30 @@ def oscillation(rows, live, W, n):
             # The damper is still removing energy; the loop is simply asking
             # for a bandwidth its sample rate and delay cannot deliver.
             print("     Under 90 deg the damper is still damping -- this is an "
-                  "under-damped closed loop, not a delayed damper, so the "
-                  "lever is fn and not D.")
-            print(f"     Lower --dtc-fn-lin (K = (2*pi*fn)^2). This loop's "
-                  f"usable crossover is about f_s/12 = {1.0/(12*dt):.0f} Hz, "
-                  f"and a second-order target has to sit well under that; "
-                  f"raising --dtc-hz is the only way to move the ceiling.")
+                  "under-damped closed loop, not a delayed damper, so D is "
+                  "still a lever here and not the disease.")
+            # Excited vs self-sustaining. Under 90 deg the damper cannot
+            # sustain anything on its own, so the quiet number says which one
+            # this is -- and they take opposite fixes. dtc_20260830_134133.csv
+            # rings at 14.99 Hz on 22.7% of the power and is 0.001 rad/s quiet:
+            # it is stable, the operator is exciting it, and it responds to
+            # MORE damping. dtc_20260830_132604.csv rang at 14.43 Hz and held
+            # 0.215 rad/s quiet, which is a loop feeding itself.
+            if np.isfinite(moved) and moved <= QUIET_HOLD_RADPS:
+                print(f"     EXCITED, not self-sustaining: it dies when the "
+                      f"stick stops ({moved:.3f} rad/s quiet). Raise "
+                      f"--dtc-damping-max first -- the peak is at "
+                      f"{phase:.0f} deg, so D still buys cos({phase:.0f}) = "
+                      f"{np.cos(np.radians(phase)):.2f} of real damping there "
+                      f"-- then lower --dtc-fn-lin if it persists.")
+            else:
+                print("     It survives the stick going quiet, so the loop is "
+                      "feeding itself: lower --dtc-fn-lin (K = (2*pi*fn)^2) "
+                      "rather than adding damping to it.")
+            print(f"     This loop's usable crossover is about f_s/12 = "
+                  f"{1.0/(12*dt):.0f} Hz and 90 deg of lag lands at "
+                  f"{1.0/(4*1.5*dt):.0f} Hz; a second-order target has to sit "
+                  f"well under the first. Raising --dtc-hz moves both.")
     else:
         print("     no ringing (the motion is where the operator put it).")
 
@@ -326,7 +349,6 @@ def oscillation(rows, live, W, n):
     if not held.any():
         print(f"  (no quiet ticks past {QUIET_SETTLE_S:g} s of coast-down)")
         return
-    moved = float(np.percentile(np.linalg.norm(qd[held], axis=1), 95))
     print(f"  |qdot| p95 with the stick QUIET and settled: "
           f"{moved:.3f} rad/s ({held.mean():.0%} of live ticks, "
           f"{QUIET_SETTLE_S:g} s of coast-down dropped)")

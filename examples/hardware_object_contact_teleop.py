@@ -209,6 +209,46 @@ WRENCH_FN_ANG_MAX_LAMBDA = 3.0
 # (D_lin = 11.3 at zeta 0.3 / fn 3.0, D_ang = 3.8 at zeta 0.1) and refuses the
 # 26.4 that limit-cycled.
 WRENCH_DAMPING_MAX_1_S = 12.0
+# ...and the control rate it was measured at. The cap is a DELAY bound wearing
+# a gain's clothes, so it has to move when the delay does. See
+# resolve_wrench_damping_max.
+WRENCH_DAMPING_MAX_REF_HZ = 125.0
+WRENCH_DAMPING_MAX_SCALE_LIMIT = 2.0
+
+
+def resolve_wrench_damping_max(hz, damping_max=None):
+    """The D ceiling, scaled off the control rate it was calibrated at.
+
+    12.0 is not a property of the arm, it is a property of the arm *plus the
+    loop delay it was measured with*. What it bounds is the negative damping a
+    late `-D*v` pumps into a structural mode: at lag `phi = 360*f_m*T` the
+    component still opposing velocity is `D*cos(phi)`, and past 90 deg that is
+    a source. At 125 Hz, T ~ 12 ms put this rig's 24.5 Hz mode at **108 deg**
+    (cos = -0.31), which is the run that railed tau 89 times and ended in
+    ROBOT_EMERGENCY_STOP, and 12.0 is the largest D that mode absorbed.
+
+    At 200 Hz the analyzer measures T = 7.7 ms, so the same 24.5 Hz mode sits
+    at **68 deg** -- cos = +0.37, still *removing* energy. The specific failure
+    12.0 was built to prevent cannot happen at this rate, and holding the cap
+    there silently detunes the loop: at --dtc-fn-lin 4.0 it took zeta_lin
+    0.30 -> 0.239 (dtc_20260830_134133.csv's header), i.e. 20% less damping at
+    exactly the fn where damping matters most, and that run then put 22.7% of
+    its qdot power at 14.99 Hz.
+
+    Phase is linear in T and T is ~1/hz, so the cap scales with hz. That is the
+    same `D*T` product CLAUDE.md calls useless as an *absolute* stability bound
+    -- and it is; it is used here only as the scaling law for a number whose
+    value came from measurement. Bounded at WRENCH_DAMPING_MAX_SCALE_LIMIT
+    because extrapolating a measured limit is not the same as measuring it, and
+    because above ~31 Hz at this rate there is a region no log has looked at.
+
+    Reduction to the working case: at --dtc-hz 125 this returns 12.0 exactly.
+    """
+    if damping_max is not None:
+        return float(damping_max)
+    scale = min(max(float(hz) / WRENCH_DAMPING_MAX_REF_HZ, 1.0),
+                WRENCH_DAMPING_MAX_SCALE_LIMIT)
+    return WRENCH_DAMPING_MAX_1_S * scale
 
 
 def _cap_zeta(zeta, fn, damping_max, blade, warn):
@@ -506,7 +546,8 @@ def _wrench_law_kwargs(args):
     zeta_lin, zeta_ang = resolve_wrench_zeta(
         args.dtc_lambda, args.dtc_damping_ratio, args.dtc_damping_ratio_ang,
         fn_lin=args.dtc_fn_lin, fn_ang=fn_ang,
-        damping_max=args.dtc_damping_max,
+        damping_max=resolve_wrench_damping_max(
+            args.dtc_hz, args.dtc_damping_max),
         warn=lambda m: print(m, flush=True))
     return dict(
         wrench_law=True,
@@ -732,7 +773,7 @@ def build_arg_parser():
              "rig's 24.5 Hz mode (j4 on its cap for 18.9% of ticks at 0.7), so "
              "this half keeps its own, smaller, measured-stable number")
     parser.add_argument(
-        "--dtc-damping-max", type=float, default=WRENCH_DAMPING_MAX_1_S,
+        "--dtc-damping-max", type=float, default=None,
         metavar="PER_S",
         help="--dtc-law wrench + --dtc-lambda: ceiling on the damping "
              "coefficient D = 2*zeta*omega_n in 1/s, applied to both blades "
@@ -741,8 +782,10 @@ def build_arg_parser():
              "fn as well as zeta -- a --dtc-fn-lin sweep at fixed zeta walks "
              "into the same limit cycle, and this takes zeta down instead of "
              "letting it. It is NOT the rigid-body D*T ~ 1 bound, which said "
-             "0.21 was safe on the run that oscillated. 0 disables the cap "
-             "(default %(default)s)")
+             "0.21 was safe on the run that oscillated. 0 disables the cap. "
+             "Default is 12.0 scaled by --dtc-hz/125 (so 19.2 at the 200 Hz "
+             "default), because what it bounds is a phase lag, not a gain -- "
+             "see resolve_wrench_damping_max")
     parser.add_argument(
         "--no-dtc-hold-at-tick", dest="dtc_hold_at_tick",
         action="store_false", default=True,

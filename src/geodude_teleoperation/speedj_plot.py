@@ -196,6 +196,35 @@ def _draw_speedj_figure(x, qdot, qddot, dt, spring, measured=None, stick=None,
     ax_a.grid(True, alpha=0.3)
     ax_s.grid(True, alpha=0.3)
     ax_dt.grid(True, alpha=0.3)
+
+    # --- spectrum panel ---------------------------------------------------
+    # See qdot_spectrum. The two vertical lines are the whole point of the
+    # panel: which side of f_90 the peak lands on decides whether the lever is
+    # D or fn, and no time trace shows that.
+    ax_f.set_ylabel("|q̇(f)|")
+    ax_f.set_xlabel("Hz")
+    ax_f.set_yscale("log")
+    ax_f.grid(True, alpha=0.3, which="both")
+    line_spec, = ax_f.plot([], [], color="k", lw=1.1)
+    span_stick = ax_f.axvspan(0.0, SPECTRUM_STICK_FLOOR_HZ, color="0.85",
+                              alpha=0.7, lw=0, label="operator")
+    line_f90 = ax_f.axvline(np.nan, color="C3", ls="--", lw=1.2,
+                            label="90° lag: D flips sign")
+    line_cross = ax_f.axvline(np.nan, color="C1", ls=":", lw=1.2,
+                              label="usable crossover f_s/12")
+    marker_pk, = ax_f.plot([], [], "v", color="C0", ms=7, label="peak >2 Hz")
+    # Phase lag through one loop delay, on the right axis. This is the line
+    # that makes "past 90 deg the damper is the source" something you can see
+    # rather than something you have to be told.
+    ax_ph = ax_f.twinx()
+    ax_ph.set_ylabel("lag [deg]", fontsize=8)
+    ax_ph.set_ylim(0.0, 180.0)
+    ax_ph.set_yticks([0, 90, 180])
+    ax_ph.tick_params(labelsize=8)
+    line_phase, = ax_ph.plot([], [], color="C3", lw=0.9, alpha=0.55)
+    ax_ph.axhline(90.0, color="C3", ls="--", lw=0.6, alpha=0.4)
+    ax_f.legend(loc="upper right", ncol=2, fontsize=7)
+    del span_stick
     qdot = np.asarray(qdot, dtype=float)
     qddot = np.asarray(qddot, dtype=float)
     if qdot.ndim == 1:
@@ -277,7 +306,96 @@ def _draw_speedj_figure(x, qdot, qddot, dt, spring, measured=None, stick=None,
 # On-screen size of the live window, in inches. The saved PNG stays large --
 # it is read zoomed in, after the fact -- but the live figure sits beside viser
 # on the same screen, where 10x9 covered most of it.
-LIVE_FIGSIZE = (6.4, 4.8)
+LIVE_FIGSIZE = (6.4, 6.4)
+
+# --- the spectrum panel ----------------------------------------------------
+#
+# Everything the DTC gain hunt turns on is a frequency, and none of it is
+# visible in a time trace: a 15 Hz line inside an 8 s window is 120 cycles of
+# scribble. The panel exists to make one question answerable at a glance --
+# *where* is the joint motion, and is the damper still helping there.
+#
+# A damper applies -D*v(t-T). At frequency f that is a phase lag of
+# phi = 360*f*T, and the part still opposing velocity is D*cos(phi). Past
+# phi = 90 deg the cosine is negative and the "damper" pumps energy in. So
+# f_90 = 1/(4T) is a hard line on the frequency axis: below it more D helps,
+# above it more D is the disease. Marked in red.
+#
+# The other line is the usable crossover, ~f_s/12 -- the closed-loop bandwidth
+# a sampled loop with this much delay can actually deliver. A second-order
+# target placed near it resonates instead of tracking, which is what
+# --dtc-fn-lin 4.0 did at 125 Hz. Marked in orange.
+#
+# Between the two: a peak under f_90 is an under-damped loop (lever: fn down,
+# or D up) and a peak over it is a delayed damper (lever: D down, and ONLY D).
+# Below STICK_FLOOR_HZ is the operator and is shaded out -- a SpaceMouse
+# carries most of the power there on every healthy run.
+SPECTRUM_STICK_FLOOR_HZ = 2.0
+SPECTRUM_MAX_HZ = 40.0
+SPECTRUM_MIN_SAMPLES = 128
+# Loop delay as a multiple of the measured tick, matching analyze_dtc_log.py:
+# one control period plus the republish thread lands near 1.5 ticks.
+SPECTRUM_DELAY_TICKS = 1.5
+
+
+def qdot_spectrum(t, qd, *, stick_floor_hz=SPECTRUM_STICK_FLOOR_HZ,
+                  max_hz=SPECTRUM_MAX_HZ, delay_ticks=SPECTRUM_DELAY_TICKS):
+    """``(freq, amplitude, info)`` for a window of joint velocities.
+
+    Energy-summed across joints, not per joint: on the run this was written for
+    three joints were barely moving and their spectra sat near DC, which drags
+    any per-joint summary away from the joints that are actually shaking.
+
+    ``info`` carries the peak above ``stick_floor_hz``, that peak's phase lag
+    through one loop delay, and the share of the above-floor power -- the same
+    three numbers ``analyze_dtc_log.py`` reports, computed the same way, so the
+    live window and the post-run report cannot disagree.
+    """
+    t = np.asarray(t, dtype=float).reshape(-1)
+    qd = np.asarray(qd, dtype=float)
+    if t.size < SPECTRUM_MIN_SAMPLES or qd.ndim != 2 or qd.shape[0] != t.size:
+        return None, None, None
+    dt = float(np.median(np.diff(t)))
+    if not np.isfinite(dt) or dt <= 0:
+        return None, None, None
+    win = np.hanning(t.size)
+    freq = np.fft.rfftfreq(t.size, dt)
+    power = np.zeros(freq.size)
+    for j in range(qd.shape[1]):
+        x = qd[:, j]
+        ok = np.isfinite(x)
+        if not ok.any():
+            continue
+        if not ok.all():
+            # A dropped or wrong-length measured sample leaves a NaN row. Fill
+            # it with the joint's own mean rather than skipping the joint: the
+            # fill contributes nothing after mean-removal, and dropping a whole
+            # joint over one bad tick blanks the panel mid-run.
+            x = np.where(ok, x, float(np.mean(x[ok])))
+        power += np.abs(np.fft.rfft((x - x.mean()) * win)) ** 2
+    if power.size:
+        power[0] = 0.0
+    total = max(power.sum(), 1e-30)
+    band = (freq >= stick_floor_hz) & (freq <= min(max_hz, 0.45 / dt))
+    share = float(power[band].sum() / total) if band.any() else 0.0
+    if band.any() and power[band].max() > 0:
+        pk = float(freq[int(np.argmax(np.where(band, power, 0.0)))])
+    else:
+        pk = float("nan")
+    delay_s = float(delay_ticks) * dt
+    info = {
+        "dt": dt,
+        "delay_s": delay_s,
+        # Where a lagged damper stops damping: phi = 360*f*T = 90 deg.
+        "f90_hz": 1.0 / (4.0 * delay_s) if delay_s > 0 else float("inf"),
+        # What a sampled loop with this delay can close on.
+        "f_cross_hz": 1.0 / (12.0 * dt),
+        "peak_hz": pk,
+        "peak_deg": 360.0 * pk * delay_s if np.isfinite(pk) else float("nan"),
+        "share": share,
+        "hz": 1.0 / dt,
+    }
+    return freq, np.sqrt(power), info
 
 
 def _enqueue_drop_oldest(sink, sample):
@@ -460,13 +578,24 @@ def _run_plot(in_q, window_s, port, figsize=LIVE_FIGSIZE):
 
     _choose_backend(port)
 
-    fig, axes = plt.subplots(4, 1, sharex=True, figsize=figsize)
+    # Five panels: four on a shared time axis, and the spectrum on frequency.
+    # Deliberately not sharex=True over all of them -- the bottom one is Hz.
+    fig, axes = plt.subplots(5, 1, figsize=figsize)
     try:
         fig.canvas.manager.set_window_title("speedJ command")
     except Exception:
         pass
     fig.suptitle("commanded actuation (parallel to viser, not in it)")
-    ax_v, ax_a, ax_s, ax_dt = axes
+    ax_v, ax_a, ax_s, ax_dt, ax_f = axes
+    try:
+        # Axes.sharex() rather than subplots(sharex=True): the bottom panel is
+        # frequency, not time, so the link is made by hand over the first four.
+        for ax in (ax_a, ax_s, ax_dt):
+            ax.sharex(ax_v)
+        for ax in (ax_v, ax_a, ax_s):
+            ax.tick_params(labelbottom=False)
+    except Exception:
+        pass
     ax_v.set_ylabel("q̇ cmd [rad/s]")
     ax_a.set_ylabel("q̈ cmd [rad/s²]")
     ax_s.set_ylabel("stick [mm]")
@@ -479,6 +608,35 @@ def _run_plot(in_q, window_s, port, figsize=LIVE_FIGSIZE):
     ax_a.grid(True, alpha=0.3)
     ax_s.grid(True, alpha=0.3)
     ax_dt.grid(True, alpha=0.3)
+
+    # --- spectrum panel ---------------------------------------------------
+    # See qdot_spectrum. The two vertical lines are the whole point of the
+    # panel: which side of f_90 the peak lands on decides whether the lever is
+    # D or fn, and no time trace shows that.
+    ax_f.set_ylabel("|q̇(f)|")
+    ax_f.set_xlabel("Hz")
+    ax_f.set_yscale("log")
+    ax_f.grid(True, alpha=0.3, which="both")
+    line_spec, = ax_f.plot([], [], color="k", lw=1.1)
+    span_stick = ax_f.axvspan(0.0, SPECTRUM_STICK_FLOOR_HZ, color="0.85",
+                              alpha=0.7, lw=0, label="operator")
+    line_f90 = ax_f.axvline(np.nan, color="C3", ls="--", lw=1.2,
+                            label="90° lag: D flips sign")
+    line_cross = ax_f.axvline(np.nan, color="C1", ls=":", lw=1.2,
+                              label="usable crossover f_s/12")
+    marker_pk, = ax_f.plot([], [], "v", color="C0", ms=7, label="peak >2 Hz")
+    # Phase lag through one loop delay, on the right axis. This is the line
+    # that makes "past 90 deg the damper is the source" something you can see
+    # rather than something you have to be told.
+    ax_ph = ax_f.twinx()
+    ax_ph.set_ylabel("lag [deg]", fontsize=8)
+    ax_ph.set_ylim(0.0, 180.0)
+    ax_ph.set_yticks([0, 90, 180])
+    ax_ph.tick_params(labelsize=8)
+    line_phase, = ax_ph.plot([], [], color="C3", lw=0.9, alpha=0.55)
+    ax_ph.axhline(90.0, color="C3", ls="--", lw=0.6, alpha=0.4)
+    ax_f.legend(loc="upper right", ncol=2, fontsize=7)
+    del span_stick
 
     ts = deque()
     qdots = deque()
@@ -550,6 +708,46 @@ def _run_plot(in_q, window_s, port, figsize=LIVE_FIGSIZE):
             ax_v.legend(loc="upper left", ncol=4, fontsize=8)
             ax_dt.legend(loc="upper left", fontsize=8)
 
+    spectrum_failed = []
+
+    def _update_spectrum(t_abs, qd):
+        if spectrum_failed:
+            return
+        freq, amp, info = qdot_spectrum(t_abs, qd)
+        if freq is None:
+            ax_f.set_title("collecting…", loc="right", fontsize=9)
+            return
+        top = min(SPECTRUM_MAX_HZ, 0.45 / info["dt"])
+        keep = freq <= top
+        line_spec.set_data(freq[keep], np.maximum(amp[keep], 1e-9))
+        line_f90.set_xdata([info["f90_hz"], info["f90_hz"]])
+        line_cross.set_xdata([info["f_cross_hz"], info["f_cross_hz"]])
+        line_phase.set_data(freq[keep],
+                            np.minimum(360.0 * freq[keep] * info["delay_s"], 180.0))
+        pk = info["peak_hz"]
+        if np.isfinite(pk):
+            k = int(np.argmin(np.abs(freq - pk)))
+            marker_pk.set_data([pk], [max(amp[k], 1e-9)])
+            # The verdict, in the two words that pick the knob. Which side of
+            # 90 deg the peak is on is the whole decision: under it the damper
+            # is still removing energy and the loop is merely asking for more
+            # bandwidth than it has (lower fn, or raise D); over it the damper
+            # itself is the source and nothing but less D touches it.
+            lever = ("D up / fn down" if info["peak_deg"] < 90.0
+                     else "D DOWN -- damper is the source")
+            ax_f.set_title(
+                f"peak {pk:.1f} Hz · {info['peak_deg']:.0f}° lag · "
+                f"{info['share']:.0%} of q̇ power >2 Hz → {lever}",
+                loc="right", fontsize=8)
+        else:
+            marker_pk.set_data([], [])
+            ax_f.set_title(f"{info['hz']:.0f} Hz loop, T≈"
+                           f"{1e3 * info['delay_s']:.1f} ms",
+                           loc="right", fontsize=8)
+        ax_f.set_xlim(0.0, top)
+        ax_f.relim()
+        ax_f.autoscale_view(scalex=False, scaley=True)
+
     def pump(_frame):
         nonlocal fill_idle
         while True:
@@ -616,6 +814,7 @@ def _run_plot(in_q, window_s, port, figsize=LIVE_FIGSIZE):
         ax_s.set_title(
             f"max |lin|={float(np.max(np.linalg.norm(s, axis=1))):.2f} mm",
             loc="right", fontsize=9)
+        m = None
         if measureds[-1] is not None:
             stacked = []
             for meas in measureds:
@@ -650,6 +849,19 @@ def _run_plot(in_q, window_s, port, figsize=LIVE_FIGSIZE):
                 f"max |q̈|={float(np.max(np.abs(a))):.1f} rad/s²", loc="right", fontsize=9)
         ax_dt.set_title(
             f"max Δt={float(np.max(dt_ms)):.2f} ms", loc="right", fontsize=9)
+        # Spectrum of the *measured* joint velocity -- what the arm did, not
+        # what it was told. Under the wrench law the command slot is torque, so
+        # the commanded trace has no q̇ in it at all.
+        try:
+            _update_spectrum(x + t_now, m if m is not None else v)
+        except Exception as exc:
+            # Same rule as the trace itself: the panel is a diagnostic and must
+            # never be the reason the operator loses the window mid-run.
+            if not spectrum_failed:
+                spectrum_failed.append(True)
+                print(f"speedj plot: spectrum panel disabled ({exc!r})",
+                      flush=True)
+
         if fill_idle is not None:
             fill_idle.remove()
             fill_idle = None
@@ -671,7 +883,8 @@ def _run_plot(in_q, window_s, port, figsize=LIVE_FIGSIZE):
         dt_max = max(6.0, float(np.nanmax(dt_ms)) * 1.2 if dt_ms.size else 6.0)
         ax_dt.set_ylim(0.0, dt_max)
         artists = lines_v + lines_a + lines_m + lines_w + [
-            line_dt, line_norm, line_sx, line_sy, line_sz, line_sn]
+            line_dt, line_norm, line_sx, line_sy, line_sz, line_sn,
+            line_spec, line_phase, marker_pk]
         if line_qm is not None:
             artists.append(line_qm)
         return artists
@@ -685,6 +898,7 @@ def _run_plot(in_q, window_s, port, figsize=LIVE_FIGSIZE):
 
 __all__ = [
     "SpeedJSample",
+    "qdot_spectrum",
     "SpeedJTrace",
     "downsample_maxabs",
     "sample_from_qdot",
