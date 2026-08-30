@@ -534,13 +534,7 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
 
 
 class WrenchLawWiringTest(unittest.TestCase):
-    """--dtc-law wrench must reach *both* _make_approach_controller call sites.
-
-    There are two: startup, and the rebuild after StartupAlign. The second is
-    the one that actually flies, so a flag wired only to the first would run
-    the whole session on speedj gains and read as "the wrench law does not
-    slide".
-    """
+    """--dtc-law wrench gains apply at DTC handoff, not during speedJ align."""
 
     def _args(self, argv):
         return _load_example().build_arg_parser().parse_args(argv)
@@ -568,9 +562,48 @@ class WrenchLawWiringTest(unittest.TestCase):
         self.assertAlmostEqual(kw["damping_ratio"], 0.3)
         self.assertAlmostEqual(kw["damping_ratio_ang"], 0.1)
 
-    def test_both_call_sites_pass_them(self):
+    def test_handoff_and_reopen_pass_wrench_kwargs(self):
+        """Align uses speedJ defaults; wrench kwargs only at DTC handoff + reopen."""
         source = _EXAMPLE.read_text(encoding="utf-8")
-        self.assertEqual(source.count("**_wrench_law_kwargs(args)"), 2)
+        self.assertGreaterEqual(source.count("**_wrench_law_kwargs(args)"), 2)
+        self.assertIn("defer_dtc_until_align_done", source)
+        self.assertIn(
+            '**(_wrench_law_kwargs(args) if args.contact_backend != "dtc" else {})',
+            source)
+
+    def test_defer_dtc_until_align_done(self):
+        mod = _load_example()
+
+        class _Align:
+            def __init__(self, done):
+                self._done = done
+
+            @property
+            def finished(self):
+                return self._done
+
+        self.assertTrue(mod.defer_dtc_until_align_done(
+            dtc_backend=object(), align=_Align(False)))
+        self.assertFalse(mod.defer_dtc_until_align_done(
+            dtc_backend=object(), align=_Align(True)))
+        self.assertFalse(mod.defer_dtc_until_align_done(
+            dtc_backend=object(), align=None))
+        self.assertFalse(mod.defer_dtc_until_align_done(
+            dtc_backend=None, align=_Align(False)))
+
+    def test_speedj_align_binds_task_space_to_gafropy_interface(self):
+        """Regression: dtc task_space + gafropy control → arm does not move."""
+        source = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn(
+            "task_space = interface.get_task_space(args.task_space)",
+            source)
+        self.assertIn(
+            "task_space = dtc_backend.get_task_space(args.task_space)",
+            source)
+        # Must not prefer the driverless DTC System while speedJ still owns RTDE.
+        self.assertNotIn(
+            "else dtc_backend.get_task_space(args.task_space))",
+            source)
 
     def test_the_factory_splits_the_units_and_the_damping_ratio(self):
         """K_ang on blades 0..2 (N.m/rad), K_lin on 3..5 (N/m), each with its

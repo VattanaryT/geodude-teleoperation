@@ -24,6 +24,8 @@ bisect which one matters. ``--press-loop legacy --no-free-along-normal
   point from ``vf.project()`` so the next query stays on the mesh.
 
 ``--contact-backend force_mode`` is UR hybrid force/position (not admittance).
+``--contact-backend dtc``: startup align under speedJ, then one handoff to
+Direct Torque for all teleop (free space + contact); contact is Z-overlay only.
 """
 from __future__ import annotations
 
@@ -304,9 +306,8 @@ def _make_approach_controller(interface, task_space, home_ee_motor,
 def _wrench_law_kwargs(args):
     """Pose-spring gains for --dtc-law wrench, or nothing at all otherwise.
 
-    Kept in one place so the two _make_approach_controller call sites (startup
-    and the post-align rebuild) cannot end up with different stiffness -- the
-    second one is what actually flies.
+    Applied at DTC handoff (and force_mode gafropy reopen), not during the
+    speedJ align phase -- Lambda/fn gains are 1/s^2 and would corrupt speedJ.
     """
     if getattr(args, "contact_backend", None) != "dtc" or args.dtc_law != "wrench":
         return {}
@@ -322,6 +323,11 @@ def _wrench_law_kwargs(args):
         fn_lin=args.dtc_fn_lin,
         fn_ang=args.dtc_fn_ang,
     )
+
+
+def defer_dtc_until_align_done(*, dtc_backend, align) -> bool:
+    """True: run speedJ through startup align, then hand off to DTC once."""
+    return dtc_backend is not None and align is not None and not align.finished
 
 
 def route_spacemouse_twist(twist, *, sim_probe, on_hardware):
@@ -461,9 +467,9 @@ def build_arg_parser():
         "--contact-backend", choices=["speedj", "force_mode", "dtc"], default="speedj",
         help="contact implementation (default: speedj = pose spring + Z force overlay). "
              "'force_mode' is UR hybrid force/position, not admittance. 'dtc' runs "
-             "the *same* control law but actuates it with UR Direct Torque Control "
-             "instead of speedJ, so a friction grab saturates tau instead of "
-             "protective-stopping on C153A1.")
+             "startup align under speedJ, then hands RTDE to Direct Torque for "
+             "all teleop (free space + contact). Contact is the same pose spring "
+             "+ Z overlay; only the actuator changes at that one handoff.")
     # --- dtc backend. The law above the seam is unchanged; these only set how
     # hard it is allowed to push and how often the host refreshes the on-robot
     # tau latch. Start tau_max low: it is the only thing left bounding a grab
@@ -847,9 +853,11 @@ def main():
             kin_system, interface.get_state().get_position(),
             left_vention, right_vention)
 
-    task_space = (
-        interface.get_task_space(args.task_space) if dtc_backend is None
-        else dtc_backend.get_task_space(args.task_space))
+    # Control task_space must match the live RTDE owner. Using the driverless
+    # DTC System here while interface.control() still runs gafropy made align
+    # issue qdot against the wrong joints -- arm sat still. Switch to the DTC
+    # task_space only inside enter_direct_torque.
+    task_space = interface.get_task_space(args.task_space)
     if task_space is None:
         raise RuntimeError(f"task space '{args.task_space}' not found in {MODEL}")
 
@@ -918,6 +926,8 @@ def main():
         "lin": np.zeros(3), "n": 0, "nz": 0,
     }
 
+    # SpeedJ plant for align (and for --contact-backend speedj). DTC wrench
+    # gains are 1/s^2 under Lambda and are applied only in enter_direct_torque.
     approach_controller = _make_approach_controller(
         interface, task_space, home_ee_motor,
         free_along_normal=args.free_along_normal,
@@ -925,7 +935,7 @@ def main():
         per_joint_velocity=args.per_joint_velocity,
         xy_stiffness=args.xy_stiffness,
         ang_stiffness=args.ang_stiffness,
-        **_wrench_law_kwargs(args))
+        **(_wrench_law_kwargs(args) if args.contact_backend != "dtc" else {}))
 
     # --- speedj/dtc contact: the same pose spring + Z overlay. Only the
     # actuation seam under it differs, so the contact controller, the force
@@ -1216,6 +1226,9 @@ def main():
                     "slerped field R from live (xyz from stick). Quiet stick freezes.",
                     flush=True,
                 )
+                # speedJ align done → one handoff to DTC for all remaining teleop.
+                if dtc_backend is not None and interface is not dtc_backend:
+                    enter_direct_torque()
                 if pending_contact["on"]:
                     pending_contact["on"] = False
                     print("startup align done: applying queued contact button", flush=True)
@@ -1420,56 +1433,97 @@ def main():
         toggle_contact_mode()
 
     def enter_direct_torque():
-        """gafropy -> ur_rtde directTorque. Replaces interface.control(...).
+        """speedJ (gafropy) → ur_rtde directTorque. One-shot; stays on DTC.
 
-        After this, `interface` is the DTC backend: it duck-types get_state() /
-        get_system() / get_task_space(), so hold_live_pose, update_command,
-        run_field_follow and the viser tick keep working through the same calls.
-        The approach controller object itself is *not* rebuilt -- rebuilding it
-        would drop the speedJ trace and re-derive gains, and a bisect against a
-        speedj run needs the two to be the same object with the same tuning.
+        After this, ``interface`` is the DTC backend (duck-types get_state /
+        get_system / get_task_space). Align has already finished under speedJ
+        (or ``--no-startup-align``). Contact toggle only changes Z overlay /
+        gains — no further actuator swap.
         """
-        nonlocal interface
-        # RTDE reports six joints; everything else in get_position() -- the other
-        # arm, the grippers, both rails -- has to be captured while gafropy
-        # still has it.
-        dtc_backend.seed_from_interface(interface)
-        print("-> dtc handoff: settling gafropy, then taking the RTDE control "
-              "client...", flush=True)
-        shutdown_gafropy_for_handoff(interface, settle_s=0.35)
-        dtc_backend.connect()
-        if args.dtc_hold_zero:
-            # Prove the host can hold the robot's clock *before* anything is
-            # allowed to actuate. Must run before the tau streamer starts: they
-            # share one directTorque channel.
-            print_dtc_rate_verification(dtc_backend.verify_rate(duration_s=2.0))
-        interface = dtc_backend
-        approach_controller.set_interface(dtc_backend)
-        if contact_controller is not None:
-            contact_controller.set_interface(dtc_backend)
-        approach_controller.set_input_active(False)
-        approach_controller.hold_live_pose()
-        dtc_backend.start(approach_controller)
+        nonlocal interface, approach_controller, task_space, joint_idx
+        if dtc_backend is None or interface is dtc_backend:
+            return
+        if handoff_busy["busy"]:
+            return
+        handoff_busy["busy"] = True
+        try:
+            # Snapshot full q while gafropy still owns the arm.
+            dtc_backend.seed_from_interface(interface)
+            print(
+                "-> dtc handoff: settling speedJ, then directTorque for all "
+                "teleop (free space + contact)...",
+                flush=True,
+            )
+            approach_controller.set_input_active(False)
+            approach_controller.hold_live_pose()
+            time.sleep(0.2)
+            shutdown_gafropy_for_handoff(interface, settle_s=0.35)
+            dtc_backend.connect()
+            if args.dtc_hold_zero:
+                print_dtc_rate_verification(dtc_backend.verify_rate(duration_s=2.0))
+            interface = dtc_backend
+            task_space = dtc_backend.get_task_space(args.task_space)
+            if task_space is None:
+                raise RuntimeError(
+                    f"task space '{args.task_space}' missing on DTC backend")
+            joint_idx = np.array(task_space.get_joint_indices())
+            # Rebuild with DTC wrench gains if any; align used the speedJ plant.
+            ee = live_ee_motor()
+            approach_controller = _make_approach_controller(
+                dtc_backend, task_space, ee,
+                free_along_normal=args.free_along_normal,
+                dls_damping=args.dls_damping,
+                per_joint_velocity=args.per_joint_velocity,
+                xy_stiffness=args.xy_stiffness,
+                ang_stiffness=args.ang_stiffness,
+                **_wrench_law_kwargs(args))
+            if contact_controller is not None:
+                contact_controller.set_interface(dtc_backend)
+                contact_controller.set_task_space(task_space)
+                contact_controller.set_conditioning_fn(
+                    approach_controller.conditioning)
+            approach_controller.set_input_active(False)
+            approach_controller.hold_live_pose()
+            if speedj_trace is not None:
+                if args.dtc_law == "wrench":
+                    dtc_backend.set_command_trace(speedj_trace.record)
+                else:
+                    approach_controller.set_command_trace(speedj_trace.record)
+            dtc_backend.start(approach_controller)
+            print(
+                "-> dtc teleop live: stick field-follows under directTorque; "
+                f"button {args.mode_button} toggles contact Z overlay",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"\033[91mdtc handoff failed: {exc}\033[0m", flush=True)
+            raise
+        finally:
+            handoff_busy["busy"] = False
 
     def start_control_and_device():
         nonlocal device, speedj_trace
         # Start frozen: no speedJ until a non-idle SpaceMouse reading arrives.
+        defer = defer_dtc_until_align_done(dtc_backend=dtc_backend, align=align)
         if args.speedj_plot and speedj_trace is None:
             from geodude_teleoperation.speedj_plot import SpeedJTrace
             speedj_trace = SpeedJTrace()
-            if dtc_backend is not None and args.dtc_law == "wrench":
-                # The wrench law never calls compute_control_command, so the
-                # controller's trace hook never fires and this window stayed
-                # empty for every wrench-law run. Feed it from the backend,
-                # which has the clipped tau and the wrench; the plot switches
-                # its top two panels to N.m and N on the first sample.
+            if not defer and dtc_backend is not None and args.dtc_law == "wrench":
                 dtc_backend.set_command_trace(speedj_trace.record)
             else:
+                # Align (and speedj backend) use the controller trace.
                 approach_controller.set_command_trace(speedj_trace.record)
             speedj_trace.start(figsize=tuple(args.plot_size))
         approach_controller.set_input_active(False)
         approach_controller.hold_live_pose()
         if dtc_backend is None:
+            interface.control(approach_controller, blocking=False)
+        elif defer:
+            print(
+                "-> speedJ for startup align; directTorque handoff after align "
+                "done (then DTC for free space + contact)",
+                flush=True,
+            )
             interface.control(approach_controller, blocking=False)
         else:
             enter_direct_torque()
@@ -1489,8 +1543,10 @@ def main():
             print(
                 "viser: orange ghost is the live-TCP snap preview. Press t to "
                 "SpaceMouse-teleop the ghost in sim; t again resets it to live TCP. "
-                "Enter aligns hardware. After align, stick linear field-follows "
-                "at --follow-hz (project off the RTDE thread); angular ignored.",
+                "Enter aligns hardware under speedJ"
+                + (", then DTC teleop" if dtc_backend is not None else "")
+                + f". After align, stick linear field-follows at --follow-hz; "
+                "angular ignored.",
                 flush=True,
             )
         else:
@@ -1506,8 +1562,8 @@ def main():
             "speedj": "speedj contact (pose spring + Z overlay)",
             "force_mode": "force_mode contact (not admittance)",
             "dtc": (
-                "dtc contact (same pose spring + Z overlay, actuated by "
-                "directTorque)" + (" [HOLD-ZERO]" if args.dtc_hold_zero else "")
+                "speedJ align → dtc teleop (free + contact via directTorque)"
+                + (" [HOLD-ZERO]" if args.dtc_hold_zero else "")
             ),
         }[args.contact_backend]
         if args.no_viz:
@@ -1679,7 +1735,9 @@ def main():
                 start_align_keys()
 
             viz.show(message=f"startup align on '{args.task_space}': t=sim ghost, "
-                     f"Enter=hardware slerp, then field-follow at {args.follow_hz:.0f} Hz "
+                     f"Enter=hardware slerp under speedJ"
+                     + (", then DTC teleop" if dtc_backend is not None else "")
+                     + f", then field-follow at {args.follow_hz:.0f} Hz "
                      f"-- {backend_note}. viser at http://localhost:{viz.port} -- ctrl-c to quit.")
     except KeyboardInterrupt:
         pass
