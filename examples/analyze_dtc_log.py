@@ -46,6 +46,10 @@ RING_MIN_SHARE = 0.15
 # (median 1.03 rad/s under 0.1 s, 0.0000 past 0.5 s -- the same shape as a run
 # with a clean hold, which differed only in how many short stick bursts it had).
 QUIET_SETTLE_S = 0.25
+# Floor on the worst-quiet-window mean before it is worth printing. Healthy
+# runs on this rig read 0.08-0.11 rad/s at the very start of the record;
+# dtc_20260830_141034.csv's limit cycle reads 0.75.
+QUIET_BURST_RADPS = 0.25
 # Quiet-stick |qdot| p95 above this is worth explaining at all.
 QUIET_HOLD_RADPS = 0.05
 # ...and above either of these, a commanded wrench explains it. The idle hold
@@ -125,8 +129,11 @@ def main():
     print("\n  rising left-to-right = still capped, raise --dtc-tau-max on that joint.")
     print("  flat/zero while the TCP will not slide = not the cap; look at |W_lin|.")
 
+    # Before anything that averages over the run: a 1.4 s event that swings
+    # the arm into a workstation is invisible in every percentile below.
+    railed = rail_oscillation(rows, live, tau, n, meta)
     lambda_floor(rows, live)
-    oscillation(rows, live, W, n)
+    oscillation(rows, live, W, n, railed)
     stall(rows, live, W, n)
     tracking(rows, live, W)
 
@@ -163,6 +170,111 @@ def lambda_floor(rows, live):
     elif bound < 0.05:
         print("     the floor is inert -- a stuck roll is not this, and "
               "raising it would change nothing.")
+
+
+# Rail-to-rail sign alternation, the one signature a limit cycle has and a
+# stall does not. Kept identical to RailOscillationGuard in torque_backend.py
+# -- the loop's cut-out and this report must never disagree about what a
+# limit cycle is.
+RAIL_OSC_WINDOW_S = 0.3
+RAIL_OSC_FLIPS = 12
+
+
+def rail_oscillation(rows, live, tau, n, meta):
+    """Did the arm throw itself at +/-tau_max, and when?
+
+    Every other section here is a whole-run aggregate, and that is exactly how
+    dtc_20260830_141034.csv passed. Over 51 s it read "no ringing" (33.2% of
+    the qdot power, peaked at 15.03 Hz -- the operator's own band) and
+    "|qdot| p95 with the stick QUIET: 0.000 rad/s", because 30 s of that run
+    was a motionless idle that swamps any percentile. The event was 1.4 s long:
+    from t=49.79 tau alternated +50/-50 N.m on j1 AND j2 -- the 50 N.m shoulder
+    and elbow, which rail in no other run on this rig -- at **32.1 Hz**, with
+    the stick quiet and the pose error at 0.0 mm, and the arm swung into the
+    workstation. A percentile cannot see a 1.4 s event in a 51 s run. This
+    section is time-resolved for that reason.
+
+    Why sign alternation and not amplitude: a joint stalled against breakaway
+    friction sits on *one* sign of tau_max for as long as the operator leans on
+    it, which is correct. Reversing at the rail several times in 0.3 s is the
+    loop fighting its own delay, and tau_max is then the only thing bounding
+    how hard the arm is thrown.
+    """
+    tmax = _tau_max_from_meta(meta, n)
+    t = np.array([float(r["t"]) for r in rows])
+    print(f"\n  rail oscillation (sign flips at +/-tau_max within "
+          f"{RAIL_OSC_WINDOW_S:g} s)")
+    worst = 0
+    worst_j = -1
+    worst_t = float("nan")
+    for j in range(n):
+        idx = np.where(np.abs(tau[:, j]) >= 0.99 * tmax[j])[0]
+        if idx.size < 2:
+            print(f"   j{j}   {idx.size:5d} rail ticks       -")
+            continue
+        sign = np.sign(tau[idx, j])
+        ft = t[idx[np.where(np.diff(sign) != 0)[0] + 1]]
+        best, best_t = 0, float("nan")
+        for x in ft:
+            c = int(((ft >= x) & (ft < x + RAIL_OSC_WINDOW_S)).sum())
+            if c > best:
+                best, best_t = c, x
+        flag = "  <-- LIMIT CYCLE" if best >= RAIL_OSC_FLIPS else ""
+        print(f"   j{j}   {idx.size:5d} rail ticks   {int(ft.size):4d} sign flips"
+              f"   worst {best:3d} in {RAIL_OSC_WINDOW_S:g} s at t={best_t:7.2f}{flag}")
+        if best > worst:
+            worst, worst_j, worst_t = best, j, best_t
+    if worst >= RAIL_OSC_FLIPS:
+        print(f"     \033[91mTHE LOOP THREW THE ARM: j{worst_j} reversed at "
+              f"+/-tau_max {worst} times in {RAIL_OSC_WINDOW_S:g} s at "
+              f"t={worst_t:.2f}.\033[0m")
+        print("     tau_max is the ONLY bound on a limit cycle's amplitude: "
+              "err_clip bounds the spring half of the wrench and the damping "
+              "half -Lambda*D*v has no clip at all.")
+        print("     Lower --dtc-damping-ratio first, then --dtc-fn-lin. Do NOT "
+              "raise --dtc-damping-max, and do NOT read the ringing section "
+              "below as permission to -- it averages over the whole run.")
+        _rail_window(rows, live, t, worst_t)
+    elif worst:
+        print(f"     worst is {worst} on j{worst_j}, under the {RAIL_OSC_FLIPS} "
+              f"the loop cuts out at. On this rig healthy runs top out at 9 and "
+              f"only on the 6 N.m wrist joints.")
+    else:
+        print("     none: no joint ever reversed sign at its rail.")
+    return worst
+
+
+def _rail_window(rows, live, t, t0):
+    """What the stick and the pose error were doing during the cycle."""
+    m = (t >= t0) & (t < t0 + 1.0) & live
+    if not m.any():
+        return
+    sm = np.array([[float(r[f"sm{i}"]) for i in range(6)] for r in rows])
+    e = np.array([[float(r[f"e{a}"]) for a in "xyz"] for r in rows])
+    qd = np.array([[float(r[f"qd{i}"]) for i in range(6)] for r in rows])
+    quiet = np.linalg.norm(sm[m], axis=1) < 1e-9
+    print(f"     in the second that followed: stick quiet on "
+          f"{quiet.mean():.0%} of ticks, |e_lin| max "
+          f"{1e3 * np.linalg.norm(e[m], axis=1).max():.1f} mm, |qdot| max "
+          f"{np.linalg.norm(qd[m], axis=1).max():.2f} rad/s")
+    if quiet.mean() > 0.5:
+        print("     A cycle that runs with the stick quiet and the error at "
+              "zero is the damping term feeding itself. It is NOT operator "
+              "excitation and more D will make it worse.")
+
+
+def _tau_max_from_meta(meta, n):
+    """tau_max off the log's own gain header, or the shipped default."""
+    for line in meta:
+        if "tau_max=" in line:
+            try:
+                v = [float(x) for x in
+                     line.split("tau_max=")[1].split()[0].split(",")]
+                if len(v) >= n:
+                    return np.array(v[:n], dtype=float)
+            except Exception:
+                pass
+    return np.array([50.0] * 3 + [6.0, 6.0, 30.0])[:n]
 
 
 def peak_q(freq, power, pk_idx, floor_hz):
@@ -210,7 +322,7 @@ def peak_q(freq, power, pk_idx, floor_hz):
     return float(freq[pk_idx] / width)
 
 
-def oscillation(rows, live, W, n):
+def oscillation(rows, live, W, n, railed=0):
     """Limit-cycle report: is the arm shaking at a frequency nobody commanded?
 
     This exists because dtc_20260830_005006.csv passed every other section of
@@ -392,13 +504,28 @@ def oscillation(rows, live, W, n):
             # it is stable, the operator is exciting it, and it responds to
             # MORE damping. dtc_20260830_132604.csv rang at 14.43 Hz and held
             # 0.215 rad/s quiet, which is a loop feeding itself.
-            if np.isfinite(moved) and moved <= QUIET_HOLD_RADPS:
+            if railed >= RAIL_OSC_FLIPS:
+                # This branch used to say "raise --dtc-damping-max first", and
+                # following it is what swung the arm into the workstation. The
+                # whole-run peak is the operator's band; the rail section
+                # already found a cycle nobody commanded.
+                print("     ...but the rail section above found a real limit "
+                      "cycle in this run, and THAT is the fault. This peak is "
+                      "a whole-run average and cannot see it. Lower D.")
+            elif np.isfinite(moved) and moved <= QUIET_HOLD_RADPS:
                 print(f"     EXCITED, not self-sustaining: it dies when the "
-                      f"stick stops ({moved:.3f} rad/s quiet). Raise "
-                      f"--dtc-damping-max first -- the peak is at "
-                      f"{phase:.0f} deg, so D still buys cos({phase:.0f}) = "
-                      f"{np.cos(np.radians(phase)):.2f} of real damping there "
-                      f"-- then lower --dtc-fn-lin if it persists.")
+                      f"stick stops ({moved:.3f} rad/s quiet). The peak is at "
+                      f"{phase:.0f} deg, so D would still buy "
+                      f"cos({phase:.0f}) = {np.cos(np.radians(phase)):.2f} of "
+                      f"real damping there.")
+                print("     Careful with that. The measured ceiling on this "
+                      "rig at 200 Hz is D_lin 15.08 clean "
+                      "(dtc_20260830_135043.csv) and 19.1 catastrophic "
+                      "(dtc_20260830_141034.csv, a 32 Hz cycle at "
+                      "+/-tau_max), and 32 Hz is f_90 for this loop -- raising "
+                      "the rate sweeps f_90 up into new structure rather than "
+                      "away from it. A small step, a short run, and read the "
+                      "rail section before the next one.")
             else:
                 print("     It survives the stick going quiet, so the loop is "
                       "feeding itself: lower --dtc-fn-lin (K = (2*pi*fn)^2) "
@@ -417,6 +544,30 @@ def oscillation(rows, live, W, n):
     print(f"  |qdot| p95 with the stick QUIET and settled: "
           f"{moved:.3f} rad/s ({held.mean():.0%} of live ticks, "
           f"{QUIET_SETTLE_S:g} s of coast-down dropped)")
+    # A percentile over the whole run cannot see a short event, and that is not
+    # hypothetical: dtc_20260830_141034.csv reads 0.000 rad/s here while
+    # spending 1.4 s throwing the arm at +/-tau_max, because 30 s of its 51 s
+    # was a motionless idle. Report the worst window too.
+    t_all = np.array([float(r["t"]) for r in rows])[live]
+    speed = np.linalg.norm(qd, axis=1)
+    # Half a window's worth of ticks, so the first and last few samples of the
+    # run cannot name a "burst" out of two points.
+    need = max(3, int(0.5 * RAIL_OSC_WINDOW_S / max(dt, 1e-6)))
+    burst, burst_t = 0.0, float("nan")
+    for k in np.where(held)[0]:
+        m = held & (t_all >= t_all[k]) & (t_all < t_all[k] + RAIL_OSC_WINDOW_S)
+        if int(m.sum()) < need:
+            continue
+        v = float(speed[m].mean())
+        if v > burst:
+            burst, burst_t = v, t_all[k]
+    # QUIET_BURST_RADPS, not QUIET_HOLD_RADPS: this is a mean over a window
+    # rather than a percentile, and healthy runs on this rig show 0.08-0.11
+    # rad/s of it at the edges of the record. The incident window is 0.75.
+    if burst > max(QUIET_BURST_RADPS, 5.0 * moved):
+        print(f"     ...but the worst quiet {RAIL_OSC_WINDOW_S:g} s window "
+              f"averages {burst:.3f} rad/s at t={burst_t:.2f}. The percentile "
+              f"above is hiding a short event -- go look at it.")
     if moved <= QUIET_HOLD_RADPS:
         return
 

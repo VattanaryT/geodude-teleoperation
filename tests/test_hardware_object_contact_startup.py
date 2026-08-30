@@ -809,9 +809,29 @@ class WrenchLawWiringTest(unittest.TestCase):
             mod.resolve_wrench_zeta(True, 0.7, 0.7, fn_lin=fn, fn_ang=fn,
                                     damping_max=0.0),
             (0.7, 0.7))
-        self.assertAlmostEqual(
-            mod.build_arg_parser().parse_args([]).dtc_damping_max,
-            mod.WRENCH_DAMPING_MAX_1_S)
+        # The flag defaults to None so resolve_wrench_damping_max owns the
+        # number; parse_args must not bake one in behind it.
+        self.assertIsNone(mod.build_arg_parser().parse_args([]).dtc_damping_max)
+
+    def test_the_d_ceiling_does_not_move_with_the_control_rate(self):
+        """It scaled as 12.0 * hz/125 for one commit, and the arm paid for it.
+
+        The reasoning was that the cap bounds a phase lag, so it should follow
+        the delay -- true as far as it goes. What it missed is that
+        `f_90 = 1/(4T)` is a sweep line, not a target the modes sit below:
+        doubling the rate sweeps it up into structure that was out of reach.
+        dtc_20260830_141034.csv ran the 19.2 the scaling allowed (D_lin 19.1)
+        and limit-cycled at **32.1 Hz** -- f_90 for this loop to within a bin --
+        with tau alternating +50/-50 N.m on the shoulder and elbow, the stick
+        quiet and the pose error at 0.0 mm. The arm swung into the workstation.
+        """
+        mod = _load_example()
+        for hz in (125.0, 200.0, 500.0):
+            self.assertAlmostEqual(mod.resolve_wrench_damping_max(hz),
+                                   mod.WRENCH_DAMPING_MAX_1_S, msg=f"hz={hz}")
+        # An explicit ceiling still passes through, at any rate.
+        self.assertAlmostEqual(mod.resolve_wrench_damping_max(200.0, 15.0), 15.0)
+        self.assertAlmostEqual(mod.resolve_wrench_damping_max(125.0, 0.0), 0.0)
 
     def test_contact_is_refused_under_the_wrench_law(self):
         """The press reaches the arm through set_tool_z_velocity, which the

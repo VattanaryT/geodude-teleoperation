@@ -6,10 +6,14 @@ staleness bound and the safety gate are exercised here without a robot.
 """
 from __future__ import annotations
 
+import pathlib
+import unittest
+
 import numpy as np
 import pytest
 
 from geodude_teleoperation.torque_backend import (
+    RailOscillationGuard,
     DEFAULT_KV,
     DEFAULT_STALE_TAU_MIN_S,
     DEFAULT_TAU_MAX,
@@ -276,6 +280,12 @@ class FakeState:
         if self.fail:
             raise RuntimeError("rtde read failed")
         return self.q, self.qdot
+
+
+def _csv_lines(path):
+    """The log's data lines. The `#` gain header is metadata, not a row."""
+    return [ln for ln in path.read_text().strip().splitlines()
+            if not ln.startswith("#")]
 
 
 def _backend(**kwargs):
@@ -983,7 +993,7 @@ def test_the_log_records_one_row_per_tick_with_the_phase(tmp_path):
     backend.tick(now=1.000)
     backend.tick(now=1.008)
     backend._log_close()
-    rows = path.read_text().strip().splitlines()
+    rows = _csv_lines(path)
     header = rows[0].split(",")
     assert header[:4] == ["t", "dt_ms", "phase", "safety"]
     assert header[4:10] == [f"w{i}" for i in range(6)]
@@ -1005,8 +1015,8 @@ def test_the_log_records_spacemouse_raw_twist(tmp_path):
     backend._log_open()
     backend.tick(now=1.0)
     backend._log_close()
-    header = path.read_text().strip().splitlines()[0].split(",")
-    row = path.read_text().strip().splitlines()[1].split(",")
+    header = _csv_lines(path)[0].split(",")
+    row = _csv_lines(path)[1].split(",")
     sm_idx = [header.index(f"sm{i}") for i in range(6)]
     sm = [float(row[i]) for i in sm_idx]
     assert sm == pytest.approx([0.1, -0.2, 0.3, 0.001, -0.002, 0.003], abs=1e-5)
@@ -1021,7 +1031,7 @@ def test_the_log_says_when_the_tick_was_gated_or_held_at_zero(tmp_path):
     backend._safety_mode_fn = lambda: 3          # not NORMAL/REDUCED
     backend.tick(now=1.008)
     backend._log_close()
-    phases = [r.split(",")[2] for r in path.read_text().strip().splitlines()[1:]]
+    phases = [r.split(",")[2] for r in _csv_lines(path)[1:]]
     assert phases == ["hold_zero", "gated"]
 
 
@@ -1048,10 +1058,13 @@ def test_the_log_records_the_tracking_error_and_field_conformity(tmp_path):
     backend._log_open()
     backend.tick(now=1.0)
     backend._log_close()
-    lines = path.read_text().strip().splitlines()
+    lines = _csv_lines(path)
     header = lines[0].split(",")
     row = lines[1].split(",")
-    assert header[-8:] == ["erx", "ery", "erz", "ex", "ey", "ez", "n_deg", "act"]
+    # lam_ang trails act: Lambda's pre-clamp smallest angular eigenvalue, so a
+    # stuck roll axis can be told from a floored one after the fact.
+    assert header[-9:] == ["erx", "ery", "erz", "ex", "ey", "ez", "n_deg",
+                           "act", "lam_ang"]
     got = dict(zip(header, row))
     assert [float(got[k]) for k in ("erx", "ery", "erz")] == pytest.approx(
         [0.01, -0.02, 0.03])
@@ -1070,7 +1083,7 @@ def test_the_tracking_columns_survive_a_controller_that_has_none(tmp_path):
     backend._log_open()
     backend.tick(now=1.0)
     backend._log_close()
-    lines = path.read_text().strip().splitlines()
+    lines = _csv_lines(path)
     got = dict(zip(lines[0].split(","), lines[1].split(",")))
     assert float(got["ex"]) == 0.0
     assert got["n_deg"] == ""        # no normal published yet, not 0 degrees
@@ -1233,3 +1246,217 @@ def test_the_gain_header_survives_a_controller_with_no_matrices():
     backend, _s, _h = _backend(law_kind="wrench")
     backend._controller = object()
     assert "law=wrench" in backend._gain_note()
+
+
+# --- the cut-out for the failure tau_max cannot bound ------------------------
+# dtc_20260830_141034.csv: with the stick quiet and the pose error at 0.0 mm,
+# tau alternated +50/-50 N.m on j1 AND j2 at 32.1 Hz and the arm swung into the
+# workstation. err_clip bounds the spring half of the wrench; the damping half
+# -Lambda*D*v has no clip at all, so tau_max was the only thing bounding the
+# amplitude -- which means the cap was setting how hard the arm got thrown.
+_TMAX = np.array([50.0, 50.0, 50.0, 6.0, 6.0, 30.0])
+
+
+def _run_guard(guard, taus, hz=200.0):
+    """Feed a sequence of tau vectors at a fixed rate. Returns (trips, floated)."""
+    floated = 0
+    for k, tau in enumerate(taus):
+        f, _ = guard.update(k / hz, np.asarray(tau, float), _TMAX)
+        floated += bool(f)
+    return guard.n_trips, floated
+
+
+def test_rail_to_rail_alternation_trips_the_guard():
+    g = RailOscillationGuard(6)
+    # j1 slamming +50/-50 every other tick, 32 Hz-ish at 200 Hz.
+    taus = []
+    for k in range(60):
+        t = np.zeros(6)
+        t[1] = 50.0 if (k // 3) % 2 == 0 else -50.0
+        taus.append(t)
+    trips, floated = _run_guard(g, taus)
+    self_j = g.last_joint
+    assert trips >= 1
+    assert self_j == 1
+    assert floated > 0
+
+
+def test_a_stall_on_one_sign_is_never_cut():
+    """A joint held against breakaway friction sits on its rail, correctly."""
+    g = RailOscillationGuard(6)
+    taus = [np.array([0.0, 0.0, 0.0, 6.0, 0.0, 0.0])] * 4000   # 20 s at the rail
+    trips, floated = _run_guard(g, taus)
+    assert trips == 0
+    assert floated == 0
+
+
+def test_slow_reversals_are_not_a_limit_cycle():
+    """Ordinary stick-slip reverses at the rail, just not 12 times in 0.3 s."""
+    g = RailOscillationGuard(6)
+    taus = []
+    for k in range(2000):           # a flip every 0.25 s
+        t = np.zeros(6)
+        t[3] = 6.0 if (k // 50) % 2 == 0 else -6.0
+        taus.append(t)
+    trips, _ = _run_guard(g, taus)
+    assert trips == 0
+
+
+def test_the_float_lasts_hold_s_and_then_re_arms():
+    g = RailOscillationGuard(6, flips=4, hold_s=0.5)
+    trip_t = None
+    for k in range(20):
+        tau = np.array([0.0, 50.0 if k % 2 else -50.0, 0.0, 0.0, 0.0, 0.0])
+        _, edge = g.update(k / 200.0, tau, _TMAX)
+        if edge and trip_t is None:
+            trip_t = k / 200.0
+    assert g.n_trips == 1 and trip_t is not None
+    # Still floating a tick before the hold expires, armed again just after.
+    assert g.update(trip_t + 0.49, np.zeros(6), _TMAX)[0] is True
+    assert g.update(trip_t + 0.51, np.zeros(6), _TMAX)[0] is False
+
+
+def test_zero_flips_disables_the_guard():
+    g = RailOscillationGuard(6, flips=0)
+    taus = [np.array([0.0, 50.0 if k % 2 else -50.0, 0.0, 0.0, 0.0, 0.0])
+            for k in range(200)]
+    trips, floated = _run_guard(g, taus)
+    assert not g.enabled
+    assert trips == 0 and floated == 0
+
+
+def test_reset_forgets_the_count():
+    g = RailOscillationGuard(6, flips=8)
+    for k in range(6):
+        g.update(k / 200.0,
+                 np.array([0.0, 50.0 if k % 2 else -50.0, 0, 0, 0, 0]), _TMAX)
+    g.reset()
+    for k in range(6, 12):
+        g.update(k / 200.0,
+                 np.array([0.0, 50.0 if k % 2 else -50.0, 0, 0, 0, 0]), _TMAX)
+    assert g.n_trips == 0
+
+
+class RailGuardReplayTest(unittest.TestCase):
+    """The separation is empirical, so replay the actual logs through it.
+
+    Healthy runs on this rig top out at 9 rail sign flips in 0.3 s and only on
+    the 6 N.m wrist joints. The two incidents are nothing like it:
+    dtc_20260830_141034.csv reads 20/11/21/18 on j1-j4 at once (including the
+    50 N.m shoulder and elbow, which flip zero times in every other run) and
+    dtc_20260830_005006.csv, the ROBOT_EMERGENCY_STOP run, reads 16 on j4.
+    """
+
+    LOGS = pathlib.Path(__file__).resolve().parents[1] / "speedj_logs"
+    QUIET = ["dtc_20260830_002254.csv", "dtc_20260830_115039.csv",
+             "dtc_20260830_122304.csv", "dtc_20260830_130541.csv",
+             "dtc_20260830_132204.csv", "dtc_20260830_134133.csv",
+             "dtc_20260830_135043.csv"]
+    INCIDENTS = ["dtc_20260830_141034.csv", "dtc_20260830_005006.csv"]
+
+    def _replay(self, name):
+        path = self.LOGS / name
+        if not path.exists():
+            self.skipTest(f"{name} not in the tree")
+        first = path.open().readline()
+        skip = 1 if first.startswith("#") else 0
+        d = np.genfromtxt(path, delimiter=",", names=True, skip_header=skip)
+        tmax = _TMAX
+        if skip and "tau_max=" in first:
+            tmax = np.array([float(x) for x in
+                             first.split("tau_max=")[1].split()[0].split(",")])
+        t = d["t"]
+        tau = np.stack([d[f"tau{i}"] for i in range(6)], 1)
+        g = RailOscillationGuard(6)
+        for k in range(t.size):
+            g.update(float(t[k]), tau[k], tmax)
+        return g
+
+    def test_no_healthy_run_is_cut_out(self):
+        for name in self.QUIET:
+            with self.subTest(log=name):
+                self.assertEqual(self._replay(name).n_trips, 0)
+
+    def test_both_incidents_are_cut_out(self):
+        for name in self.INCIDENTS:
+            with self.subTest(log=name):
+                self.assertGreater(self._replay(name).n_trips, 0)
+
+    def test_it_fires_before_the_worst_of_it(self):
+        """On the workstation run the trip lands 0.56 s before the 167 N peak."""
+        path = self.LOGS / "dtc_20260830_141034.csv"
+        if not path.exists():
+            self.skipTest("log not in the tree")
+        first = path.open().readline()
+        d = np.genfromtxt(path, delimiter=",", names=True, skip_header=1)
+        tmax = np.array([float(x) for x in
+                         first.split("tau_max=")[1].split()[0].split(",")])
+        t = d["t"]
+        tau = np.stack([d[f"tau{i}"] for i in range(6)], 1)
+        w = np.stack([d[f"w{i}"] for i in range(6)], 1)
+        wl = np.linalg.norm(w[:, 3:], axis=1)
+        g = RailOscillationGuard(6)
+        trip_t = None
+        for k in range(t.size):
+            _, edge = g.update(float(t[k]), tau[k], tmax)
+            if edge and trip_t is None:
+                trip_t = float(t[k])
+        self.assertIsNotNone(trip_t)
+        self.assertLess(trip_t, float(t[int(np.argmax(wl))]))
+
+
+def test_the_loop_floats_tau_when_a_joint_oscillates_at_its_rail(tmp_path):
+    """End to end: rail-to-rail alternation reaches the guard and zeroes tau.
+
+    Driven through the velocity law because it is the one that takes a plain
+    qdot command, but the guard sits below both laws on the clipped tau, which
+    is the only place the amplitude of a limit cycle is visible at all.
+    """
+    path = tmp_path / "dtc.csv"
+    flip = {"k": 0}
+
+    def cmd():
+        flip["k"] += 1
+        # kv * this is far past tau_max either way, so tau sits on the rail and
+        # reverses every tick.
+        return np.full(6, 100.0 if flip["k"] % 2 else -100.0)
+
+    backend, _s, _h = _backend(qdot_cmd_fn=cmd, log_path=str(path),
+                               rail_osc_flips=6, rail_osc_hold_s=0.5)
+    backend._log_open()
+    for k in range(20):
+        backend.tick(now=1.0 + k * 0.005)
+    backend._log_close()
+
+    rows = _csv_lines(path)[1:]
+    phases = [r.split(",")[2] for r in rows]
+    assert "railosc" in phases
+    assert backend.stats()["n_rail_osc"] >= 1
+    # Every railosc tick commands exactly zero on every joint.
+    for r in rows:
+        f = r.split(",")
+        if f[2] == "railosc":
+            assert all(float(x) == 0.0 for x in f[16:22])
+
+
+def test_an_honest_stall_reaches_the_rail_and_is_left_alone(tmp_path):
+    """The same drive without the sign reversal must never be cut."""
+    path = tmp_path / "dtc.csv"
+    backend, _s, _h = _backend(qdot_cmd_fn=lambda: np.full(6, 100.0),
+                               log_path=str(path), rail_osc_flips=6)
+    backend._log_open()
+    for k in range(200):
+        backend.tick(now=1.0 + k * 0.005)
+    backend._log_close()
+    phases = [r.split(",")[2] for r in _csv_lines(path)[1:]]
+    assert "railosc" not in phases
+    assert backend.stats()["n_rail_osc"] == 0
+
+
+def test_hold_zero_never_cuts_out(tmp_path):
+    """Under the bring-up gate tau is 0 anyway; the guard must not fire."""
+    backend, _s, _h = _backend(qdot_cmd_fn=lambda: np.full(6, 100.0),
+                               hold_zero=True, rail_osc_flips=2)
+    for k in range(50):
+        backend.tick(now=1.0 + k * 0.005)
+    assert backend.stats()["n_rail_osc"] == 0

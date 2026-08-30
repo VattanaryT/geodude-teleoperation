@@ -130,6 +130,9 @@ from geodude_teleoperation.torque_backend import (
     DEFAULT_JOINT_HOLD_KP,
     DEFAULT_KI,
     DEFAULT_KV,
+    DEFAULT_RAIL_OSC_FLIPS,
+    DEFAULT_RAIL_OSC_HOLD_S,
+    RAIL_OSC_WINDOW_S,
     DirectTorqueBackend,
 )
 from geodude_teleoperation.virtual_fixture import FieldAlignPreview, workstation_field_z_arrows
@@ -217,38 +220,41 @@ WRENCH_DAMPING_MAX_SCALE_LIMIT = 2.0
 
 
 def resolve_wrench_damping_max(hz, damping_max=None):
-    """The D ceiling, scaled off the control rate it was calibrated at.
+    """The D ceiling. 12.0 at every rate unless --dtc-damping-max says otherwise.
 
-    12.0 is not a property of the arm, it is a property of the arm *plus the
-    loop delay it was measured with*. What it bounds is the negative damping a
-    late `-D*v` pumps into a structural mode: at lag `phi = 360*f_m*T` the
-    component still opposing velocity is `D*cos(phi)`, and past 90 deg that is
-    a source. At 125 Hz, T ~ 12 ms put this rig's 24.5 Hz mode at **108 deg**
-    (cos = -0.31), which is the run that railed tau 89 times and ended in
-    ROBOT_EMERGENCY_STOP, and 12.0 is the largest D that mode absorbed.
+    **This used to scale as 12.0 * hz/125 and that was wrong, on hardware.**
+    The argument was sound as far as it went: what the cap bounds is the
+    negative damping a late `-D*v` pumps into a structural mode, at 125 Hz the
+    12 ms delay put this rig's 24.5 Hz mode at 108 deg (a source), and at
+    200 Hz the same mode sits at 68 deg (still a sink), so the specific failure
+    12.0 was built to prevent cannot happen at 200 Hz.
 
-    At 200 Hz the analyzer measures T = 7.7 ms, so the same 24.5 Hz mode sits
-    at **68 deg** -- cos = +0.37, still *removing* energy. The specific failure
-    12.0 was built to prevent cannot happen at this rate, and holding the cap
-    there silently detunes the loop: at --dtc-fn-lin 4.0 it took zeta_lin
-    0.30 -> 0.239 (dtc_20260830_134133.csv's header), i.e. 20% less damping at
-    exactly the fn where damping matters most, and that run then put 22.7% of
-    its qdot power at 14.99 Hz.
+    What it missed is that `f_90 = 1/(4*T)` is not a fixed target the modes sit
+    below -- it is a *sweep line*, and doubling the rate sweeps it up into
+    structure that was previously out of reach. dtc_20260830_141034.csv ran
+    D_lin = 19.1 at 200 Hz and limit-cycled at **32.1 Hz**, which is f_90 for
+    this loop to within a bin: tau alternated +50/-50 N.m on j1 AND j2 (the
+    50 N.m shoulder and elbow, which rail in no other run) with the stick quiet
+    and the pose error at 0.0 mm, and the arm swung into the workstation. The
+    old failure did not reappear at 24.5 Hz; a new one appeared at 32.
+    Raising the ceiling with the rate bought the loop a fresh mode to
+    destabilise every time.
 
-    Phase is linear in T and T is ~1/hz, so the cap scales with hz. That is the
-    same `D*T` product CLAUDE.md calls useless as an *absolute* stability bound
-    -- and it is; it is used here only as the scaling law for a number whose
-    value came from measurement. Bounded at WRENCH_DAMPING_MAX_SCALE_LIMIT
-    because extrapolating a measured limit is not the same as measuring it, and
-    because above ~31 Hz at this rate there is a region no log has looked at.
+    So the number stays where it was measured. The empirical bracket at 200 Hz
+    is now D_lin 15.08 clean (dtc_20260830_135043.csv) and 19.1 catastrophic,
+    and 12.0 is the last value with a quiet log on both sides of it. Going
+    above it is an explicit `--dtc-damping-max` and wants
+    `RailOscillationGuard` armed, a short run and a look at the rail section of
+    analyze_dtc_log.py before anyone leans on the stick.
 
-    Reduction to the working case: at --dtc-hz 125 this returns 12.0 exactly.
+    Historical: the scaling read ``12.0 * min(max(hz/125, 1), 2)``, i.e. 19.2
+    at the 200 Hz default. ``hz`` is kept in the signature so the caller does
+    not change and a future rate-aware ceiling has somewhere to go, but it must
+    come with logs at that rate, not with an extrapolation.
     """
     if damping_max is not None:
         return float(damping_max)
-    scale = min(max(float(hz) / WRENCH_DAMPING_MAX_REF_HZ, 1.0),
-                WRENCH_DAMPING_MAX_SCALE_LIMIT)
-    return WRENCH_DAMPING_MAX_1_S * scale
+    return WRENCH_DAMPING_MAX_1_S
 
 
 def _cap_zeta(zeta, fn, damping_max, blade, warn):
@@ -821,9 +827,34 @@ def build_arg_parser():
              "into the same limit cycle, and this takes zeta down instead of "
              "letting it. It is NOT the rigid-body D*T ~ 1 bound, which said "
              "0.21 was safe on the run that oscillated. 0 disables the cap. "
-             "Default is 12.0 scaled by --dtc-hz/125 (so 19.2 at the 200 Hz "
-             "default), because what it bounds is a phase lag, not a gain -- "
+             "Default 12.0 at every rate. It briefly scaled with --dtc-hz and "
+             "that put D_lin at 19.1, which limit-cycled at 32 Hz -- f_90 for "
+             "this loop -- and swung the arm into the workstation: raising the "
+             "rate sweeps f_90 up into structure that was out of reach before, "
+             "so a higher rate is not a licence for more D. Above 12 wants a "
+             "short run and the rail section of analyze_dtc_log.py first -- "
              "see resolve_wrench_damping_max")
+    parser.add_argument(
+        "--dtc-rail-osc-flips", type=int, default=DEFAULT_RAIL_OSC_FLIPS,
+        metavar="N",
+        help="--contact-backend dtc: float tau when any joint alternates "
+             "between +tau_max and -tau_max this many times in "
+             f"{RAIL_OSC_WINDOW_S:g} s. tau_max is the ONLY bound on a limit "
+             "cycle's amplitude -- err_clip bounds the spring half of the "
+             "wrench and the damping half -Lambda*D*v has no clip at all -- so "
+             "an oscillating loop throws the arm as hard as the cap allows, "
+             "50 N.m at the shoulder here. Rail-to-rail SIGN ALTERNATION is "
+             "what separates a limit cycle from an honest stall, which sits on "
+             "one sign and must never be cut. Healthy runs on this rig top out "
+             "at 9 flips and only on j3/j4; the run that hit the workstation "
+             "read 20/11/21/18 on j1-j4 at once. 0 disables (do not).")
+    parser.add_argument(
+        "--dtc-rail-osc-hold-s", type=float, default=DEFAULT_RAIL_OSC_HOLD_S,
+        metavar="S",
+        help="--contact-backend dtc: how long tau stays floated after a "
+             "--dtc-rail-osc-flips trip. The law, the joint hold and the "
+             "re-arm blend are all reset with it, so resuming cannot hand back "
+             "the wrench that was oscillating.")
     parser.add_argument(
         "--no-dtc-hold-at-tick", dest="dtc_hold_at_tick",
         action="store_false", default=True,
@@ -1244,6 +1275,8 @@ def main():
             stale_tau_s=(
                 None if args.dtc_stale_tau_ms is None
                 else args.dtc_stale_tau_ms / 1000.0),
+            rail_osc_flips=args.dtc_rail_osc_flips,
+            rail_osc_hold_s=args.dtc_rail_osc_hold_s,
             log_path=_contact_log_path(args.dtc_log, prefix="dtc"),
             gain_note_extra=_wrench_gain_note(args),
             payload_mass=args.dtc_payload_mass,
@@ -1547,6 +1580,11 @@ def main():
                         f"tau_peak={st.get('tau_peak', 0.0):.2f}Nm "
                         f"clip={st.get('n_tau_clipped', 0)}"
                         f"{'' if worst < 0 else f'@j{worst}'} "
+                        # Times the loop cut itself out for a rail-to-rail
+                        # limit cycle. Anything but 0 is a gain that has to
+                        # come down before the next run -- see
+                        # RailOscillationGuard.
+                        f"railosc={st.get('n_rail_osc', 0)} "
                         f"hz={st.get('hz_meas', 0.0):.0f}/"
                         f"{st.get('hz', 0.0):.0f} "
                         f"dtmax={st.get('dt_max_ms', 0.0):.0f}ms "

@@ -398,6 +398,91 @@ def splice_ur(base, ur_values, ur_slots):
     return out
 
 
+
+# --- the loop's own limit-cycle cut-out -----------------------------------
+# Rail-to-rail sign alternation is the one signature a limit cycle has and a
+# stall does not. A joint held against friction sits at *one* sign of tau_max
+# for as long as the operator leans on it, which is correct and must never be
+# cut. A loop oscillating against its own delay slams the joint to +tau_max and
+# -tau_max alternately, and tau_max is then the only thing bounding the
+# amplitude -- so the arm is being thrown as hard as the configured cap allows.
+#
+# Measured across every dtc log on this rig, the separation is clean. Healthy
+# runs top out at 9 rail sign flips in 0.3 s and only ever on the 6 N.m wrist
+# joints j3/j4 (ordinary stick-slip against the cap). The two incidents are
+# nothing like it: dtc_20260830_141034.csv, the run that swung the arm into the
+# workstation, reads 20/11/21/18 flips on j1/j2/j3/j4 *simultaneously* --
+# including the 50 N.m shoulder and elbow, which flip zero times in every other
+# run -- and dtc_20260830_005006.csv, the ROBOT_EMERGENCY_STOP run, reads 16 on
+# j4. 12 sits above every healthy run and under both failures.
+RAIL_OSC_WINDOW_S = 0.3
+DEFAULT_RAIL_OSC_FLIPS = 12
+DEFAULT_RAIL_OSC_HOLD_S = 0.5
+
+
+class RailOscillationGuard:
+    """Trips when any joint alternates between +tau_max and -tau_max.
+
+    Deliberately not a rate limit, an amplitude threshold or a filter on tau.
+    Those all fire on the honest hard pushes this loop is *for*: a joint that
+    stalls against breakaway friction is supposed to sit on its rail. What no
+    legitimate command does is reverse sign at the rail several times in a
+    third of a second -- at that point the loop is fighting its own delay and
+    the cap is the only bound on how hard.
+
+    Tripping floats tau for ``hold_s`` (the caller also resets the law, the
+    joint hold and the re-arm blend -- same rule as a pendant stop: it must
+    stop the motion, not queue it up). State is cleared when the hold expires,
+    so a still-oscillating loop re-trips rather than latching forever with a
+    stale count.
+    """
+
+    def __init__(self, n, flips=DEFAULT_RAIL_OSC_FLIPS,
+                 window_s=RAIL_OSC_WINDOW_S, hold_s=DEFAULT_RAIL_OSC_HOLD_S):
+        self._n = int(n)
+        self._flips = int(flips)
+        self._window_s = float(window_s)
+        self._hold_s = float(hold_s)
+        self.n_trips = 0
+        self.last_joint = -1
+        self.reset()
+
+    @property
+    def enabled(self) -> bool:
+        return self._flips > 0
+
+    def reset(self) -> None:
+        self._sign = [0] * self._n
+        self._flip_t = [[] for _ in range(self._n)]
+        self._until = None
+
+    def update(self, now, tau, tau_max):
+        """(floating, rising_edge). ``floating`` means command zero this tick."""
+        if not self.enabled:
+            return False, False
+        if self._until is not None:
+            if now < self._until:
+                return True, False
+            self.reset()
+        tau = np.asarray(tau, dtype=float).reshape(-1)
+        tau_max = np.asarray(tau_max, dtype=float).reshape(-1)
+        for j in range(min(self._n, tau.size)):
+            if abs(tau[j]) < 0.99 * tau_max[j]:
+                continue
+            sign = 1 if tau[j] > 0 else -1
+            if self._sign[j] and sign != self._sign[j]:
+                self._flip_t[j].append(now)
+            self._sign[j] = sign
+            cut = now - self._window_s
+            while self._flip_t[j] and self._flip_t[j][0] < cut:
+                self._flip_t[j].pop(0)
+            if len(self._flip_t[j]) >= self._flips:
+                self.n_trips += 1
+                self.last_joint = j
+                self._until = now + self._hold_s
+                return True, True
+        return False, False
+
 class DirectTorqueBackend:
     """Runs the existing control law in Python and actuates it with ``directTorque``.
 
@@ -480,6 +565,8 @@ class DirectTorqueBackend:
         safety_mode_fn: Callable[[], Any] | None = None,
         stale_after_s: float = DEFAULT_STALE_AFTER_S,
         stale_tau_s: float | None = None,
+        rail_osc_flips: int = DEFAULT_RAIL_OSC_FLIPS,
+        rail_osc_hold_s: float = DEFAULT_RAIL_OSC_HOLD_S,
         rail_position: float | None = None,
         control: Any = None,
         receive: Any = None,
@@ -646,6 +733,10 @@ class DirectTorqueBackend:
         # the wrist is the light, lightly-damped blade that shook the arm into
         # C283A2, the shoulder is a friction grab doing its job.
         self._n_clip_joint = np.zeros(self._n, dtype=int)
+        # The cut-out for the failure tau_max cannot bound: see
+        # RailOscillationGuard. Sized off every dtc log on this rig.
+        self._rail_osc = RailOscillationGuard(
+            self._n, flips=rail_osc_flips, hold_s=rail_osc_hold_s)
         self._last_wrench = np.zeros(6, dtype=float)
         # Live plot feed for --dtc-law wrench. The speedJ trace hangs off
         # AdmittanceTeleoperationController and fires at the end of
@@ -1394,6 +1485,7 @@ class DirectTorqueBackend:
             # Zero *and* forget the latch -- see the class docstring.
             self._law.reset()
             self._joint_hold_reset()
+            self._rail_osc.reset()
             # Same rule for the wrench law's re-arm blend: it opens from the
             # last wrench, and a pre-stop wrench is exactly what must not be
             # handed back when someone clears the pendant.
@@ -1436,6 +1528,36 @@ class DirectTorqueBackend:
                 # would under-integrate by that ratio.
                 dt_tick = None if self._t_tick is None else now - self._t_tick
                 tau = self._law.step(cmd, qdot_last, q_last, dt=dt_tick)
+
+            # tau_max is the ONLY bound on a limit cycle's amplitude, so a loop
+            # oscillating against its own delay throws the arm exactly as hard
+            # as the cap allows -- 50 N.m at the shoulder on this rig. Nothing
+            # above the seam can see it: err_clip bounds the spring half of the
+            # wrench, and the damping half -Lambda*D*v has no clip at all, so
+            # dtc_20260830_141034.csv commanded 125 N with the stick quiet and
+            # the pose error at 0.0 mm. Cut out here, where the clipped tau is.
+            if not self._hold_zero:
+                floating, edge = self._rail_osc.update(
+                    now, tau, self._law.tau_max)
+                if floating:
+                    phase = "railosc"
+                    tau = np.zeros(self._n, dtype=float)
+                    # Float *and* forget, for the same reason a pendant stop
+                    # does: resuming into a held wrench re-opens the cycle.
+                    self._law.reset()
+                    self._joint_hold_reset()
+                    rearm_reset = getattr(
+                        self._controller, "reset_wrench_rearm", None)
+                    if callable(rearm_reset):
+                        rearm_reset()
+                    if edge:
+                        print(
+                            f"\033[91mDTC CUT OUT: joint "
+                            f"{self._rail_osc.last_joint} is oscillating "
+                            f"rail-to-rail at +/-tau_max. Floating tau. This "
+                            f"is a limit cycle, not a stall -- lower "
+                            f"--dtc-damping-ratio or --dtc-fn-lin before "
+                            f"running again.\033[0m", flush=True)
 
         dt_meas = None
         if self._t_tick is not None:
@@ -1694,6 +1816,7 @@ class DirectTorqueBackend:
             "w_lin": float(np.linalg.norm(self._last_wrench[3:6])),
             "w_ang": float(np.linalg.norm(self._last_wrench[0:3])),
             "n_tau_clipped": self._n_tau_clipped,
+            "n_rail_osc": self._rail_osc.n_trips,
             "n_clip_joint": self._n_clip_joint.tolist(),
             # The joint that railed most. -1 when nothing has.
             "clip_joint_worst": (
