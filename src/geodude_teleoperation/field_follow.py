@@ -79,6 +79,49 @@ def _limit_rotation(R_prev, R_new, max_rad):
     return slerp_rotation(R_prev, R_new, float(max_rad / err))
 
 
+def _ramp_step(cmd, goal, vel, dt):
+    """Constant-velocity step of the commanded xyz toward the goal.
+
+    Deliberately *not* an exponential settle like ``_approach_rotation``: a
+    first-order lag toward a goal that keeps moving every ``--follow-hz``
+    commit never catches up, so it adds a steady-state tracking lag on top of
+    the hop it was meant to remove. ``vel`` is set once per commit to
+    ``(goal - cmd_at_commit_time) / dt_tick`` -- the constant velocity that
+    exactly closes the gap by the time the next commit is expected -- and each
+    tick (committed or not) is charged ``vel * dt`` of it. Same total
+    displacement as the old snap, spread evenly over the gap instead of
+    dumped at its start: zero added lag, no periodic step into the control
+    loop. This is also what speedJ has always done for free -- the carrot
+    there already *is* a velocity command, integrated by the position servo;
+    this reproduces the same shape for the position spring under the wrench
+    law. Clamped to stop (not overshoot) the moment the ramp reaches ``goal``,
+    since ``dt_tick`` is only an estimate of the next commit's timing.
+    """
+    cmd = np.asarray(cmd, dtype=float).reshape(3)
+    goal = np.asarray(goal, dtype=float).reshape(3)
+    vel = np.asarray(vel, dtype=float).reshape(3)
+    if not np.isfinite(dt) or dt <= 0.0 or not np.any(vel):
+        return cmd.copy(), vel.copy()
+    remaining_before = goal - cmd
+    new_cmd = cmd + vel * dt
+    remaining_after = goal - new_cmd
+    if float(np.dot(remaining_before, remaining_after)) <= 0.0:
+        # Reached or passed the goal this step (dt_tick was only an estimate
+        # of the real gap) -- stop exactly at the goal, don't overshoot back
+        # past it next tick.
+        return goal.copy(), np.zeros(3)
+    return (new_cmd if _is_finite_xyz(new_cmd) else goal.copy()), vel.copy()
+
+
+def _ramp_velocity(cmd, goal, dt_tick):
+    """Velocity that closes the ``cmd`` -> ``goal`` gap in ``dt_tick``."""
+    cmd = np.asarray(cmd, dtype=float).reshape(3)
+    goal = np.asarray(goal, dtype=float).reshape(3)
+    if not np.isfinite(dt_tick) or dt_tick <= 1e-9:
+        return np.zeros(3)
+    return (goal - cmd) / dt_tick
+
+
 def _approach_rotation(R_cmd, R_goal, dt, tau_s):
     """First-order approach of the commanded R toward the field goal.
 
@@ -165,7 +208,7 @@ class FieldFollow:
                  project_in_process=False, mesh=None, max_lead_m=0.02,
                  max_dR_rad=0.12, max_step_m=0.0, snap_to_surface=True,
                  rebase_on_live=True, rearm_slerp_s=0.0,
-                 hold_field_orientation=False):
+                 hold_field_orientation=False, linear_approach=False):
         hz = float(hz)
         if hz <= 0.0:
             raise ValueError(f"hz must be positive, got {hz}")
@@ -199,6 +242,13 @@ class FieldFollow:
         # fresh full-field error on every re-arm and never converged onto the
         # field between them. On, only the *position* re-bases to live.
         self._hold_field_orientation = bool(hold_field_orientation)
+        # Whether the *linear* carrot ramps to its goal at a constant
+        # velocity spread over the gap to the next --follow-hz commit,
+        # advanced on every tick() call (control rate), rather than snapping
+        # the full step at the commit. Off (default) is the pre-fix
+        # behavior -- the linear carrot never had this, unlike rotation's
+        # rearm_slerp_s.
+        self._linear_approach = bool(linear_approach)
         self._zero_smoothing_after_first = bool(zero_smoothing_after_first)
         self._proc = None
         self._in_q = None
@@ -209,9 +259,12 @@ class FieldFollow:
         self._pending = np.zeros(3, dtype=float)
         self._idle = True
         self._xyz = None
+        self._xyz_cmd = None
+        self._xyz_vel = np.zeros(3, dtype=float)
         self._R = np.eye(3)
         self._R_cmd = np.eye(3)
         self._last_t = float("-inf")
+        self._last_advance_t = float("-inf")
         self.last_target = None
         self._undo = None
         self.log = []
@@ -241,9 +294,12 @@ class FieldFollow:
             # arm (align has just finished, so live R is already on the field),
             # so the re-arm slerp starts from here and not from a stale carrot.
             self._R_cmd = self._R.copy()
+            self._xyz_cmd = self._xyz.copy()
+            self._xyz_vel[:] = 0.0
             self._pending[:] = 0.0
             self._idle = True
             self._last_t = float("-inf")
+            self._last_advance_t = float("-inf")
 
     def add_body_linear(self, linear):
         with self._lock:
@@ -257,12 +313,18 @@ class FieldFollow:
             self._idle = True
             if xyz is not None:
                 self._xyz = np.asarray(xyz, dtype=float).reshape(3).copy()
+                self._xyz_cmd = self._xyz.copy()
+                self._xyz_vel[:] = 0.0
+                self._last_advance_t = float("-inf")
                 self.last_target = _motor_at(self._xyz, self._R_cmd)
 
     def snap_tcp(self, xyz, R=None):
         """Rebase the carrot to ``xyz`` without blocking the next stick tick."""
         with self._lock:
             self._xyz = np.asarray(xyz, dtype=float).reshape(3).copy()
+            self._xyz_cmd = self._xyz.copy()
+            self._xyz_vel[:] = 0.0
+            self._last_advance_t = float("-inf")
             if R is not None:
                 self._R = np.asarray(R, dtype=float).reshape(3, 3).copy()
                 self._R_cmd = self._R.copy()
@@ -351,10 +413,12 @@ class FieldFollow:
         """Undo the last committed follow step (bad project / mapped EE jump)."""
         if self._undo is None:
             return
-        xyz, R, last, R_cmd = self._undo
+        xyz, R, last, R_cmd, xyz_cmd, xyz_vel = self._undo
         self._xyz = None if xyz is None else np.array(xyz, copy=True)
         self._R = np.array(R, copy=True)
         self._R_cmd = np.array(R_cmd, copy=True)
+        self._xyz_cmd = None if xyz_cmd is None else np.array(xyz_cmd, copy=True)
+        self._xyz_vel = np.array(xyz_vel, copy=True)
         self.last_target = last
         self._undo = None
         self._pending[:] = 0.0
@@ -365,6 +429,8 @@ class FieldFollow:
         if self._xyz is None:
             T = np.asarray(proposed_motor.to_transformation_matrix(), dtype=float)
             self._xyz = T[:3, 3].copy()
+            self._xyz_cmd = self._xyz.copy()
+            self._xyz_vel[:] = 0.0
             self._R = T[:3, :3].copy()
         if self._idle:
             with self._lock:
@@ -373,7 +439,28 @@ class FieldFollow:
                 return FollowTick(idle=True)
             self._idle = False
         if np.isfinite(self._last_t) and (now - self._last_t) < self._min_dt:
-            return FollowTick(idle=False)
+            if (not self._linear_approach or self._xyz_cmd is None
+                    or self._xyz is None):
+                return FollowTick(idle=False)
+            # Keep charging the constant-velocity ramp at control-tick rate
+            # even though this call did not earn a new project() -- this is
+            # the fix for "the carrot is a 20 Hz staircase into a 124 Hz
+            # loop" (HANDOFF): the command creeps toward the last committed
+            # goal every tick instead of holding then jumping.
+            # -inf means no advance has ever run (startup): charge 0 rather
+            # than falling back to a full ramp duration, which would snap the
+            # whole step on what should be a single control-tick slice.
+            adv_dt = (now - self._last_advance_t
+                      if np.isfinite(self._last_advance_t) else 0.0)
+            adv_dt = float(np.clip(adv_dt, 0.0, 4.0 * self._min_dt))
+            self._xyz_cmd, self._xyz_vel = _ramp_step(
+                self._xyz_cmd, self._xyz, self._xyz_vel, adv_dt)
+            self._last_advance_t = now
+            target = _motor_at(self._xyz_cmd, self._R_cmd)
+            self.last_target = target
+            return FollowTick(
+                target=target, quat_wxyz=_quat_wxyz_from_motor(target),
+                idle=False)
         delta = self._drain()
         t_prev = self._last_t
         self._last_t = now
@@ -392,6 +479,8 @@ class FieldFollow:
             self._R.copy(),
             self.last_target,
             self._R_cmd.copy(),
+            None if self._xyz_cmd is None else self._xyz_cmd.copy(),
+            self._xyz_vel.copy(),
         )
         base = self._xyz
         if (self._rebase_on_live and live_xyz is not None
@@ -443,7 +532,26 @@ class FieldFollow:
         self._xyz = _snap_normal_to_surface(
             stick_xyz, xyz_proj, R_new,
             max_correction_m=self._max_lead_m) if self._snap_to_surface else stick_xyz
-        target = _motor_at(self._xyz, self._R_cmd)
+        # The goal moves at --follow-hz; the *command* ramps toward it at a
+        # constant velocity sized to close the gap by the next expected
+        # commit (dt_tick), charged in whatever increment tick() is actually
+        # called at (control rate) -- not an exponential settle like
+        # _R_cmd/_approach_rotation, which would add steady-state lag chasing
+        # a goal that moves again before it arrives. Off (default) snaps,
+        # byte-identical to pre-fix behavior.
+        if self._linear_approach:
+            if self._xyz_cmd is None:
+                self._xyz_cmd = self._xyz.copy()
+            self._xyz_vel = _ramp_velocity(self._xyz_cmd, self._xyz, dt_tick)
+            adv_dt = (now - self._last_advance_t
+                      if np.isfinite(self._last_advance_t) else 0.0)
+            adv_dt = float(np.clip(adv_dt, 0.0, dt_tick))
+            self._xyz_cmd, self._xyz_vel = _ramp_step(
+                self._xyz_cmd, self._xyz, self._xyz_vel, adv_dt)
+        else:
+            self._xyz_cmd = self._xyz.copy()
+        self._last_advance_t = now
+        target = _motor_at(self._xyz_cmd, self._R_cmd)
         self.last_target = target
         quat = _quat_wxyz_from_motor(target)
         overrun = project_ms > RTDE_PERIOD_MS

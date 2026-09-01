@@ -11,3 +11,8 @@ assets/laser_profilometer/merged_full.ply
 speedj_logs/
 CLAUDE.md
 docs/
+
+# Local PD / DTC tuning cockpit (not for the repo)
+pd_analysis/
+.venv/
+requirements.txt

@@ -1185,6 +1185,22 @@ def build_arg_parser():
              "re-based on live every quiet tick and a ramp could only lag "
              "(default %(default)s)")
     parser.add_argument(
+        "--follow-linear-approach", dest="follow_linear_approach",
+        action=argparse.BooleanOptionalAction, default=False,
+        help="ramp the linear carrot to its goal at a constant velocity "
+             "spread over the gap to the next --follow-hz commit, charged "
+             "every control tick, instead of snapping the full step "
+             "(max_step_m) at the commit. Off (default) is the pre-fix "
+             "behavior -- rotation already gets this treatment via "
+             "--rearm-slerp-s, position never did, and a snapped step every "
+             "--follow-hz is a periodic kick into the control loop (HANDOFF: "
+             "\"the carrot is a 20 Hz staircase into a 124 Hz loop\"). "
+             "Deliberately a constant-velocity ramp, not an exponential "
+             "settle: the goal moves again before an exponential catches up, "
+             "which only adds tracking lag. Untested on hardware -- bring up "
+             "under --dtc-hold-zero first, then bare defaults, and read the "
+             "oscillation section of analyze_dtc_log.py")
+    parser.add_argument(
         "--follow-max-dr-rad", type=float, default=0.02, metavar="RAD",
         help="per-follow-tick cap on how far the field goal itself may turn, "
              "so one project() flip at a mesh edge cannot bank a large angular "
@@ -1388,6 +1404,7 @@ def main():
         rearm_slerp_s=(args.rearm_slerp_s
                        if _hold_field_orientation(args) else 0.0),
         hold_field_orientation=_hold_field_orientation(args),
+        linear_approach=args.follow_linear_approach,
         snap_to_surface=args.snap_follow_to_surface,
         # speedJ keeps the re-based carrot: it is a velocity command and the
         # position servo underneath wants exactly that. The wrench law turns
