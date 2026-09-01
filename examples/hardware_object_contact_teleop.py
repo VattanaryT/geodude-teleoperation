@@ -135,8 +135,6 @@ from geodude_teleoperation.torque_backend import (
     DEFAULT_RAIL_OSC_FLIPS,
     DEFAULT_RAIL_OSC_HOLD_S,
     RAIL_OSC_WINDOW_S,
-    LAMBDA_R_NONE,
-    LAMBDA_R_FULL,
     DirectTorqueBackend,
 )
 from geodude_teleoperation.virtual_fixture import FieldAlignPreview, workstation_field_z_arrows
@@ -624,12 +622,6 @@ def _wrench_gain_note(args) -> str:
     if args.dtc_lambda:
         bits.append(
             f"dmax={resolve_wrench_damping_max(args.dtc_hz, args.dtc_damping_max):g}")
-        # LAMBDA_R_NONE/FULL are module constants, not CLI flags -- record
-        # them anyway, since they gate whether Lambda shaping runs at all on
-        # a given tick and are the newest, least-validated numbers in this
-        # header. See torque_backend._lambda_coupling_r.
-        bits.append(f"r_none={LAMBDA_R_NONE:g}")
-        bits.append(f"r_full={LAMBDA_R_FULL:g}")
     return "  ".join(bits)
 
 
@@ -1692,15 +1684,7 @@ def main():
                         # apparent inertia and breakaway friction does not. See
                         # LAMBDA_MIN_ANG_KGM2. Stuck at 0 means the floor is
                         # inert and a stuck roll is not this.
-                        f"lamfloor={st.get('n_lambda_ang_floor', 0)} "
-                        # Ticks the r-based fade rejected Lambda outright
-                        # (LAMBDA_R_NONE/FULL, torque_backend._lambda_coupling_r).
-                        # Nonzero means the block-diagonal cross-coupling
-                        # error was judged too large to shape with at all --
-                        # see dtc_20260831_183327.csv, where r sat at 0.97
-                        # for the 1.3 s straddling a 32.7 Hz limit cycle that
-                        # this fade did not exist to catch.
-                        f"lamr={st.get('n_lambda_r_reject', 0)}")
+                        f"lamfloor={st.get('n_lambda_ang_floor', 0)}")
                 else:
                     actuation = (
                         f"tau_peak={st.get('tau_peak', 0.0):.2f}Nm "
