@@ -1223,7 +1223,27 @@ def build_arg_parser():
         help="per-follow-tick cap on how far the field goal itself may turn, "
              "so one project() flip at a mesh edge cannot bank a large angular "
              "error for the next re-entry. Field->field only; 0 disables "
-             "(default %(default)s)")
+             "(default %(default)s). DO NOT TIGHTEN THIS to fight a "
+             "curvature-localized ring -- tried on this rig (0.02 -> 0.01,"
+             " dtc_20260831_183327.csv) and it produced a real self-sustaining"
+             " limit cycle that was not there at 0.02: j3 reversed at "
+             "+/-tau_max 12 times in 0.3 s at t=52.62 with the stick quiet "
+             "and |e_lin| at zero, and the release-response step test found "
+             "1 of 13 releases that grew instead of decaying, at 32.7 Hz "
+             "against this loop's own f_90 = 1/(4T) = 33 Hz -- the exact "
+             "delayed-damper signature documented on WRENCH_DAMPING_MAX_1_S, "
+             "just reached through this rate cap instead of through D. A "
+             "tightened rate limiter saturates more often and a saturating "
+             "nonlinearity in the forward path adds phase lag of its own; "
+             "that is plausibly what walked this loop's effective delay up "
+             "to the f_90 line at the *same* D_lin (11.31) that ran clean "
+             "with this cap at 0.02 (dtc_20260831_175638/180840.csv). "
+             "RailOscillationGuard caught it here -- do not treat that as "
+             "permission to repeat this, the guard is the last line, not "
+             "the fix. A curvature-localized tracking gap is a --dtc-fn-lin"
+             "/--dtc-damping-ratio question, not this one, and per the same "
+             "run's own oscillation section: lower D, do not raise "
+             "--dtc-damping-max, fn will not touch a 32 Hz runaway")
     parser.add_argument(
         "--max-lead-m", type=float, default=0.05, metavar="M",
         help="how far the field-follow carrot may run ahead of the live TCP. "
