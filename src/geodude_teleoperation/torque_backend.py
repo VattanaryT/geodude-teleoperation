@@ -355,6 +355,31 @@ LAMBDA_MAX_ANG_KGM2 = 1.0
 # than switching off at a threshold.
 LAMBDA_SIGMA_FULL = 0.05
 LAMBDA_SIGMA_NONE = 0.02
+
+# _clamp_spd (below) commands a block-diagonal Lambda_bd, deliberately
+# dropping the angular<->linear cross block C -- see its docstring. That
+# makes the realized closed loop Lambda_true^-1 @ Lambda_bd @ (K e - D v)
+# instead of (K e - D v); the top eigenvalue of that mismatch is exactly
+# 1/(1-r), r the largest canonical correlation between Lambda's angular and
+# linear blocks (see _lambda_coupling_r). This is a *dynamic* degeneracy,
+# invisible to sigma/alpha (a *kinematic* one) -- a pose can be far from any
+# Jacobian singularity and still have r near 1.
+#
+# Measured on dtc_20260831_183327.csv: r sat at 0.97 for the full 1.3 s
+# leading into and through the run's 32.7 Hz limit cycle. 1/(1-0.97) = 37,
+# so a logged D_lin=11.31 was realized as ~415 in the worst direction --
+# 20x past the 19.1 catastrophic bracket in resolve_wrench_damping_max --
+# while sigma/alpha saw a perfectly healthy pose.
+#
+# LAMBDA_R_NONE/FULL are a first-cut, NOT hardware-validated: they bound
+# the fade band the same way LAMBDA_SIGMA_NONE/FULL do, but there is no
+# measurement yet of how often ordinary sliding on this rig runs r above
+# LAMBDA_R_NONE -- that is exactly what the new `lam_r` CSV column is for.
+# Bring this up under --dtc-hold-zero first, then a short bare-default run,
+# and read n_lambda_r_reject / the lam_r column before trusting it on an
+# actuated session.
+LAMBDA_R_FULL = 0.85
+LAMBDA_R_NONE = 0.50
 DEFAULT_STALE_TAU_MIN_S = 0.04
 
 
@@ -415,6 +440,33 @@ def _clamp_spd(ang, ang_lo, ang_hi, lin, lin_lo, lin_hi, full):
         w, v = np.linalg.eigh(0.5 * (blk + blk.T))
         out[sl, sl] = v @ np.diag(np.clip(w, lo, hi)) @ v.T
     return out
+
+
+def _lambda_coupling_r(lam):
+    """Largest canonical correlation between Lambda's angular and linear blocks.
+
+    ``_clamp_spd`` commands a block-diagonal Lambda_bd, dropping the
+    angular<->linear cross block C of the true (pre-clamp) ``lam``. The
+    realized closed loop is ``Lambda_true^-1 @ Lambda_bd @ (K e - D v)``
+    instead of ``(K e - D v)``, and that mismatch matrix's top eigenvalue is
+    exactly ``1 / (1 - r)``, where ``r`` is the largest singular value of
+    ``A^-1/2 @ C @ B^-1/2`` (A the angular block, B the linear block) -- the
+    same normalization that turns a covariance into a correlation. r is in
+    [0, 1): near 0 means the two blocks are dynamically independent at this
+    pose and the block-diagonal approximation is nearly exact; near 1 means
+    some angular direction and some linear direction are nearly the same
+    motion in the arm's *true* inertia. This is a dynamic degeneracy, not a
+    kinematic one -- a pose can be far from any Jacobian singularity
+    (healthy sigma) and still have r near 1. See LAMBDA_R_NONE/FULL.
+    """
+    A, B, C = lam[:3, :3], lam[3:, 3:], lam[:3, 3:]
+
+    def _inv_sqrt(m):
+        w, v = np.linalg.eigh(m)
+        return v @ np.diag(1.0 / np.sqrt(np.clip(w, 1e-9, None))) @ v.T
+
+    return float(np.linalg.svd(
+        _inv_sqrt(A) @ C @ _inv_sqrt(B), compute_uv=False)[0])
 
 
 def splice_ur(base, ur_values, ur_slots):
@@ -682,6 +734,8 @@ class DirectTorqueBackend:
         self._last_lambda_alpha = 1.0
         self._n_lambda_ang_floor = 0
         self._last_lambda_ang_min = float("nan")
+        self._n_lambda_r_reject = 0
+        self._last_lambda_r = float("nan")
         self._safety_mode_fn = safety_mode_fn
         self._stale_after_s = float(stale_after_s)
         # The on-robot latch holds the last tau forever if this host loop stalls,
@@ -1295,14 +1349,28 @@ class DirectTorqueBackend:
         self._last_lambda_ang_min = ang_eig
         if ang_eig < LAMBDA_MIN_ANG_KGM2:
             self._n_lambda_ang_floor += 1
+
+        # Read off the *pre-clamp* lam, the same one ang_eig came from --
+        # _clamp_spd below discards the cross block this measures. See
+        # LAMBDA_R_NONE/FULL and _lambda_coupling_r.
+        r = _lambda_coupling_r(lam)
+        self._last_lambda_r = r
+
         lam = _clamp_spd(lam[:3, :3], LAMBDA_MIN_ANG_KGM2, LAMBDA_MAX_ANG_KGM2,
                          lam[3:, 3:], LAMBDA_MIN_LIN_KG, LAMBDA_MAX_LIN_KG, lam)
 
-        # Fade to identity near a singularity. alpha=1 is fully shaped.
+        # Fade to identity near a kinematic singularity (sigma) or a dynamic
+        # one (r, see LAMBDA_R_NONE/FULL) -- either makes the block-diagonal
+        # Lambda a bad stand-in for the true one. alpha=1 is fully shaped.
         span = LAMBDA_SIGMA_FULL - LAMBDA_SIGMA_NONE
-        alpha = float(np.clip((sigma - LAMBDA_SIGMA_NONE) / span, 0.0, 1.0))
+        alpha_sigma = float(np.clip((sigma - LAMBDA_SIGMA_NONE) / span, 0.0, 1.0))
+        r_span = LAMBDA_R_FULL - LAMBDA_R_NONE
+        alpha_r = float(np.clip((LAMBDA_R_FULL - r) / r_span, 0.0, 1.0))
+        alpha = alpha_sigma * alpha_r
         if alpha <= 0.0:
             self._n_lambda_reject += 1
+            if alpha_r <= 0.0:
+                self._n_lambda_r_reject += 1
             return None
         lam = alpha * lam + (1.0 - alpha) * np.eye(6)
         self._last_lambda_alpha = alpha
@@ -1311,7 +1379,7 @@ class DirectTorqueBackend:
             d = np.abs(np.diag(lam))
             print(f"dtc: inertia shaping on -- apparent mass "
                   f"lin={np.round(d[3:], 2)} kg  ang={np.round(d[:3], 4)} kg.m^2  "
-                  f"sigma_min={sigma:.4f} alpha={alpha:.2f}", flush=True)
+                  f"sigma_min={sigma:.4f} r={r:.3f} alpha={alpha:.2f}", flush=True)
         return lam
 
     def _joint_hold_tau(self, tau_task):
@@ -1784,6 +1852,11 @@ class DirectTorqueBackend:
         # back to. Below the floor on a tick means the roll axis was running on
         # borrowed authority on that tick.
         cols += ["lam_ang"]
+        # Lambda's angular<->linear coupling r (see _lambda_coupling_r):
+        # 1/(1-r) is the gain error the block-diagonal clamp introduces on
+        # this tick. r near LAMBDA_R_FULL is what dtc_20260831_183327.csv's
+        # limit cycle sat on for 1.3 s straight -- see LAMBDA_R_NONE/FULL.
+        cols += ["lam_r"]
         self._log_fh.write(",".join(cols) + "\n")
         self._log_t0 = None
         print(f"dtc log: {self._log_path}", flush=True)
@@ -1929,6 +2002,8 @@ class DirectTorqueBackend:
         fields += ["" if not np.isfinite(n_deg) else f"{n_deg:.2f}", str(act)]
         lam_ang = self._last_lambda_ang_min
         fields += ["" if not np.isfinite(lam_ang) else f"{lam_ang:.6f}"]
+        lam_r = self._last_lambda_r
+        fields += ["" if not np.isfinite(lam_r) else f"{lam_r:.4f}"]
         try:
             fh.write(",".join(fields) + "\n")
         except Exception as exc:
@@ -1964,6 +2039,13 @@ class DirectTorqueBackend:
             # is the only evidence that it is doing anything.
             "n_lambda_ang_floor": self._n_lambda_ang_floor,
             "lambda_ang_min": self._last_lambda_ang_min,
+            # Ticks the r-based fade (LAMBDA_R_NONE/FULL) rejected Lambda
+            # entirely -- distinct from n_lambda_reject, which also counts
+            # the pre-existing sigma-based rejection. Nonzero here means the
+            # block-diagonal cross-coupling error was judged too large to
+            # shape with at all on that tick, not just faded down.
+            "n_lambda_r_reject": self._n_lambda_r_reject,
+            "lambda_r": self._last_lambda_r,
             # Ticks on which the joint-space hold contributed anything. Its
             # torque is already in the per-joint tau columns of --dtc-log (on
             # wrist 3 it is the *only* thing there); this says whether it is
