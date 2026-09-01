@@ -185,7 +185,22 @@ DEFAULT_REARM_WRENCH_S = 0.15
 # --dtc-law wrench damping ratios and the no-Lambda angular frequency, resolved
 # by resolve_wrench_zeta / resolve_wrench_fn_ang.
 WRENCH_ZETA_LIN = 0.3
-WRENCH_ZETA_ANG = 0.1
+# 0.10 let the rig's ~15 Hz structural mode ring on 19.4% of q-dot power
+# (dtc_20260830_151553.csv); 0.15 cut that to 2.5-3.3% with every release
+# still decaying (dtc_20260830_152659/154729.csv) -- cheap, hardware-A/B'd,
+# never a source of the delayed-damper pathology (that mode sits at 40 deg
+# of phase here, well under the 90 deg line). Promoted to the default
+# 2026-08-31. It is not sufficient alone at every --dtc-fn-lin/--dtc-damping-max
+# pairing -- dtc_20260831_180840.csv still read 30.9% at 14.42 Hz at these
+# bare defaults (fn_lin 3, dmax 12) with 0.15 -- because the mode is a fixed
+# mechanical resonance excited by the operator, not a control pole: it decays
+# to 0.000 rad/s on every release, and its frequency does not move across
+# fn 3/4, floor/no-floor, or zeta 0.10/0.15 runs. That rules out both "gain
+# too high" (a real control pole's frequency tracks sqrt(K)) and "damping
+# too low, closed loop is unstable" (an unstable loop does not need the
+# stick to keep ringing). Raising zeta_ang further is bounded by
+# --dtc-damping-max, same as the linear side.
+WRENCH_ZETA_ANG = 0.15
 WRENCH_FN_ANG_NO_LAMBDA = 1.5
 
 # Ceiling on the angular fn that resolve_wrench_fn_ang *derives* from
@@ -812,7 +827,10 @@ def build_arg_parser():
     parser.add_argument(
         "--dtc-damping-ratio-ang", type=float, default=None, metavar="ZETA",
         help="--dtc-law wrench: ANGULAR damping as D = 2*sqrt(K_ang)*zeta "
-             f"(default {WRENCH_ZETA_ANG}). Kept separate from "
+             f"(default {WRENCH_ZETA_ANG}, raised from 0.10 2026-08-31 -- it "
+             "cut the rig's ~15 Hz structural-mode ring from 19.4% to "
+             "2.5-3.3% of q-dot power with no regression, see WRENCH_ZETA_ANG). "
+             "Kept separate from "
              "--dtc-damping-ratio even under --dtc-lambda, where Lambda does "
              "remove the apparent-M difference the split was for: the wrist is "
              "the joint that rails first when the damper turns negative at the "
