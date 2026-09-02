@@ -40,6 +40,21 @@ is now equivalent to::
 To go back to the speedJ plant end-to-end, pass ``--contact-backend speedj
 --max-lead-m 0.005``: the 50 mm lead is a wrench-law force ceiling and is far
 too much slack for a velocity carrot chased by a position servo.
+
+**DTC compliance hold (no SpaceMouse)** — push-test the wrench spring in free
+space with Lambda inertia shaping (equal EE compliance in every direction)::
+
+    --dtc-compliance-hold --no-viz --no-speedj-plot
+
+Bare command applies the measured-best push-test gains (override any of them
+explicitly)::
+
+    --dtc-tau-max 140 140 140 30 30 30
+    --dtc-fn-lin 3.0 --dtc-damping-ratio 0.94 --dtc-damping-ratio-ang 0.94
+
+``fn_ang`` tracks ``fn_lin`` (both 3 Hz). Skips startup align, field-follow,
+and any input device. Forces ``--dtc-lambda`` and disables joint-space hold.
+Ctrl+C to quit.
 """
 from __future__ import annotations
 
@@ -171,6 +186,13 @@ DEFAULT_VENTION_HEIGHT = 0.51
 # value that was measured on a stable arm and is re-raised only after the
 # oscillation is confirmed gone. One variable at a time.
 WRENCH_TAU_MAX = (50.0, 50.0, 50.0, 6.0, 6.0, 30.0)
+
+# Hardware-tuned defaults for ``--dtc-compliance-hold`` (push test). zeta =
+# pi*fn/10 gives K/D = 10 at fn_lin = 3 Hz under --dtc-lambda.
+COMPLIANCE_HOLD_TAU_MAX = (140.0, 140.0, 140.0, 30.0, 30.0, 30.0)
+COMPLIANCE_HOLD_ZETA_LIN = 0.94
+COMPLIANCE_HOLD_ZETA_ANG = 0.94
+COMPLIANCE_HOLD_FN_LIN = 3.0
 
 # --dtc-rearm-wrench-s default. The wrench-law counterpart to --rearm-slerp-s,
 # which only ever ramped the commanded *rotation*. On dtc_20260830_115039.csv
@@ -639,9 +661,18 @@ def _hold_field_orientation(args) -> bool:
             and args.dtc_law == "wrench")
 
 
-def defer_dtc_until_align_done(*, dtc_backend, align) -> bool:
+def dtc_compliance_hold_mode(args) -> bool:
+    """Hands-off DTC wrench-law hold at the current pose (no SpaceMouse)."""
+    return bool(getattr(args, "dtc_compliance_hold", False))
+
+
+def defer_dtc_until_align_done(*, dtc_backend, align, args=None) -> bool:
     """True: run speedJ through startup align, then hand off to DTC once."""
-    return dtc_backend is not None and align is not None and not align.finished
+    if dtc_backend is None:
+        return False
+    if args is not None and dtc_compliance_hold_mode(args):
+        return False
+    return align is not None and not align.finished
 
 
 def route_spacemouse_twist(twist, *, sim_probe, on_hardware):
@@ -1070,6 +1101,16 @@ def build_arg_parser():
              "rate and stream tau=0 so the arm floats, with viser fully live. The "
              "control law still runs and the EE frame must track the real arm; "
              "nothing actuates.")
+    parser.add_argument(
+        "--dtc-compliance-hold", action="store_true",
+        help="DTC wrench-law compliance test: no SpaceMouse, no startup align, no "
+             "field-follow. Freeze the pose target at handoff (disables per-tick "
+             "hold-at-tick re-base) so a push creates spring error and the arm "
+             "returns on release. Forces --dtc-lambda (Lambda = (J M^-1 J.T)^-1 "
+             "so the EE is a unit mass in every direction, not one wrench split "
+             "unevenly across joints) and turns off joint-space hold. Requires "
+             "--contact-backend dtc and --dtc-law wrench (the defaults). Pair "
+             "with --no-viz for a headless bench test.")
     # --- contact lift-off fixes, independently switchable so a hardware run can
     # bisect which one actually matters. All three off reproduces the previous
     # behavior exactly: --press-loop legacy --no-free-along-normal
@@ -1286,8 +1327,45 @@ def build_arg_parser():
     return parser
 
 
+def configure_dtc_compliance_hold(args) -> None:
+    """Validate and apply --dtc-compliance-hold side effects."""
+    if not dtc_compliance_hold_mode(args):
+        return
+    if args.contact_backend != "dtc":
+        raise SystemExit("--dtc-compliance-hold requires --contact-backend dtc")
+    if args.dtc_law != "wrench":
+        raise SystemExit("--dtc-compliance-hold requires --dtc-law wrench")
+    if args.dtc_hold_zero:
+        raise SystemExit(
+            "--dtc-compliance-hold and --dtc-hold-zero are mutually exclusive")
+    if not args.dtc_lambda:
+        raise SystemExit(
+            "--dtc-compliance-hold requires --dtc-lambda (inertia shaping). "
+            "Without Lambda the same task wrench maps unevenly across joints "
+            "(wrist moves, shoulder takes force); see analyze_dtc_mobility.py.")
+    args.startup_align = False
+    args.dtc_lambda = True
+    # fn_ang defaults to fn_lin under Lambda via resolve_wrench_fn_ang when unset.
+    # Joint-space hold adds extra stiffness on selected joints (default wrist 3)
+    # on top of the task wrench -- it defeats an equal-compliance push test.
+    args.dtc_joint_hold_kp = 0.0
+    args.dtc_joint_hold_kd = 0.0
+    if list(args.dtc_tau_max) == list(WRENCH_TAU_MAX):
+        args.dtc_tau_max = list(COMPLIANCE_HOLD_TAU_MAX)
+    if args.dtc_damping_ratio is None:
+        args.dtc_damping_ratio = COMPLIANCE_HOLD_ZETA_LIN
+    if args.dtc_damping_ratio_ang is None:
+        args.dtc_damping_ratio_ang = COMPLIANCE_HOLD_ZETA_ANG
+    # Teleop idle hold re-bases the spring target onto the live pose every
+    # tick so field-follow does not fight a stale carrot. For a push test the
+    # target must stay at the handoff pose instead, or releasing the arm leaves
+    # error ~= 0 and |W| ~= 0 with no return motion.
+    args.dtc_hold_at_tick = False
+
+
 def main():
     args = build_arg_parser().parse_args()
+    configure_dtc_compliance_hold(args)
     if args.check_spacemouse:
         paths = list_spacemouse_paths()
         if not paths:
@@ -2060,8 +2138,27 @@ def main():
 
     def start_control_and_device():
         nonlocal device, speedj_trace
+        if dtc_compliance_hold_mode(args):
+            if speedj_trace is None and args.speedj_plot:
+                from geodude_teleoperation.speedj_plot import SpeedJTrace
+                speedj_trace = SpeedJTrace()
+            approach_controller.set_input_active(False)
+            approach_controller.hold_live_pose()
+            enter_direct_torque()
+            if speedj_trace is not None and dtc_backend is not None:
+                dtc_backend.set_command_trace(speedj_trace.record)
+                speedj_trace.start(figsize=tuple(args.plot_size))
+            print(
+                "dtc compliance hold: lambda=on (task inertia shaping), "
+                "joint hold=off, pose frozen at handoff. Push the arm — EE "
+                "compliance should be even in every direction; it should "
+                "return when released. Ctrl+C to quit.",
+                flush=True,
+            )
+            return
         # Start frozen: no speedJ until a non-idle SpaceMouse reading arrives.
-        defer = defer_dtc_until_align_done(dtc_backend=dtc_backend, align=align)
+        defer = defer_dtc_until_align_done(
+            dtc_backend=dtc_backend, align=align, args=args)
         if args.speedj_plot and speedj_trace is None:
             from geodude_teleoperation.speedj_plot import SpeedJTrace
             speedj_trace = SpeedJTrace()
@@ -2121,11 +2218,15 @@ def main():
             "dtc": (
                 "speedJ align → dtc teleop (free + contact via directTorque)"
                 + (" [HOLD-ZERO]" if args.dtc_hold_zero else "")
+                + (" [COMPLIANCE-HOLD]" if dtc_compliance_hold_mode(args) else "")
             ),
         }[args.contact_backend]
         if args.no_viz:
             print(f"Teleoperating '{args.task_space}' on real geodude (headless) "
-                  f"-- {backend_note}; button {args.mode_button} toggles. Ctrl+C to quit.")
+                  f"-- {backend_note}"
+                  + ("" if dtc_compliance_hold_mode(args)
+                     else f"; button {args.mode_button} toggles")
+                  + ". Ctrl+C to quit.")
             start_control_and_device()
             if align is not None and args.align_delay is None:
                 print(
@@ -2134,7 +2235,26 @@ def main():
                     flush=True,
                 )
                 start_align_keys()
+            hold_log_t = {"t": float("-inf")}
             while True:
+                if dtc_compliance_hold_mode(args):
+                    now = time.monotonic()
+                    if (now - hold_log_t["t"]) >= 1.0 and dtc_backend is not None:
+                        hold_log_t["t"] = now
+                        st = dtc_backend.stats()
+                        if st.get("law") == "wrench":
+                            err_lin = np.linalg.norm(
+                                getattr(approach_controller, "_last_err_lin",
+                                        np.zeros(3))) * 1000.0
+                            print(
+                                f"dtc hold: |e_lin|={err_lin:.1f}mm "
+                                f"|W|={st.get('w_lin', 0.0):.1f}N "
+                                f"|W_ang|={st.get('w_ang', 0.0):.2f}Nm "
+                                f"tau_peak={st.get('tau_peak', 0.0):.2f}Nm",
+                                flush=True,
+                            )
+                    time.sleep(0.02)
+                    continue
                 q = q_with_vention()
                 T_flange = chamfer_flange_from_q(q)
                 T_ee = np.asarray(live_ee_motor().to_transformation_matrix())
@@ -2232,6 +2352,13 @@ def main():
                     print(f"viser tick skipped: {exc}", flush=True)
 
             def _update():
+                if dtc_compliance_hold_mode(args):
+                    if handoff_busy["busy"]:
+                        return
+                    q = q_with_vention()
+                    robot_viz.update(q)
+                    update_chamfer(q)
+                    return
                 if handoff_busy["busy"] or (
                     mode["active"] == "contact"
                     and args.contact_backend == "force_mode"

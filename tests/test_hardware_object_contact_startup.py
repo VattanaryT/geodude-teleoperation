@@ -680,6 +680,79 @@ class WrenchLawWiringTest(unittest.TestCase):
         self.assertFalse(mod.defer_dtc_until_align_done(
             dtc_backend=None, align=_Align(False)))
 
+    def test_dtc_compliance_hold_skips_align_defer(self):
+        mod = _load_example()
+
+        class _Align:
+            finished = False
+
+        class _Args:
+            dtc_compliance_hold = True
+
+        self.assertFalse(mod.defer_dtc_until_align_done(
+            dtc_backend=object(), align=_Align(), args=_Args()))
+
+    def test_dtc_compliance_hold_forces_no_startup_align(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args(["--dtc-compliance-hold"])
+        mod.configure_dtc_compliance_hold(args)
+        self.assertTrue(args.dtc_compliance_hold)
+        self.assertFalse(args.startup_align)
+        self.assertFalse(args.dtc_hold_at_tick)
+        self.assertTrue(args.dtc_lambda)
+        self.assertIsNone(args.dtc_fn_ang)
+        self.assertEqual(args.dtc_joint_hold_kp, 0.0)
+        self.assertEqual(args.dtc_joint_hold_kd, 0.0)
+        self.assertAlmostEqual(args.dtc_fn_lin, 3.0)
+        self.assertAlmostEqual(
+            mod.resolve_wrench_fn_ang(True, args.dtc_fn_lin, args.dtc_fn_ang),
+            3.0)
+        self.assertAlmostEqual(args.dtc_damping_ratio, 0.94)
+        self.assertAlmostEqual(args.dtc_damping_ratio_ang, 0.94)
+        self.assertEqual(
+            list(args.dtc_tau_max),
+            [140.0, 140.0, 140.0, 30.0, 30.0, 30.0])
+
+    def test_dtc_compliance_hold_keeps_explicit_fn_ang(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args([
+            "--dtc-compliance-hold", "--dtc-fn-ang", "2.0"])
+        mod.configure_dtc_compliance_hold(args)
+        self.assertAlmostEqual(args.dtc_fn_ang, 2.0)
+        self.assertAlmostEqual(
+            mod.resolve_wrench_fn_ang(True, args.dtc_fn_lin, args.dtc_fn_ang),
+            2.0)
+
+    def test_dtc_compliance_hold_keeps_explicit_tau_max(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args([
+            "--dtc-compliance-hold", "--dtc-tau-max", "25", "25", "25",
+            "5", "5", "15"])
+        mod.configure_dtc_compliance_hold(args)
+        self.assertEqual(
+            list(args.dtc_tau_max), [25.0, 25.0, 25.0, 5.0, 5.0, 15.0])
+
+    def test_dtc_compliance_hold_keeps_explicit_damping_ratio(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args([
+            "--dtc-compliance-hold", "--dtc-damping-ratio", "0.25"])
+        mod.configure_dtc_compliance_hold(args)
+        self.assertAlmostEqual(args.dtc_damping_ratio, 0.25)
+
+    def test_dtc_compliance_hold_rejects_no_lambda(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args([
+            "--dtc-compliance-hold", "--no-dtc-lambda"])
+        with self.assertRaises(SystemExit):
+            mod.configure_dtc_compliance_hold(args)
+
+    def test_dtc_compliance_hold_rejects_non_dtc_backend(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args([
+            "--dtc-compliance-hold", "--contact-backend", "speedj"])
+        with self.assertRaises(SystemExit):
+            mod.configure_dtc_compliance_hold(args)
+
     def test_speedj_align_binds_task_space_to_gafropy_interface(self):
         """Regression: dtc task_space + gafropy control → arm does not move."""
         source = _EXAMPLE.read_text(encoding="utf-8")
