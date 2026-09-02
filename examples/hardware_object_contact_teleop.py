@@ -45,7 +45,7 @@ too much slack for a velocity carrot chased by a position servo.
 (Enter → align → SpaceMouse field-follow teleop). ``--dtc-compliance-hold`` is
 now equivalent to::
 
-    --dtc-tau-max 140 140 140 6 6 30 --no-dtc-hold-at-tick --dtc-lambda
+    --dtc-tau-max 140 140 140 25 25 25 --no-dtc-hold-at-tick --dtc-lambda
     --dtc-fn-lin 3.0 --dtc-damping-ratio 0.318 --dtc-damping-ratio-ang 0.15
     --dtc-joint-hold-kp 0 --dtc-joint-hold-kd 0
 
@@ -276,19 +276,27 @@ COMPLIANCE_HOLD_ZETA_LIN = 0.318
 # 1.33 / 5.28 -- so it is a variable for the A/B, not a value to inherit.
 COMPLIANCE_HOLD_ZETA_ANG = WRENCH_ZETA_ANG
 
-# Raised only on the 150 N.m base/shoulder/elbow, which is where a push test
-# needs to resist a hand. The wrists keep the value measured on a *stable* arm.
+# ~90% of the UR5e's rated joint torques (150/150/150/28/28/28), which is the
+# operator's stated intent for this mode: a push test wants the arm to resist a
+# hand rather than yield at a cap. Note this deliberately raises j3/j4 by 4.2x
+# over WRENCH_TAU_MAX, and what that buys is *authority*, not stability.
 #
-# The remembered-optimal command ran ``--dtc-tau-max 140 140 140 30 30 30``,
-# i.e. **5x** on j3/j4 -- the two joints that carry a width traverse's rotation.
-# In a push test that is free: nothing commands rotation, so those joints carry
-# almost no task torque and the rail is never approached. Under teleop they
-# carry the field, and WRENCH_TAU_MAX records what a raised wrist cap costs
-# there: 6.0 -> 10.0 was tried and reverted because during the 24.5 Hz limit
-# cycle j4 sat on the 10 N.m rail for 18.9% of ticks. During an oscillation
-# tau_max is the only thing bounding how hard the wrist shakes, and 30 is 3x
-# the value that was already too permissive -- and over the UR5e wrist rating.
-COMPLIANCE_HOLD_TAU_MAX = (140.0, 140.0, 140.0, 6.0, 6.0, 30.0)
+# Read it as an amplitude setting, because that is what it is. tau_max is the
+# only thing bounding the damping half of the wrench (`--dtc-err-clip-*` clips
+# the K*e term; `-Lambda*D*v` is unclipped, so during a limit cycle the pose
+# error is ~0 and 100% of the command comes from the unbounded term). And
+# WRENCH_TAU_MAX records what a raised wrist cap cost the last time: 6.0 -> 10.0
+# was tried and reverted because j4 sat on the 10 N.m rail for 18.9% of ticks
+# during the 24.5 Hz limit cycle.
+#
+# In a *push test* this is free -- nothing commands rotation, so j3/j4 carry
+# almost no task torque and never approach the rail, which is why 30 30 30 read
+# as harmless there and was the wrist cap in the run remembered as optimal.
+# Under teleop they carry the field. So if a run rings on j3/j4, this is the
+# first number to bring down, and `clip=N@jK` in the 1 Hz line names the joint.
+# 25 rather than 30 also keeps every wrist inside the 28 N.m rating; the j5 30
+# in WRENCH_TAU_MAX predates this and is over it.
+COMPLIANCE_HOLD_TAU_MAX = (140.0, 140.0, 140.0, 25.0, 25.0, 25.0)
 
 # Ceiling on the angular fn that resolve_wrench_fn_ang *derives* from
 # --dtc-fn-lin under Lambda. An explicit --dtc-fn-ang still wins.

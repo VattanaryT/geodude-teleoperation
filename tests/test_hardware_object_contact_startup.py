@@ -717,11 +717,15 @@ class WrenchLawWiringTest(unittest.TestCase):
         # rotation => zero angular error), so 0.94 was never validated and
         # ran as D_ang = 12.0 against the 5.65 measured stable.
         self.assertAlmostEqual(args.dtc_damping_ratio_ang, mod.WRENCH_ZETA_ANG)
-        # The wrists keep the cap measured on a stable arm; during an
-        # oscillation tau_max is the only bound on the amplitude.
+        # ~90% of the UR5e's rated 150/150/150/28/28/28. Read as an amplitude
+        # setting: tau_max is the only bound on the unclipped damping half of
+        # the wrench, so a run that rings on j3/j4 brings this down first.
         self.assertEqual(
             list(args.dtc_tau_max),
-            [140.0, 140.0, 140.0, 6.0, 6.0, 30.0])
+            [140.0, 140.0, 140.0, 25.0, 25.0, 25.0])
+        self.assertTrue(all(t <= 150.0 for t in args.dtc_tau_max[:3]))
+        self.assertTrue(all(t <= 28.0 for t in args.dtc_tau_max[3:]),
+                        "wrist caps must stay inside the UR5e 28 N.m rating")
 
     def test_dtc_compliance_hold_gains_are_not_silently_capped(self):
         """What --dtc-compliance-hold configures must be what the loop runs.
