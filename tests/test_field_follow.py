@@ -990,3 +990,72 @@ class RebaseOnLiveTest(unittest.TestCase):
                              snap_to_surface=False, rebase_on_live=False)
         follow.seed(np.array([0.0, 0.0, 1.0]), np.eye(3))
         self.assertAlmostEqual(self._held_stick(follow, 20), 0.006, places=9)
+
+
+class PendingBacklogTest(unittest.TestCase):
+    """The SpaceMouse -> FieldFollow queue and its (opt-in) bound.
+
+    add_body_linear is called once per poll and _drain removes at most
+    max_step_m per follow tick, and the two rates do not match: 50 Hz * 1.5 mm
+    feeds up to 130 mm/s on a three-axis diagonal against a 66.7 mm/s drain.
+    The surplus is carried in _pending, so the command falls behind the
+    operator for as long as the stick is held.
+    """
+
+    @staticmethod
+    def _follow(**kw):
+        class _VF:
+            def project(self, motor):
+                return motor
+
+            def approach_basis_at(self, p):
+                return np.eye(3)
+
+        return FieldFollow(_VF(), hz=20.0, max_step_m=0.004, max_lead_m=0.05,
+                           rebase_on_live=False, snap_to_surface=False, **kw)
+
+    @staticmethod
+    def _motor_at(xyz):
+        T = np.eye(4)
+        T[:3, 3] = xyz
+        return ga.Motor.from_matrix(T)
+
+    def _hold_stick(self, follow, axes, seconds=5.0, poll_hz=50.0):
+        lin = np.asarray(axes, dtype=float) * 0.0015  # STICK_LINEAR_SCALE
+        live = np.zeros(3)
+        t, dt, last = 0.0, 1.0 / poll_hz, -1e9
+        for _ in range(int(seconds * poll_hz)):
+            follow.add_body_linear(lin)
+            if t - last >= 1.0 / 20.0 - 1e-12:
+                follow.tick(t, self._motor_at(live), live_xyz=live)
+                last = t
+            t += dt
+        return follow.pending_m
+
+    def test_unbounded_queue_backlogs_on_a_held_diagonal(self):
+        """Documents the default. 0 = the historical unbounded queue."""
+        backlog = self._hold_stick(self._follow(), [1.0, 1.0, 0.0])
+        self.assertGreater(backlog, 0.05,
+                           "a 5 s two-axis hold should queue >50 mm at the "
+                           "defaults; if this drops, the feed/drain rates "
+                           "changed and the comment in __init__ is stale")
+
+    def test_max_pending_m_bounds_the_backlog(self):
+        backlog = self._hold_stick(
+            self._follow(max_pending_m=0.02), [1.0, 1.0, 1.0])
+        self.assertLessEqual(backlog, 0.02 + 1e-9)
+
+    def test_the_bound_preserves_direction(self):
+        follow = self._follow(max_pending_m=0.002)
+        for _ in range(50):
+            follow.add_body_linear(np.array([0.003, 0.004, 0.0]))
+        pending = follow._pending
+        self.assertAlmostEqual(float(np.linalg.norm(pending)), 0.002)
+        # Same unit vector as the input, only shorter.
+        np.testing.assert_allclose(
+            pending / np.linalg.norm(pending), [0.6, 0.8, 0.0], atol=1e-9)
+
+    def test_zero_cap_is_the_historical_path(self):
+        a = self._hold_stick(self._follow(), [1.0, 0.0, 0.0])
+        b = self._hold_stick(self._follow(max_pending_m=0.0), [1.0, 0.0, 0.0])
+        self.assertAlmostEqual(a, b)

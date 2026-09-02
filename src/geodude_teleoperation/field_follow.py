@@ -208,7 +208,8 @@ class FieldFollow:
                  project_in_process=False, mesh=None, max_lead_m=0.02,
                  max_dR_rad=0.12, max_step_m=0.0, snap_to_surface=True,
                  rebase_on_live=True, rearm_slerp_s=0.0,
-                 hold_field_orientation=False, linear_approach=False):
+                 hold_field_orientation=False, linear_approach=False,
+                 max_pending_m=0.0):
         hz = float(hz)
         if hz <= 0.0:
             raise ValueError(f"hz must be positive, got {hz}")
@@ -217,6 +218,31 @@ class FieldFollow:
         self._max_lead_m = float(max_lead_m)
         self._max_dR_rad = float(max_dR_rad)
         self._max_step_m = float(max_step_m)
+        # Bound on the undrained stick backlog. 0 = unbounded (the historical
+        # behavior on both backends).
+        #
+        # ``add_body_linear`` is called once per SpaceMouse poll and ``_drain``
+        # removes at most ``max_step_m`` per follow tick, and *the two rates do
+        # not match*. Measured on this rig's defaults: the poll thread runs at
+        # 50 Hz and the follow gate at ``1/hz`` = 50 ms against a ~50 Hz caller,
+        # so the gate actually fires every third call -- 16.7 Hz, not 20 -- and
+        # the drain ceiling is 16.7 * 4 mm = **66.7 mm/s**. Full deflection
+        # feeds 50 * 1.5 mm = 75 mm/s on one axis, 106 on a two-axis diagonal
+        # and 130 on three. So the queue overruns on *every* axis combination
+        # at full stick, the surplus is carried in ``_pending`` without bound,
+        # and the command falls behind the operator by ``pending/66.7 mm/s`` --
+        # 2.4 s after a 5 s two-axis traverse. It is discarded on release
+        # (``set_idle(clear_pending=True)``), so it does not show up as the arm
+        # over-running a stop; it shows up as the arm getting steadily less
+        # responsive the longer you hold the stick, which invites the operator
+        # to push harder and is a pilot-induced oscillation generator.
+        #
+        # This is *not* the delayed-damper pathology: the ``-D*v`` term closes
+        # on ``J @ qdot_meas`` at the control rate and never sees this queue,
+        # and ``_clamp_lead`` still bounds the commanded lead, so the force is
+        # bounded either way. Different failure, different fix -- do not read a
+        # backlog number as evidence about zeta.
+        self._max_pending_m = float(max_pending_m)
         self._snap_to_surface = bool(snap_to_surface)
         # Where each stick step starts from. True (speedJ) re-bases the carrot
         # on the live TCP every tick, so the command is only ever one drained
@@ -304,6 +330,14 @@ class FieldFollow:
     def add_body_linear(self, linear):
         with self._lock:
             self._pending = self._pending + np.asarray(linear, dtype=float).reshape(3)
+            cap = self._max_pending_m
+            if cap > 0.0:
+                # Drop the surplus rather than queueing it: a stick is a
+                # velocity command, so a *stale* step is worth less than no
+                # step. Direction is preserved -- this only shortens the vector.
+                n = float(np.linalg.norm(self._pending))
+                if n > cap:
+                    self._pending = self._pending * (cap / n)
             self._idle = False
 
     def set_idle(self, xyz=None, *, clear_pending=True):

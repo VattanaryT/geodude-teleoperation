@@ -1320,6 +1320,20 @@ def build_arg_parser():
         "--no-startup-align", dest="startup_align", action="store_false",
         help="skip the one-shot field orientation align")
     parser.add_argument(
+        "--follow-max-pending-m", type=float, default=0.0, metavar="M",
+        help="Bound (m) on the undrained SpaceMouse backlog in FieldFollow. "
+             "0 (default) keeps the historical unbounded queue. The stick feeds "
+             "add_body_linear at 50 Hz (up to 130 mm/s on a 3-axis diagonal) "
+             "and the follow tick drains at most --follow-hz * 4 mm, which the "
+             "50 ms gate against a ~50 Hz caller makes 66.7 mm/s -- so a held "
+             "stick queues the surplus and the command falls behind the "
+             "operator for as long as the push lasts (2.4 s of lag after a 5 s "
+             "two-axis traverse). Read `pending=` in the spacemouse console "
+             "line. Try 0.02 (= --max-lead-m): the arm stops lagging, at the "
+             "cost of a fast stick no longer banking distance it can spend "
+             "later. Not a fix for ringing -- the damping term never sees this "
+             "queue.")
+    parser.add_argument(
         "--follow-hz", type=float, default=20.0,
         help="after align, project() rate for stick field-follow (15–50 Hz). "
              "Not the RTDE/speedJ rate.")
@@ -1642,6 +1656,7 @@ def main():
     follow = FieldFollow(
         vf, hz=args.follow_hz, project_in_process=True, mesh=object_surface,
         max_lead_m=args.max_lead_m, max_step_m=0.004,
+        max_pending_m=args.follow_max_pending_m,
         max_dR_rad=args.follow_max_dr_rad,
         # The ramp only means anything where the command persists: with
         # hold_field_orientation off the commanded R is collapsed onto live R
