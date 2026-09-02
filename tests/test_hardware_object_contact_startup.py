@@ -1,3 +1,4 @@
+import math
 import importlib.util
 import pathlib
 import unittest
@@ -707,11 +708,58 @@ class WrenchLawWiringTest(unittest.TestCase):
         self.assertAlmostEqual(
             mod.resolve_wrench_fn_ang(True, args.dtc_fn_lin, args.dtc_fn_ang),
             3.0)
-        self.assertAlmostEqual(args.dtc_damping_ratio, 0.94)
-        self.assertAlmostEqual(args.dtc_damping_ratio_ang, 0.94)
+        self.assertAlmostEqual(args.dtc_damping_ratio,
+                               mod.COMPLIANCE_HOLD_ZETA_LIN)
+        self.assertAlmostEqual(args.dtc_damping_ratio_ang,
+                               mod.COMPLIANCE_HOLD_ZETA_ANG)
+        # The angular blade goes back to the teleop default: the push test that
+        # produced these gains never loaded it (no field-follow => no commanded
+        # rotation => zero angular error), so 0.94 was never validated and
+        # ran as D_ang = 12.0 against the 5.65 measured stable.
+        self.assertAlmostEqual(args.dtc_damping_ratio_ang, mod.WRENCH_ZETA_ANG)
+        # The wrists keep the cap measured on a stable arm; during an
+        # oscillation tau_max is the only bound on the amplitude.
         self.assertEqual(
             list(args.dtc_tau_max),
-            [140.0, 140.0, 140.0, 30.0, 30.0, 30.0])
+            [140.0, 140.0, 140.0, 6.0, 6.0, 30.0])
+
+    def test_dtc_compliance_hold_gains_are_not_silently_capped(self):
+        """What --dtc-compliance-hold configures must be what the loop runs.
+
+        0.94/0.94 was not: _cap_zeta clamped both blades to D = 12.0 1/s
+        (zeta 0.318), so the "K/D = 10" the constants claimed never ran and the
+        only trace was one line of yellow at startup.
+        """
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args(["--dtc-compliance-hold"])
+        mod.configure_dtc_compliance_hold(args)
+        fn_ang = mod.resolve_wrench_fn_ang(
+            args.dtc_lambda, args.dtc_fn_lin, args.dtc_fn_ang)
+        dmax = mod.resolve_wrench_damping_max(args.dtc_hz, args.dtc_damping_max)
+        lin, ang = mod.resolve_wrench_zeta(
+            args.dtc_lambda, args.dtc_damping_ratio, args.dtc_damping_ratio_ang,
+            fn_lin=args.dtc_fn_lin, fn_ang=fn_ang, damping_max=dmax)
+        self.assertAlmostEqual(lin, args.dtc_damping_ratio, places=3)
+        self.assertAlmostEqual(ang, args.dtc_damping_ratio_ang, places=3)
+        d_lin = 2.0 * lin * 2.0 * math.pi * args.dtc_fn_lin
+        self.assertLessEqual(d_lin, dmax + 1e-9)
+
+    def test_follow_rebase_on_idle_is_dtc_only(self):
+        """--dtc-hold-at-tick is a DTC gain; it must not touch the speedJ leg.
+
+        The speedJ pose spring has no _input_active gate, so hold_live_pose on a
+        quiet stick is the only thing keeping a hands-off arm off a stale
+        target -- and speedJ has to stay bit-identical for the C153 A/B.
+        """
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args(["--dtc-compliance-hold"])
+        mod.configure_dtc_compliance_hold(args)
+        self.assertFalse(args.dtc_hold_at_tick)
+        self.assertFalse(mod.follow_rebase_on_idle(args, on_dtc=True))
+        self.assertTrue(mod.follow_rebase_on_idle(args, on_dtc=False))
+        plain = mod.build_arg_parser().parse_args([])
+        self.assertTrue(mod.follow_rebase_on_idle(plain, on_dtc=True))
+        self.assertTrue(mod.follow_rebase_on_idle(plain, on_dtc=False))
 
     def test_dtc_compliance_hold_keeps_explicit_fn_ang(self):
         mod = _load_example()
@@ -734,7 +782,7 @@ class WrenchLawWiringTest(unittest.TestCase):
 
     def test_compliance_hold_wires_field_follow_rebase_on_idle(self):
         src = _EXAMPLE.read_text(encoding="utf-8")
-        self.assertIn("rebase_on_idle=args.dtc_hold_at_tick", src)
+        self.assertIn("rebase_on_idle=follow_rebase_on_idle(", src)
 
     def test_dtc_compliance_hold_keeps_explicit_damping_ratio(self):
         mod = _load_example()

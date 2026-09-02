@@ -905,7 +905,7 @@ class HardwareFollowRoutingTest(unittest.TestCase):
         self.assertIn("max_dR_rad=args.follow_max_dr_rad", src)
         self.assertIn("--follow-max-dr-rad", src)
         self.assertIn("hold_field_orientation=", src)
-        self.assertIn("rebase_on_idle=args.dtc_hold_at_tick", src)
+        self.assertIn("rebase_on_idle=follow_rebase_on_idle(", src)
         self.assertIn("rearm_slerp_s=", src)
         self.assertIn("max_qddot=5.0", src)
         self.assertNotIn("set_orientation_compliant", src)

@@ -16,3 +16,6 @@ docs/
 pd_analysis/
 .venv/
 requirements.txt
+
+# Local IK/manipulability lookup analysis scripts (not for the repo)
+sim_lookup_analysis/

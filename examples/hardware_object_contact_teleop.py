@@ -42,16 +42,23 @@ To go back to the speedJ plant end-to-end, pass ``--contact-backend speedj
 too much slack for a velocity carrot chased by a position servo.
 
 **DTC compliance hold** — push-return spring physics on top of the normal flow
-(Enter → align → SpaceMouse field-follow teleop)::
+(Enter → align → SpaceMouse field-follow teleop). ``--dtc-compliance-hold`` is
+now equivalent to::
 
-    --dtc-compliance-hold
-    --dtc-tau-max 140 140 140 30 30 30
-    --dtc-fn-lin 3.0 --dtc-damping-ratio 0.94 --dtc-damping-ratio-ang 0.94
+    --dtc-tau-max 140 140 140 6 6 30 --no-dtc-hold-at-tick --dtc-lambda
+    --dtc-fn-lin 3.0 --dtc-damping-ratio 0.318 --dtc-damping-ratio-ang 0.15
+    --dtc-joint-hold-kp 0 --dtc-joint-hold-kd 0
 
-Applies measured-best gains, forces ``--dtc-lambda``, disables joint-space hold,
-and sets ``hold_at_tick=false`` so external pushes return to the last commanded
-pose when the stick is quiet. SpaceMouse still drives the arm; only idle
-re-base-to-live is turned off.
+``hold_at_tick=false`` is the whole mode: the idle hold otherwise re-bases the
+pose target onto the live EE at 200 Hz, which erases an external push before the
+spring can answer it. Turning it off leaves the target where it was commanded,
+so a push builds spring error and the arm returns on release. SpaceMouse still
+drives field-follow; only the idle re-base is off, and only once DTC is the live
+actuator (``follow_rebase_on_idle`` -- the speedJ align segment keeps it, since
+the speedJ spring has no input gate and would otherwise sag).
+
+The 0.318/0.15 are the ratios that *run*, not a 10:1 K/D rule: ``_cap_zeta``
+clamps both blades at ``D <= --dtc-damping-max``. See COMPLIANCE_HOLD_ZETA_LIN.
 """
 from __future__ import annotations
 
@@ -184,12 +191,6 @@ DEFAULT_VENTION_HEIGHT = 0.51
 # oscillation is confirmed gone. One variable at a time.
 WRENCH_TAU_MAX = (50.0, 50.0, 50.0, 6.0, 6.0, 30.0)
 
-# Hardware-tuned defaults for ``--dtc-compliance-hold`` (push test). zeta =
-# pi*fn/10 gives K/D = 10 at fn_lin = 3 Hz under --dtc-lambda.
-COMPLIANCE_HOLD_TAU_MAX = (140.0, 140.0, 140.0, 30.0, 30.0, 30.0)
-COMPLIANCE_HOLD_ZETA_LIN = 0.94
-COMPLIANCE_HOLD_ZETA_ANG = 0.94
-COMPLIANCE_HOLD_FN_LIN = 3.0
 
 # --dtc-rearm-wrench-s default. The wrench-law counterpart to --rearm-slerp-s,
 # which only ever ramped the commanded *rotation*. On dtc_20260830_115039.csv
@@ -221,6 +222,43 @@ WRENCH_ZETA_LIN = 0.3
 # --dtc-damping-max, same as the linear side.
 WRENCH_ZETA_ANG = 0.15
 WRENCH_FN_ANG_NO_LAMBDA = 1.5
+
+# --- --dtc-compliance-hold: push-return spring gains. -----------------------
+#
+# **These are the ratios that actually RUN, not the ones that were asked for.**
+# The push test this mode was validated on (2026-09-01, commit d90b1cd) was
+# launched with ``--dtc-damping-ratio 0.94 --dtc-damping-ratio-ang 0.94`` on
+# the reasoning that ``zeta = pi*fn/10`` gives ``K/D = 10`` at fn 3 Hz. Neither
+# 0.94 ever reached the loop: ``_cap_zeta`` clamps both blades to
+# ``D <= WRENCH_DAMPING_MAX_1_S`` = 12.0 1/s, which at fn 3.0 is
+# ``zeta = 0.318`` and ``K/D = 29.6``. So the 10:1 rule of thumb has never been
+# on this rig, nothing about the push test's behavior is evidence for it, and
+# the request/run gap was invisible except as one line of yellow at startup --
+# the same trap CLAUDE.md records for the 0.4 -> 0.239 experiment that silently
+# ran *less* damping than the run it was meant to exceed. Store what runs.
+COMPLIANCE_HOLD_ZETA_LIN = 0.318
+
+# The angular blade goes back to the teleop default, because the push test did
+# not test it. In compliance-hold-as-a-push-test (d90b1cd) ``startup_align`` was
+# off, no SpaceMouse was opened and field-follow never ran, so
+# ``set_hold_rotation`` was never called: ``_hold_rotation`` stayed None,
+# ``hold_pose_at`` snapped target := live pose, and the angular error was
+# identically zero for the whole run. Under teleop (bf916d1) field-follow
+# commands the field orientation continuously, so the same flag now loads the
+# angular blade at D_ang = 12.0 against the 5.65 that WRENCH_ZETA_ANG was
+# measured stable at -- a 2.1x step, on the axis whose apparent inertia
+# LAMBDA_MIN_ANG_KGM2 already floors ~13x above its true 0.00154 kg.m^2, so the
+# *physical* damping rate there is ~13x the unit-mass number. That is the
+# delayed-damper pathology by construction. Tune this and --dtc-fn-ang from the
+# known-good baseline, one variable per run, with a --dtc-log to read after.
+COMPLIANCE_HOLD_ZETA_ANG = WRENCH_ZETA_ANG
+
+# Raised only on the 150 N.m base/shoulder/elbow, which is where a push test
+# needs to resist a hand. The wrists keep the value measured on a *stable* arm:
+# during an oscillation tau_max is the only thing bounding the amplitude (see
+# WRENCH_TAU_MAX), the ringing on this rig lives on j3/j4, and 30 N.m is over
+# the UR5e wrist rating anyway.
+COMPLIANCE_HOLD_TAU_MAX = (140.0, 140.0, 140.0, 6.0, 6.0, 30.0)
 
 # Ceiling on the angular fn that resolve_wrench_fn_ang *derives* from
 # --dtc-fn-lin under Lambda. An explicit --dtc-fn-ang still wins.
@@ -663,6 +701,27 @@ def dtc_compliance_hold_mode(args) -> bool:
     return bool(getattr(args, "dtc_compliance_hold", False))
 
 
+def follow_rebase_on_idle(args, *, on_dtc) -> bool:
+    """Whether a quiet stick re-bases the pose target onto the live EE.
+
+    ``--dtc-hold-at-tick`` is a *DTC wrench-law* gain -- it is the knob
+    ``--dtc-compliance-hold`` turns off so a push builds spring error instead of
+    being erased at 200 Hz. It must not reach the speedJ segment. Two reasons,
+    both load-bearing:
+
+    - speedJ has to stay bit-identical or the C153 A/B means nothing.
+    - the speedJ pose spring has no ``_input_active`` gate at all
+      (``controller.py``), so ``hold_live_pose`` on a quiet stick is the *only*
+      thing keeping a hands-off arm from driving toward a stale target. Turning
+      it off there is arm sag, not compliance.
+
+    ``on_dtc`` is "the DTC backend is the live actuator", i.e. the handoff has
+    happened -- not "the run was launched with ``--contact-backend dtc``", which
+    is still true throughout the speedJ startup align.
+    """
+    return bool(args.dtc_hold_at_tick) or not bool(on_dtc)
+
+
 def defer_dtc_until_align_done(*, dtc_backend, align, args=None) -> bool:
     """True: run speedJ through startup align, then hand off to DTC once."""
     del args  # compliance-hold uses the same align → DTC path as teleop
@@ -1099,11 +1158,13 @@ def build_arg_parser():
              "nothing actuates.")
     parser.add_argument(
         "--dtc-compliance-hold", action="store_true",
-        help="DTC wrench-law push-return mode on top of normal teleop: measured-best "
-             "gains, --dtc-lambda, joint hold off, and hold_at_tick=false so "
-             "external pushes return to the last commanded pose when the stick "
-             "is quiet. Enter → align → SpaceMouse field-follow unchanged. "
-             "Requires --contact-backend dtc and --dtc-law wrench (the defaults).")
+        help="DTC wrench-law push-return mode on top of normal teleop: "
+             "--dtc-lambda, joint hold off, a raised tau_max on the big joints, "
+             "and hold_at_tick=false so external pushes return to the last "
+             "commanded pose when the stick is quiet. Enter -> align -> "
+             "SpaceMouse field-follow unchanged; the idle re-base is only "
+             "disabled once DTC is the live actuator. Requires "
+             "--contact-backend dtc and --dtc-law wrench (the defaults).")
     # --- contact lift-off fixes, independently switchable so a hardware run can
     # bisect which one actually matters. All three off reproduces the previous
     # behavior exactly: --press-loop legacy --no-free-along-normal
@@ -1435,6 +1496,10 @@ def main():
     kin_system = (
         interface.get_system() if dtc_backend is None else dtc_backend.get_system())
 
+    def on_dtc_now():
+        """True once the DTC backend is the live actuator (post-handoff)."""
+        return dtc_backend is not None and interface is dtc_backend
+
     left_vention = args.left_vention_height if args.left_vention_height is not None else args.vention_height
     right_vention = args.right_vention_height if args.right_vention_height is not None else args.vention_height
     print(f"hardware does not report vention rails; drawing them at "
@@ -1672,8 +1737,9 @@ def main():
             map_target=map_target,
             stick_quiet=quiet,
             tangent=mode["active"] == "contact",
-            rebase_on_idle=args.dtc_hold_at_tick)
-        if not approach_controller._input_active and args.dtc_hold_at_tick:
+            rebase_on_idle=follow_rebase_on_idle(args, on_dtc=on_dtc_now()))
+        if not approach_controller._input_active and follow_rebase_on_idle(
+                args, on_dtc=on_dtc_now()):
             approach_controller.hold_live_pose()
         # Publish the surface normal both loops need, in the *controller* world
         # (map_target has already taken the field pose through field_tcp_to_ee,
@@ -1944,7 +2010,7 @@ def main():
         if stick_is_idle(twist):
             if mode["active"] == "approach":
                 approach_controller.set_input_active(False)
-                if args.dtc_hold_at_tick:
+                if follow_rebase_on_idle(args, on_dtc=on_dtc_now()):
                     approach_controller.hold_live_pose()
             elif mode["active"] == "contact":
                 # hardware_free_teleop: zero twist still update_command so the
