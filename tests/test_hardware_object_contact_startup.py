@@ -744,6 +744,58 @@ class WrenchLawWiringTest(unittest.TestCase):
         d_lin = 2.0 * lin * 2.0 * math.pi * args.dtc_fn_lin
         self.assertLessEqual(d_lin, dmax + 1e-9)
 
+    def test_dtc_push_test_implies_compliance_hold_and_skips_align(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args(["--dtc-push-test"])
+        mod.configure_dtc_compliance_hold(args)
+        self.assertTrue(mod.dtc_push_test_mode(args))
+        self.assertTrue(mod.dtc_compliance_hold_mode(args))
+        self.assertFalse(args.startup_align)
+        self.assertFalse(args.dtc_hold_at_tick)
+        self.assertTrue(args.dtc_lambda)
+        self.assertAlmostEqual(args.dtc_damping_ratio,
+                               mod.COMPLIANCE_HOLD_ZETA_LIN)
+        self.assertAlmostEqual(args.dtc_damping_ratio_ang,
+                               mod.COMPLIANCE_HOLD_ZETA_ANG)
+
+    def test_compliance_hold_alone_keeps_startup_align(self):
+        """Only the bench push test skips align; teleop compliance hold needs it."""
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args(["--dtc-compliance-hold"])
+        mod.configure_dtc_compliance_hold(args)
+        self.assertFalse(mod.dtc_push_test_mode(args))
+        self.assertTrue(args.startup_align)
+
+    def test_push_test_skips_the_align_handoff_defer(self):
+        mod = _load_example()
+
+        class _Align:
+            finished = False
+
+        class _Args:
+            dtc_compliance_hold = True
+            dtc_push_test = True
+
+        self.assertFalse(mod.defer_dtc_until_align_done(
+            dtc_backend=object(), align=_Align(), args=_Args()))
+        _Args.dtc_push_test = False
+        self.assertTrue(mod.defer_dtc_until_align_done(
+            dtc_backend=object(), align=_Align(), args=_Args()))
+
+    def test_push_test_line_reports_w_ang(self):
+        """|W_ang| is the reading that says the angular blade was untested."""
+        mod = _load_example()
+
+        class _Ctl:
+            _last_err_lin = np.array([0.003, 0.0, 0.004])
+
+        line = mod.push_test_line(
+            _Ctl(), {"w_lin": 12.5, "w_ang": 0.0, "tau_peak": 3.25,
+                     "hz_meas": 198.0, "n_rail_osc": 0})
+        self.assertIn("|e_lin|=5.0mm", line)
+        self.assertIn("|W_ang|=0.00Nm", line)
+        self.assertIn("railosc=0", line)
+
     def test_follow_rebase_on_idle_is_dtc_only(self):
         """--dtc-hold-at-tick is a DTC gain; it must not touch the speedJ leg.
 

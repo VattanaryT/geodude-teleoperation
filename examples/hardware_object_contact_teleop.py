@@ -59,6 +59,26 @@ the speedJ spring has no input gate and would otherwise sag).
 
 The 0.318/0.15 are the ratios that *run*, not a 10:1 K/D rule: ``_cap_zeta``
 clamps both blades at ``D <= --dtc-damping-max``. See COMPLIANCE_HOLD_ZETA_LIN.
+
+``--dtc-push-test`` is the bench A-side of that: same gains, but no startup
+align, no input device and no field-follow, so the arm holds the pose it is
+already in and a hand push is the only excitation::
+
+    --dtc-push-test --no-viz
+
+The gain chain, per blade, under ``--dtc-lambda``::
+
+    omega_n = 2*pi*fn                     rad/s   --dtc-fn-lin / --dtc-fn-ang
+    K       = omega_n**2                  1/s^2
+    D       = 2*zeta*omega_n = 4*pi*zeta*fn  1/s  --dtc-damping-ratio[-ang]
+    D_eff   = min(D, dmax)                1/s     --dtc-damping-max  (_cap_zeta)
+    K/D     = omega_n/(2*zeta) = pi*fn/zeta   1/s
+    W       = Lambda @ (K*clip(e) - D*(J @ qdot))     N and N.m
+    tau     = clip(J.T @ W, +-tau_max)
+
+Note ``clip`` is on the *spring* term only (``--dtc-err-clip-lin/-rot``); the
+damping term is unbounded, so ``tau_max`` is the only thing bounding a limit
+cycle's amplitude.
 """
 from __future__ import annotations
 
@@ -697,8 +717,42 @@ def _hold_field_orientation(args) -> bool:
 
 
 def dtc_compliance_hold_mode(args) -> bool:
-    """Hands-off DTC wrench-law hold at the current pose (no SpaceMouse)."""
+    """Push-return spring gains: idle re-base off so a push builds error."""
     return bool(getattr(args, "dtc_compliance_hold", False))
+
+
+def push_test_line(controller, st) -> str:
+    """The bench push test's 1 Hz console line.
+
+    ``|W_ang|`` is here on purpose and is the reading that keeps this run
+    honest: it is ~0 by construction (no commanded rotation), so a push test
+    that goes well says nothing about --dtc-damping-ratio-ang. ``tau_peak`` is
+    a single sample, so read the --dtc-log for anything between prints.
+    """
+    err_lin = float(np.linalg.norm(
+        np.asarray(getattr(controller, "_last_err_lin", np.zeros(3)),
+                   dtype=float).reshape(3))) * 1000.0
+    return (f"dtc push test: |e_lin|={err_lin:.1f}mm "
+            f"|W_lin|={st.get('w_lin', 0.0):.1f}N "
+            f"|W_ang|={st.get('w_ang', 0.0):.2f}Nm "
+            f"tau_peak={st.get('tau_peak', 0.0):.2f}Nm "
+            f"hz={st.get('hz_meas', 0.0):.0f} "
+            f"railosc={st.get('n_rail_osc', 0)}")
+
+
+def dtc_push_test_mode(args) -> bool:
+    """Bench push test: compliance-hold gains with *nothing else running*.
+
+    The A-side of the A/B. No startup align, no input device, no field-follow,
+    so the commanded pose is the handoff pose and ``set_hold_rotation`` is
+    never called -- ``_hold_rotation`` stays None and ``hold_pose_at`` snaps
+    target := live pose, which means **the angular error is identically zero**.
+    That is the whole point and it is also the trap: a gain the push test does
+    not exercise is not validated by the push test going well. Read the 1 Hz
+    line's ``|W_ang|`` -- if it is 0.00, ``--dtc-damping-ratio-ang`` did not
+    participate in whatever you just concluded.
+    """
+    return bool(getattr(args, "dtc_push_test", False))
 
 
 def follow_rebase_on_idle(args, *, on_dtc) -> bool:
@@ -723,9 +777,14 @@ def follow_rebase_on_idle(args, *, on_dtc) -> bool:
 
 
 def defer_dtc_until_align_done(*, dtc_backend, align, args=None) -> bool:
-    """True: run speedJ through startup align, then hand off to DTC once."""
-    del args  # compliance-hold uses the same align → DTC path as teleop
+    """True: run speedJ through startup align, then hand off to DTC once.
+
+    ``--dtc-compliance-hold`` uses the same align -> DTC path as teleop; only
+    the bench push test skips it, because it holds wherever the arm already is.
+    """
     if dtc_backend is None:
+        return False
+    if args is not None and dtc_push_test_mode(args):
         return False
     return align is not None and not align.finished
 
@@ -1165,6 +1224,15 @@ def build_arg_parser():
              "SpaceMouse field-follow unchanged; the idle re-base is only "
              "disabled once DTC is the live actuator. Requires "
              "--contact-backend dtc and --dtc-law wrench (the defaults).")
+    parser.add_argument(
+        "--dtc-push-test", action="store_true",
+        help="Bench push test: --dtc-compliance-hold gains with no startup "
+             "align, no input device and no field-follow. The arm holds the "
+             "pose it is already in; push it and it should return. Implies "
+             "--dtc-compliance-hold. Note the angular blade is NOT exercised "
+             "(no commanded rotation => zero angular error), so this validates "
+             "the linear spring only -- watch |W_ang| in the 1 Hz line. Pair "
+             "with --no-viz for a headless run.")
     # --- contact lift-off fixes, independently switchable so a hardware run can
     # bisect which one actually matters. All three off reproduces the previous
     # behavior exactly: --press-loop legacy --no-free-along-normal
@@ -1382,7 +1450,9 @@ def build_arg_parser():
 
 
 def configure_dtc_compliance_hold(args) -> None:
-    """Validate and apply --dtc-compliance-hold side effects."""
+    """Validate and apply --dtc-compliance-hold / --dtc-push-test side effects."""
+    if dtc_push_test_mode(args):
+        args.dtc_compliance_hold = True
     if not dtc_compliance_hold_mode(args):
         return
     if args.contact_backend != "dtc":
@@ -1414,6 +1484,10 @@ def configure_dtc_compliance_hold(args) -> None:
     # target must stay at the handoff pose instead, or releasing the arm leaves
     # error ~= 0 and |W| ~= 0 with no return motion.
     args.dtc_hold_at_tick = False
+    if dtc_push_test_mode(args):
+        # Hold wherever the arm already is. Align would drive it somewhere
+        # first, and its speedJ leg is not what this run is measuring.
+        args.startup_align = False
 
 
 def main():
@@ -2198,6 +2272,24 @@ def main():
 
     def start_control_and_device():
         nonlocal device, speedj_trace
+        if dtc_push_test_mode(args):
+            if speedj_trace is None and args.speedj_plot:
+                from geodude_teleoperation.speedj_plot import SpeedJTrace
+                speedj_trace = SpeedJTrace()
+            approach_controller.set_input_active(False)
+            approach_controller.hold_live_pose()
+            enter_direct_torque()
+            if speedj_trace is not None and dtc_backend is not None:
+                dtc_backend.set_command_trace(speedj_trace.record)
+                speedj_trace.start(figsize=tuple(args.plot_size))
+            print(
+                "dtc push test: lambda=on, joint hold=off, pose frozen at "
+                "handoff, no device. Push the arm -- it should return when "
+                "released. |W_ang| stays ~0 by construction: this run does not "
+                "test --dtc-damping-ratio-ang. Ctrl+C to quit.",
+                flush=True,
+            )
+            return
         # Start frozen: no speedJ until a non-idle SpaceMouse reading arrives.
         defer = defer_dtc_until_align_done(
             dtc_backend=dtc_backend, align=align, args=args)
@@ -2267,7 +2359,9 @@ def main():
             "dtc": (
                 "speedJ align → dtc teleop (free + contact via directTorque)"
                 + (" [HOLD-ZERO]" if args.dtc_hold_zero else "")
-                + (" [COMPLIANCE-HOLD]" if dtc_compliance_hold_mode(args) else "")
+                + (" [PUSH-TEST]" if dtc_push_test_mode(args)
+                   else " [COMPLIANCE-HOLD]" if dtc_compliance_hold_mode(args)
+                   else "")
             ),
         }[args.contact_backend]
         if args.no_viz:
@@ -2281,7 +2375,16 @@ def main():
                     flush=True,
                 )
                 start_align_keys()
+            hold_log_t = {"t": float("-inf")}
             while True:
+                if dtc_push_test_mode(args):
+                    now = time.monotonic()
+                    if (now - hold_log_t["t"]) >= 1.0 and dtc_backend is not None:
+                        hold_log_t["t"] = now
+                        print(push_test_line(approach_controller,
+                                             dtc_backend.stats()), flush=True)
+                    time.sleep(0.02)
+                    continue
                 q = q_with_vention()
                 T_flange = chamfer_flange_from_q(q)
                 T_ee = np.asarray(live_ee_motor().to_transformation_matrix())
@@ -2379,6 +2482,13 @@ def main():
                     print(f"viser tick skipped: {exc}", flush=True)
 
             def _update():
+                if dtc_push_test_mode(args):
+                    if handoff_busy["busy"]:
+                        return
+                    q = q_with_vention()
+                    robot_viz.update(q)
+                    update_chamfer(q)
+                    return
                 if handoff_busy["busy"] or (
                     mode["active"] == "contact"
                     and args.contact_backend == "force_mode"
