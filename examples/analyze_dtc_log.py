@@ -81,7 +81,23 @@ REL_MIN_S = 0.30
 REL_EARLY = (0.02, 0.15)
 REL_LATE = (0.15, 0.40)
 # Below this the arm was simply already still and the ratio is noise on noise.
+#
+# **The floor must sit clear of whatever threshold defined the release.** Under
+# --dtc-push-test the "driven" mask is itself |qdot| > PUSH_ACTIVE_RADPS, so a
+# release is *by construction* the moment motion crosses that value and the
+# post-release envelope sits right on it: dtc_20260902_154438.csv duly reported
+# one release "self-sustaining" at 0.0121 -> 0.0226 rad/s, which is noise
+# against a known runaway of 0.368 -> 0.922. _rel_floor() lifts it to 2.5x the
+# mask threshold there, landing on 0.05 rad/s -- the value that separates every
+# release in this repo's history, healthy under it and the two runs that hurt
+# far above it.
 REL_FLOOR_RADPS = 0.02
+
+
+def _rel_floor():
+    if _PUSH_TEST:
+        return max(REL_FLOOR_RADPS, 2.5 * PUSH_ACTIVE_RADPS)
+    return REL_FLOOR_RADPS
 REL_DECAY_FRAC = 0.5
 REL_GROW_FRAC = 0.8
 
@@ -103,6 +119,51 @@ def _settled(quiet, act, dt):
     return quiet & (since >= settle)
 
 
+# --dtc-push-test has no stick, so the `act` column is 0 for the whole run and
+# every metric keyed on it reads the wrong thing: "quiet stick" pools the
+# deliberate hand pushes (one run read |qdot| p95 = 1.001 rad/s, which looks
+# like a catastrophic hold failure and is just the operator moving the arm),
+# "release response" finds 0 releases and skips the step test, and the stall
+# report never runs. But a push test *is* a step test -- push, let go, watch the
+# envelope -- so the fix is to derive the mask from motion instead: the hand is
+# on the arm exactly when the arm is moving. Above this joint speed counts as
+# driven.
+PUSH_ACTIVE_RADPS = 0.02
+# Motion must stay under the threshold this long before a push counts as
+# released, so a momentary zero-crossing mid-push is not a release.
+PUSH_RELEASE_HOLD_S = 0.10
+# Set from the log's own argv line. Module-level because the three sites that
+# build an act mask are called from main() with different signatures and this
+# is a single-run script.
+_PUSH_TEST = False
+
+
+def _is_push_test(meta):
+    return any("--dtc-push-test" in line for line in meta)
+
+
+def _act_array(rows, live, dt, qd=None):
+    """The "a command source is driving" mask, and what it was derived from.
+
+    Normally the ``act`` column (field-follow's ``input_active``). Under
+    ``--dtc-push-test`` there is no stick, so it is derived from joint motion --
+    see PUSH_ACTIVE_RADPS.
+    """
+    if _PUSH_TEST and qd is not None:
+        moving = np.abs(qd).max(axis=1) > PUSH_ACTIVE_RADPS
+        hold = max(1, int(round(PUSH_RELEASE_HOLD_S / dt)))
+        # Dilate forward: stay "driven" until motion has been absent for hold.
+        act = moving.copy()
+        run = 0
+        for i in range(act.size):
+            run = 0 if moving[i] else run + 1
+            act[i] = moving[i] or run < hold
+        return act, "motion (push test: no stick, so act is derived from |qdot|)"
+    if "act" in rows[0]:
+        return np.array([r["act"] == "1" for r in rows])[live], "act column"
+    return np.ones(int(live.sum()), bool), "no act column (all ticks treated as driven)"
+
+
 def _read(path):
     """Rows plus the leading '# ...' gain header the backend writes, if any."""
     meta = []
@@ -118,8 +179,14 @@ def main():
     rows, meta = _read(path)
     if not rows:
         sys.exit(f"{path}: empty")
+    global _PUSH_TEST
+    _PUSH_TEST = _is_push_test(meta)
     n = sum(1 for k in rows[0] if k.startswith("tau"))
     print(f"{path}: {len(rows)} ticks, {n} joints")
+    if _PUSH_TEST:
+        print("  --dtc-push-test: no stick, so \"driven\" is derived from joint "
+              f"motion (|qdot| > {PUSH_ACTIVE_RADPS:g} rad/s). Each push is a step "
+              "test; read the release response below.")
     for line in meta:
         print(f"  {line}")
 
@@ -386,7 +453,7 @@ def release_response(rows, live, tau, n):
 
     Returns the number of releases whose envelope did not decay.
     """
-    if f"qd{n - 1}" not in rows[0] or "act" not in rows[0]:
+    if f"qd{n - 1}" not in rows[0] or ("act" not in rows[0] and not _PUSH_TEST):
         print("\n  (no qd*/act columns -- log predates them; no release report)")
         return 0
     t = np.array([float(r["t"]) for r in rows])[live]
@@ -397,15 +464,20 @@ def release_response(rows, live, tau, n):
         return 0
     qd = np.array([[float(r[f"qd{j}"]) for j in range(n)] for r in rows])[live]
     tau = tau[live]
-    act = np.array([r["act"] == "1" for r in rows])[live]
+    act, act_src = _act_array(rows, live, dt, qd)
     speed = np.linalg.norm(qd, axis=1)
     tpk = np.abs(tau).max(axis=1)
 
     fall = np.where(act[:-1] & ~act[1:])[0] + 1
-    print(f"\n  release response ({fall.size} stick releases; "
+    what = "hand releases" if _PUSH_TEST else "stick releases"
+    print(f"\n  release response ({fall.size} {what}; "
           f"the step test -- does the motion die when you let go?)")
+    print(f"     driven mask: {act_src}")
+    if _PUSH_TEST:
+        print(f"     self-sustaining needs |qdot| late > {_rel_floor():.3f} rad/s "
+              f"(2.5x the mask threshold), not just a rising ratio")
     if fall.size == 0:
-        print("     (the stick was never released -- no step test in this run)")
+        print("     (never released -- no step test in this run)")
         return 0
     print("     t_rel   quiet_s   f_pk Hz   |qdot| early    late   ratio"
           "    |tau| early   late   verdict")
@@ -444,7 +516,7 @@ def release_response(rows, live, tau, n):
         ratio = e1 / e0 if e0 > 1e-9 else float("nan")
         # The floor first: a release from an already-still arm has a ratio of
         # noise over noise and must not be called a limit cycle.
-        if e1 < REL_FLOOR_RADPS or (np.isfinite(ratio) and ratio < REL_DECAY_FRAC):
+        if e1 < _rel_floor() or (np.isfinite(ratio) and ratio < REL_DECAY_FRAC):
             verdict = "decays"
         elif np.isfinite(ratio) and ratio >= REL_GROW_FRAC:
             verdict = "\033[93mFLAT/GROWS\033[0m"
@@ -552,8 +624,7 @@ def oscillation(rows, live, W, n, railed=0, grew=0):
         return
     tau = np.array([[float(r[f"tau{j}"]) for j in range(n)] for r in rows])[live]
     qd = np.array([[float(r[f"qd{j}"]) for j in range(n)] for r in rows])[live]
-    act = (np.array([r["act"] == "1" for r in rows])[live]
-           if "act" in rows[0] else np.ones(t.size, bool))
+    act, act_src = _act_array(rows, live, dt, qd)
     win = np.hanning(t.size)
     freq = np.fft.rfftfreq(t.size, dt)
 
@@ -832,11 +903,15 @@ def stall(rows, live, W, n):
     is the fix working; falling stall% with n_deg unchanged just means the push
     got weaker.
     """
-    if f"qd{n - 1}" not in rows[0] or "act" not in rows[0]:
+    if f"qd{n - 1}" not in rows[0] or ("act" not in rows[0] and not _PUSH_TEST):
         print("\n  (no qd*/act columns -- log predates them; no stall report)")
         return
     qd = np.array([[float(r[f"qd{j}"]) for j in range(n)] for r in rows])
-    act = np.array([r["act"] == "1" for r in rows])
+    t_all = np.array([float(r["t"]) for r in rows])
+    dt_all = float(np.median(np.diff(t_all[live]))) if live.sum() > 2 else 0.005
+    act_live, _ = _act_array(rows, live, dt_all, qd[live])
+    act = np.zeros(len(rows), bool)
+    act[np.where(live)[0]] = act_live
     on = live & act
     if not on.any():
         print("\n  (spring never armed; no stall report)")
@@ -872,7 +947,16 @@ def tracking(rows, live, W):
         return np.array([float(r[name]) if r[name] else np.nan for r in rows])
 
     t = col("t")
-    act = np.array([r["act"] == "1" for r in rows])
+    n_joints = sum(1 for k in rows[0] if k.startswith("tau"))
+    tl = t[live]
+    dt = float(np.median(np.diff(tl))) if tl.size > 2 else 0.005
+    if not np.isfinite(dt) or dt <= 0:
+        dt = 0.005
+    qd_live = np.array(
+        [[float(r[f"qd{k}"]) for k in range(n_joints)] for r in rows])[live]
+    act_live, _ = _act_array(rows, live, dt, qd_live)
+    act = np.zeros(len(rows), bool)
+    act[np.where(live)[0]] = act_live
     n_deg = col("n_deg")
     e_lin = np.array([[float(r[k]) for k in ("ex", "ey", "ez")] for r in rows])
     e_ang = np.array([[float(r[k]) for k in ("erx", "ery", "erz")] for r in rows])
@@ -983,17 +1067,24 @@ def wrist_travel(rows, live, n):
     q = np.array([float(r[f"q{j}"]) for r in rows])[live]
     qd = np.abs(np.array([float(r[f"qd{j}"]) for r in rows])[live])
     tau = np.abs(np.array([float(r[f"tau{j}"]) for r in rows])[live])
-    act = (np.array([r["act"] == "1" for r in rows])[live]
-           if "act" in rows[0] else np.ones(q.size, bool))
     if q.size == 0:
         return
+    t = np.array([float(r["t"]) for r in rows])[live]
+    dt = float(np.median(np.diff(t))) if t.size > 2 else 0.005
+    if not np.isfinite(dt) or dt <= 0:
+        dt = 0.005
+    qd_all = np.array([[float(r[f"qd{k}"]) for k in range(n)] for r in rows])[live]
+    act, _ = _act_array(rows, live, dt, qd_all)
     travel = float(np.degrees(q.max() - q.min()))
     on = act
-    stalled = float((qd[on] < 0.01).mean()) if on.any() else float("nan")
     print(f"\n  wrist travel (j{j}, the roll axis)  end-to-end "
           f"{travel:6.2f} deg   |tau{j}| p95 {q95(tau):5.2f} max "
           f"{tau.max():5.2f} N.m")
-    print(f"     stalled (|qdot| < 0.01) on {stalled:.1%} of spring-on ticks")
+    stalled = float((qd[on] < 0.01).mean()) if on.any() else float("nan")
+    if not on.any():
+        print("     (never driven -- no stall report)")
+    else:
+        print(f"     stalled (|qdot| < 0.01) on {stalled:.1%} of spring-on ticks")
     if travel < 1.0 and np.isfinite(stalled) and stalled > 0.9:
         print("     \033[93mIT NEVER MOVED. Whatever the roll error is, no "
               "part of it is being served -- and under Lambda an unservable "
