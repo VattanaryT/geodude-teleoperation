@@ -880,6 +880,54 @@ def enter_speedj_contact(*, mode, contact_controller, approach_controller, inter
     contact_controller.start()
 
 
+def use_wrench_press(args) -> bool:
+    """True when the press must be a force (set_press_wrench), not a velocity.
+
+    The wrench law never reads ``set_tool_z_velocity`` -- that lives in
+    ``compute_control_command``, which it bypasses -- so entering contact with
+    the velocity overlay under ``--dtc-law wrench`` would zero Kz, free the
+    normal and then never press: the tool hovers and the force log reads a
+    healthy zero.
+    """
+    return (getattr(args, "contact_backend", None) == "dtc"
+            and getattr(args, "dtc_law", None) == "wrench")
+
+
+def enter_wrench_contact(*, mode, contact_controller, approach_controller,
+                         interface=None):
+    """Contact under ``--dtc-law wrench``: the press is a force, not a velocity.
+
+    Identical in shape to ``enter_speedj_contact`` -- same pose spring, same
+    ``z_compliant`` + ``free_along_normal`` projection, same DualLoop force
+    thread -- with ``set_on_press_wrench`` in place of ``set_on_vz``. The
+    velocity overlay is explicitly zeroed rather than merely unused, because
+    ``compute_control_command`` would still read it if the backend were ever
+    handed back to speedJ mid-session.
+    """
+    del interface
+    mode["active"] = "contact"
+    approach_controller.hold_live_pose()
+    approach_controller.set_input_active(False)
+    approach_controller.set_tool_z_velocity(0.0)
+    approach_controller.set_press_wrench(None)
+    approach_controller.set_z_compliant(True)
+    contact_controller.set_on_press_wrench(approach_controller.set_press_wrench)
+    contact_controller.start()
+
+
+def exit_wrench_contact(*, mode, contact_controller, approach_controller,
+                        interface=None):
+    """Drop the press force and freeze on the same pose spring."""
+    del interface
+    contact_controller.stop()
+    contact_controller.set_on_press_wrench(None)
+    approach_controller.set_press_wrench(None)
+    approach_controller.set_z_compliant(False)
+    approach_controller.hold_live_pose()
+    approach_controller.set_input_active(False)
+    mode["active"] = "approach"
+
+
 def exit_speedj_contact(*, mode, contact_controller, approach_controller, interface=None):
     """Drop Z overlay and freeze on the same pose-spring plant."""
     del interface
@@ -1338,6 +1386,28 @@ def build_arg_parser():
         "--no-startup-align", dest="startup_align", action="store_false",
         help="skip the one-shot field orientation align")
     parser.add_argument(
+        "--press-kp", type=float, default=0.5, metavar="N_PER_N",
+        help="--dtc-law wrench contact: proportional trim on the press, in N "
+             "per N of force error. The commanded press is "
+             "Fd + press_kp*(Fd - Fs), so 0 is pure feedforward (command Fd, "
+             "get Fd -- which under a wrench law is already the right steady "
+             "state) and this only covers sensor bias and a surface that "
+             "moves. Deliberately no integral term: an I on a stiction "
+             "nonlinearity is a stick-slip amplifier (default %(default)s)")
+    parser.add_argument(
+        "--press-max-n", type=float, default=None, metavar="N",
+        help="--dtc-law wrench contact: hard ceiling on the commanded press "
+             "(default 3x --target-force). Under --dtc-compliance-hold the "
+             "shoulder tau_max is 140 N.m, so a runaway trim would be "
+             "delivered in full -- unlike the velocity overlay, which was "
+             "bounded by --press-v-max and a position servo that could stall.")
+    parser.add_argument(
+        "--press-slew", type=float, default=200.0, metavar="N_PER_S",
+        help="--dtc-law wrench contact: rate limit on the commanded press "
+             "(N/s), the counterpart of --v-slew. A step in commanded force is "
+             "a step in tau and this rig is lightly damped at ~15 Hz; 200 N/s "
+             "reaches a 10 N target in 50 ms (default %(default)s)")
+    parser.add_argument(
         "--follow-max-pending-m", type=float, default=0.0, metavar="M",
         help="Bound (m) on the undrained SpaceMouse backlog in FieldFollow. "
              "0 (default) keeps the historical unbounded queue. The stick feeds "
@@ -1765,6 +1835,9 @@ def main():
             force_sign=args.force_sign,
             press_loop=args.press_loop,
             force_tare=args.force_tare,
+            press_kp_n_per_n=args.press_kp,
+            press_max_n=args.press_max_n,
+            press_slew_n_s=args.press_slew,
             measured_fz_fn=measured_fz_fn,
             measured_force_fn=measured_force_fn)
         contact_controller.set_contact_log(_contact_log_path(args.contact_log))
@@ -2182,36 +2255,28 @@ def main():
                     flush=True,
                 )
                 return
-            if args.contact_backend == "dtc" and args.dtc_law == "wrench":
-                # The press reaches the arm through set_tool_z_velocity, which
-                # is read by compute_control_command -- the wrench law does not
-                # look at it. Entering contact here would zero Kz and free the
-                # normal and then never press: the tool would hover, and the
-                # force log would read a healthy zero. Refuse loudly rather
-                # than let a session mistake that for a working press.
-                # A2 wires set_press_wrench; until then --dtc-law wrench is
-                # free space only.
-                print(
-                    "\033[91mrefusing contact under --dtc-law wrench: the press "
-                    "is not wired to the wrench law yet (set_press_wrench). Run "
-                    "free-space only, or use --dtc-law velocity.\033[0m",
-                    flush=True,
-                )
-                return
             mode["active"] = "contact"
-            enter_speedj_contact(
+            wrench_press = use_wrench_press(args)
+            (enter_wrench_contact if wrench_press else enter_speedj_contact)(
                 mode=mode,
                 contact_controller=contact_controller,
                 approach_controller=approach_controller,
                 interface=interface,
             )
+            how = (f"press = force, Fd + {args.press_kp:g}*(Fd-Fs) N "
+                   f"capped at {contact_controller._press_max_n:.1f}N"
+                   if wrench_press
+                   else f"PID holds Fd \u22642mm/s")
             print(
-                f"-> contact mode ({args.contact_backend}): latched until button {args.mode_button}; "
-                f"field-follow tangent XY, PID holds Fd ≤2mm/s to {args.target_force:.1f}N",
+                f"-> contact mode ({args.contact_backend}"
+                f"{'/wrench' if wrench_press else ''}): latched until button "
+                f"{args.mode_button}; field-follow tangent XY, "
+                f"{how} to {args.target_force:.1f}N",
                 flush=True,
             )
             return
-        exit_speedj_contact(
+        (exit_wrench_contact if use_wrench_press(args)
+         else exit_speedj_contact)(
             mode=mode,
             contact_controller=contact_controller,
             approach_controller=approach_controller,

@@ -972,6 +972,14 @@ class LineAdmittanceTeleoperationController(gafropy.control.VelocityAdmittanceCo
         self.get_objective().set_target(gafropy.Line(a, b))
 
 
+# Smallest |press axis . tool Z| the wrench-law press will aim with. Below this
+# the hemisphere that _press_axis_base picks is decided by numerical noise and
+# flips tick to tick. Same threshold as the velocity path's near-perpendicular
+# guard, but the answer differs: that one falls back to tool Z (millimetres per
+# second, survivable), this one refuses to press at all (newtons, not).
+PRESS_AXIS_MIN_DOT_TOOL_Z = 0.2
+
+
 class ContactTeleoperationController(gafropy.control.VelocityAdmittanceController):
     """Hybrid contact: force PID along the surface normal, latched for the session.
 
@@ -1017,7 +1025,9 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                  force_tare_samples=20, force_tare_period=0.002,
                  wrong_sign_fs_n=-2.0, wrong_sign_fd_frac=0.5,
                  unload_v_m_s=0.004, spike_dF_dt_N_s=None,
-                 safety_mode_fn=None):
+                 safety_mode_fn=None,
+                 press_kp_n_per_n=0.5, press_max_n=None,
+                 press_slew_n_s=200.0):
         super().__init__(config)
         self.vf = vf
         self._target_force = abs(float(target_force))
@@ -1028,6 +1038,25 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._force_limit = force_limit
         self._integral_limit = integral_limit
         self._update_period = update_period
+        # --- wrench-law press (set_on_press_wrench). Newtons, not m/s. ---
+        # Proportional trim on a feedforward Fd. Under torque the commanded
+        # force *is* the applied force, so the steady-state answer is simply Fd
+        # and the trim only has to cover sensor bias and the surface moving; a
+        # velocity seek had to integrate its way to Fd through a position servo
+        # that could not yield, which is what every guard in _press_velocity is
+        # defending against. Deliberately no integrator: an I term on a stiction
+        # nonlinearity is a stick-slip amplifier, same reason DEFAULT_KI is 0 on
+        # the joint-velocity torque law.
+        self._press_kp_n_per_n = abs(float(press_kp_n_per_n))
+        # Hard ceiling on the commanded press. Defaults to 3x Fd: enough trim
+        # authority to cover a few N of bias, small enough that a runaway trim
+        # cannot become the 140 N the shoulder tau_max would now allow.
+        self._press_max_n = (3.0 * self._target_force if press_max_n is None
+                             else abs(float(press_max_n)))
+        # N/s. The wrench-law counterpart of v_slew_mps2: a step in commanded
+        # force is a step in tau, and the arm is a lightly damped structure.
+        self._press_slew_n_s = abs(float(press_slew_n_s))
+        self._prev_press_n = None
         self._linear_scale = linear_scale
         self._force_sign = float(force_sign)
         # DualLoop: |Fs| ≥ max(0.4 N, 0.25·|Fd|) on the same-tick tared wrench.
@@ -1124,6 +1153,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._external_wrench = np.zeros(6)
         self._on_force_abort = None
         self._on_vz = None
+        self._on_press_wrench = None
         self._last_diag = {}
         self._t_tick = None
         # Optional () -> UR safety mode. After a protective stop the controller
@@ -1186,7 +1216,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         "t", "elapsed", "dt", "mode", "press_loop", "fz_raw", "bias_x",
         "bias_y", "bias_z", "Fs", "Fd", "v_press", "v_z", "aborted",
         "Fs_n", "Fs_n_raw", "Fe_n", "dFs_dt", "gain", "v_along", "spike",
-        "osc", "wrong_sign", "fault_fs",
+        "osc", "wrong_sign", "fault_fs", "F_press",
         "sigma_min", "clamp_scale", "qdot_max",
         "err_x", "err_y", "err_z", "vtask_lin",
         "err_rx", "err_ry", "err_rz", "k_xy", "k_ang",
@@ -1278,6 +1308,119 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
     def set_on_vz(self, callback):
         """Optional callback(v_z) each force tick. Overlay press on the pose-spring plant."""
         self._on_vz = callback
+
+    def set_on_press_wrench(self, callback):
+        """Optional callback(w_body_3) each force tick, in **newtons**.
+
+        The wrench-law counterpart of ``set_on_vz``. Wire it to
+        ``AdmittanceTeleoperationController.set_press_wrench`` and the press
+        becomes a commanded force instead of a commanded velocity:
+
+            W = Lambda (K e - D J qdot)      # free space, unchanged
+            W[lin] -= (W[lin] . n) n         # free_along_normal, already there
+            W[lin] += F_press * n            # this callback
+            tau = clip(J.T W, +-tau_max)
+
+        **No gafropy wrench type is involved on this path.** ``_run`` already
+        skips ``set_desired_wrench`` whenever an overlay callback is set, so the
+        VelocityAdmittance plant beneath this controller is never stepped; the
+        vector handed over is a plain numpy 3-vector and
+        ``compute_control_wrench`` adds it to its own numpy wrench. That is why
+        the dead ``get_wrench()`` / ``Wrench.to_array()`` blade-order question
+        cannot reach this code.
+
+        Frame: **body**, matching ``set_contact_normal``'s ``_n_body``. This
+        controller owns the conversion because it also owns the ``--force-sign``
+        hemisphere convention (``_press_axis_base``), and it rotates with the
+        same ``R_tool_to_base`` that the same field-follow tick published to
+        both controllers -- so the projection and the press cannot disagree by
+        a tick.
+        """
+        self._on_press_wrench = callback
+
+    def _press_force_n(self, fs, now, dt):
+        """Commanded press magnitude, newtons. Positive = into the part.
+
+        ``F = Fd + kp * (Fd - Fs)``, clipped to ``[0, press_max_n]``.
+
+        Why this is so much simpler than ``_press_velocity``: under the wrench
+        law the commanded force *is* the applied force, so the steady-state
+        answer is Fd and the trim only covers bias and a surface that moves.
+        The speedJ seek had to *find* Fd by integrating a velocity into a
+        position servo that could not yield -- "never keep inching into a rigid
+        stop" (C153), the unload floor, the overshoot/mag_overload levels -- and
+        none of that applies to an actuator that yields by construction.
+
+        Two guards do survive, because they are about the *signal*, not the
+        plant:
+
+        - **Wrong sign.** ``Fs`` at or below ``min(-2, -0.5 Fd)`` is a bounce or
+          a flipped reading, not more force owed. Both seek laws answer it the
+          same way and so does this one: command nothing.
+        - **A ceiling.** ``press_max_n`` bounds the trim, because the wrist and
+          shoulder ``tau_max`` under --dtc-compliance-hold are now high enough
+          that a runaway trim would be delivered in full.
+        """
+        del now
+        fd = float(self._target_force)
+        if fs <= min(self._wrong_sign_fs_n, self._wrong_sign_fd_frac * -fd):
+            return 0.0
+        f = fd + self._press_kp_n_per_n * (fd - fs)
+        f = float(np.clip(f, 0.0, self._press_max_n))
+        return self._slew_press(f, dt)
+
+    def _slew_press(self, f_n, dt):
+        """Rate-limit the commanded press in N/s. Mirror of ``_slew_vz``."""
+        if self._press_slew_n_s <= 0.0 or self._prev_press_n is None:
+            self._prev_press_n = f_n
+            return f_n
+        max_df = self._press_slew_n_s * float(dt)
+        f_n = float(np.clip(f_n, self._prev_press_n - max_df,
+                            self._prev_press_n + max_df))
+        self._prev_press_n = f_n
+        return f_n
+
+    def _press_wrench_body(self, f_n):
+        """``f_n`` newtons along the contact normal, in the body frame.
+
+        ``None`` when there is no trustworthy axis, and the caller must then
+        command **no press** rather than guess one. Unlike the velocity overlay
+        -- which fell back to the legacy tool-Z axis at millimetres per second
+        -- a mis-aimed *force* is delivered at full magnitude on the next tick.
+
+        Two cases return None:
+
+        - **No pose yet** (``_R_tool_to_base`` unset, before the first
+          field-follow tick).
+        - **The normal is near-perpendicular to tool Z.** ``_press_axis_base``
+          picks the hemisphere by ``sign(n . press_sign*tool_z)``, so at 90 deg
+          that dot product is ~0 and the sign is decided by floating-point
+          noise -- the axis flips between ``+n`` and ``-n`` tick to tick. The
+          velocity path guards the same degeneracy with the same 0.2 threshold
+          and answers it by falling back to tool Z; at 5 mm/s that is
+          survivable and at 30 N it is not, so this refuses instead. In normal
+          operation field-follow keeps tool Z within a few degrees of the
+          normal, so this never fires; if it does, the tool is not conforming
+          and pressing is the wrong thing to do anyway.
+        """
+        axis, axis_dot_tool_z = self._press_axis_base()
+        R = self._R_tool_to_base
+        if axis is None or R is None:
+            return None
+        if abs(float(axis_dot_tool_z)) < PRESS_AXIS_MIN_DOT_TOOL_Z:
+            return None
+        return np.asarray(R, dtype=float).reshape(3, 3).T @ (
+            np.asarray(axis, dtype=float).reshape(3) * float(f_n))
+
+    def _emit_press_wrench(self, f_n):
+        """Hand the press to the wrench law. Never raises into the force loop."""
+        if self._on_press_wrench is None:
+            return
+        w = np.zeros(3) if f_n == 0.0 else self._press_wrench_body(f_n)
+        try:
+            self._on_press_wrench(np.zeros(3) if w is None else w)
+        except Exception as exc:
+            print(f"on_press_wrench failed: {exc}", flush=True)
 
     def _fs(self, fz_raw):
         # UR ActualTCPForce is environment-on-TCP (reaction). Press along +Z reads Fz < 0.
@@ -1541,11 +1684,15 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
             # Zero the overlay and reset the slew, so clearing the stop does not
             # resume mid-ramp into the part.
             self._prev_v_z = 0.0
+            self._prev_press_n = 0.0
             if self._on_vz is not None:
                 try:
                     self._on_vz(0.0)
                 except Exception as exc:
                     print(f"on_vz failed: {exc}", flush=True)
+            # A protective stop must stop the press, not queue one up -- and
+            # under the wrench law "not pressing" is 0 N, not a stale vector.
+            self._emit_press_wrench(0.0)
             # Keep logging through the stop. Returning early left the CSV blank
             # for exactly the window worth reading -- what the force was doing
             # while the robot was halted, and whether it settled before the
@@ -1560,24 +1707,37 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                     "bias_y": f"{bias_tool[1]:.4f}",
                     "bias_z": f"{bias_tool[2]:.4f}",
                     "Fs": f"{fs:.4f}", "Fd": f"{self._target_force:.3f}",
-                    "v_press": "0.0", "v_z": "0.0",
+                    "v_press": "0.0", "v_z": "0.0", "F_press": "0.0",
                     "aborted": int(self._force_aborted),
                 })
             return np.zeros(6)
         if self._force_aborted:
             self._prev_v_z = 0.0
+            self._prev_press_n = 0.0
             if self._on_vz is not None:
                 try:
                     self._on_vz(0.0)
                 except Exception as exc:
                     print(f"on_vz failed: {exc}", flush=True)
+            self._emit_press_wrench(0.0)
             return np.zeros(6)
 
-        if self._press_loop == "dtc":
+        if self._on_press_wrench is not None:
+            # Wrench law: the press is a force, so the velocity seek does not
+            # run at all. Two loops authoritative on the same axis is the fight
+            # that produces drift -- the same reason the outer PID owns Fd alone
+            # on the speedJ path.
+            f_press = self._press_force_n(fs, now, dt)
+            v_press = 0.0
+            v_z = 0.0
+        elif self._press_loop == "dtc":
+            f_press = float("nan")
             v_press = self._press_velocity_dtc(now, dt)
+            v_z = self._slew_vz(self._press_sign * v_press, dt)
         else:
+            f_press = float("nan")
             v_press = self._press_velocity(fs, now, dt)
-        v_z = self._slew_vz(self._press_sign * v_press, dt)
+            v_z = self._slew_vz(self._press_sign * v_press, dt)
 
         if self._log_period_s > 0.0:
             if self._t_last_log is None or (now - self._t_last_log) >= self._log_period_s:
@@ -1609,7 +1769,10 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                     f"fz_raw={fz_raw:+.2f}N  bias_z={bias_tool[2]:+.2f}N"
                     f"{'' if self._force_bias_valid else '(untared)'}  "
                     f"Fs={fs:+.2f}N  Fd={self._target_force:.1f}N  "
-                    f"v_z={v_z:+.4f}m/s  Fext=0  sign={self._press_sign:+.0f}"
+                    + (f"F_press={f_press:+.2f}N  "
+                       if self._on_press_wrench is not None
+                       else f"v_z={v_z:+.4f}m/s  ")
+                    + f"Fext=0  sign={self._press_sign:+.0f}"
                     f"{'  sit' if sit else ''}{extra}",
                     flush=True,
                 )
@@ -1625,6 +1788,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                 "bias_z": f"{bias_tool[2]:.4f}",
                 "Fs": f"{fs:.4f}", "Fd": f"{self._target_force:.3f}",
                 "v_press": f"{v_press:.6f}", "v_z": f"{v_z:.6f}",
+                "F_press": f"{f_press:.4f}",
                 "aborted": int(self._force_aborted),
                 "Fs_n": f"{d.get('Fs_N', float('nan')):.4f}",
                 "Fs_n_raw": f"{d.get('Fs_raw_N', float('nan')):.4f}",
@@ -1638,6 +1802,8 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                 **{k: f"{v:.5f}" for k, v in self._conditioning().items()},
             })
 
+        if self._on_press_wrench is not None:
+            self._emit_press_wrench(f_press)
         wrench_cmd = np.zeros(6)
         wrench_cmd[5] = v_z * self._z_damping
         if self._on_vz is not None:
@@ -1650,7 +1816,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
     def _run(self):
         while not self._stop.is_set():
             desired = self._compute_force_command()
-            if self._on_vz is None:
+            if self._on_vz is None and self._on_press_wrench is None:
                 self.set_external_wrench(np.zeros(6))
                 self.set_desired_wrench(desired)
             time.sleep(self._update_period)
@@ -1673,6 +1839,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._unload_since = None
         self._contact_since = None
         self._prev_v_z = None
+        self._prev_press_n = None
         self._external_wrench = np.zeros(6)
         self._last_diag = {}
         self._t_last_log = None

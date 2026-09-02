@@ -744,3 +744,110 @@ class SafetyModeHaltTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WrenchPressAdapterTest(unittest.TestCase):
+    """set_on_press_wrench: the press as a force, for --dtc-law wrench.
+
+    No gafropy Wrench type is involved on this path -- _run already skips
+    set_desired_wrench whenever an overlay callback is set, so the plain numpy
+    3-vector goes straight to compute_control_wrench.
+    """
+
+    def _ctrl(self, **kw):
+        kw.setdefault("target_force", 10.0)
+        kw.setdefault("press_slew_n_s", 0.0)  # off, so the law is visible
+        return _make_controller(**kw)
+
+    def test_feedforward_alone_commands_fd(self):
+        c = self._ctrl(press_kp_n_per_n=0.0)
+        self.assertAlmostEqual(c._press_force_n(fs=0.0, now=0.0, dt=0.005), 10.0)
+        self.assertAlmostEqual(c._press_force_n(fs=10.0, now=0.0, dt=0.005), 10.0)
+
+    def test_the_trim_pushes_harder_when_under_target(self):
+        c = self._ctrl(press_kp_n_per_n=0.5)
+        # Fd + 0.5*(Fd - Fs)
+        self.assertAlmostEqual(c._press_force_n(fs=4.0, now=0.0, dt=0.005), 13.0)
+        self.assertAlmostEqual(c._press_force_n(fs=16.0, now=0.0, dt=0.005), 7.0)
+
+    def test_the_command_never_goes_negative(self):
+        """A wrench-law press pulls the tool off the part if it goes negative;
+        lift-off is the pose spring's job, not the force loop's."""
+        c = self._ctrl(press_kp_n_per_n=2.0)
+        self.assertAlmostEqual(c._press_force_n(fs=40.0, now=0.0, dt=0.005), 0.0)
+
+    def test_the_ceiling_defaults_to_three_times_fd(self):
+        c = self._ctrl(press_kp_n_per_n=10.0)
+        self.assertAlmostEqual(c._press_max_n, 30.0)
+        self.assertAlmostEqual(c._press_force_n(fs=0.0, now=0.0, dt=0.005), 30.0)
+        c = self._ctrl(press_kp_n_per_n=10.0, press_max_n=12.0)
+        self.assertAlmostEqual(c._press_force_n(fs=0.0, now=0.0, dt=0.005), 12.0)
+
+    def test_wrong_sign_commands_no_press(self):
+        """Fs at or below min(-2, -0.5*Fd) is a bounce or a flipped reading,
+        not more force owed. Both seek laws answer it the same way."""
+        c = self._ctrl(press_kp_n_per_n=0.5)
+        self.assertAlmostEqual(c._press_force_n(fs=-6.0, now=0.0, dt=0.005), 0.0)
+
+    def test_the_slew_bounds_the_step_in_newtons(self):
+        c = self._ctrl(press_kp_n_per_n=0.0, press_slew_n_s=200.0)
+        self.assertAlmostEqual(c._press_force_n(fs=0.0, now=0.0, dt=0.005), 10.0)
+        c._prev_press_n = 0.0
+        self.assertAlmostEqual(
+            c._press_force_n(fs=0.0, now=0.0, dt=0.005), 1.0)  # 200 N/s * 5 ms
+
+    def test_the_body_vector_is_the_normal_rotated_by_the_live_tool(self):
+        c = self._ctrl()
+        R = np.array([[0.0, -1.0, 0.0],
+                      [1.0, 0.0, 0.0],
+                      [0.0, 0.0, 1.0]])          # 90 deg about base Z
+        n_base = np.array([0.0, 0.0, 1.0])       # along tool Z, as in operation
+        c.set_contact_normal(n_base, R)
+        w = c._press_wrench_body(12.0)
+        np.testing.assert_allclose(w, R.T @ (12.0 * n_base), atol=1e-12)
+        self.assertAlmostEqual(float(np.linalg.norm(w)), 12.0)
+
+    def test_the_force_sign_hemisphere_still_wins(self):
+        """--force-sign is the convention the operator validated; a field normal
+        may only pick the *direction*, never flip the hemisphere."""
+        c = self._ctrl(force_sign=-1.0)
+        R = np.eye(3)
+        c.set_contact_normal(np.array([0.0, 0.0, 1.0]), R)
+        np.testing.assert_allclose(
+            c._press_wrench_body(10.0), [0.0, 0.0, -10.0], atol=1e-12)
+
+    def test_a_near_perpendicular_normal_refuses_to_press(self):
+        """At 90 deg the hemisphere is decided by floating-point noise and the
+        axis flips tick to tick. The velocity path falls back to tool Z at
+        mm/s; a force cannot afford that."""
+        c = self._ctrl()
+        R = np.eye(3)
+        c.set_contact_normal(np.array([1.0, 0.0, 0.0]), R)   # perpendicular
+        self.assertIsNone(c._press_wrench_body(12.0))
+        sent = []
+        c.set_on_press_wrench(sent.append)
+        c._emit_press_wrench(12.0)
+        np.testing.assert_allclose(sent[-1], np.zeros(3))
+
+    def test_no_pose_yet_means_no_press_rather_than_a_guessed_axis(self):
+        """The velocity overlay fell back to tool Z at millimetres per second.
+        A mis-aimed *force* is delivered at full magnitude immediately."""
+        c = self._ctrl()
+        self.assertIsNone(c._press_wrench_body(12.0))
+        sent = []
+        c.set_on_press_wrench(sent.append)
+        c._emit_press_wrench(12.0)
+        np.testing.assert_allclose(sent[-1], np.zeros(3))
+
+    def test_emit_never_raises_into_the_force_loop(self):
+        c = self._ctrl()
+        c.set_on_press_wrench(lambda w: (_ for _ in ()).throw(RuntimeError("x")))
+        c._emit_press_wrench(0.0)  # must not propagate
+
+    def test_the_gafropy_plant_is_not_stepped_on_this_path(self):
+        """_run must skip set_desired_wrench for the press-wrench callback the
+        same way it does for set_on_vz -- two loops authoritative on one axis
+        is the fight that produces drift."""
+        src = inspect.getsource(ContactTeleoperationController._run)
+        self.assertIn(
+            "self._on_vz is None and self._on_press_wrench is None", src)

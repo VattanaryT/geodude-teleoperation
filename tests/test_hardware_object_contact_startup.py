@@ -537,7 +537,10 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
 
     def test_speedj_contact_exits_only_from_toggle(self):
         src = _EXAMPLE.read_text()
-        self.assertEqual(src.count("exit_speedj_contact("), 2)
+        # One def plus one reference in the toggle's exit branch, for each of
+        # the two press paths. Contact must never be left from anywhere else.
+        self.assertEqual(src.count("exit_speedj_contact"), 2)
+        self.assertEqual(src.count("exit_wrench_contact"), 2)
         self.assertIn("def toggle_contact_mode():", src)
         self.assertIn("latched until button", src)
 
@@ -1014,12 +1017,36 @@ class WrenchLawWiringTest(unittest.TestCase):
         self.assertAlmostEqual(mod.resolve_wrench_damping_max(200.0, 15.0), 15.0)
         self.assertAlmostEqual(mod.resolve_wrench_damping_max(125.0, 0.0), 0.0)
 
-    def test_contact_is_refused_under_the_wrench_law(self):
-        """The press reaches the arm through set_tool_z_velocity, which the
-        wrench law does not read. Entering contact would hover and log a
-        healthy zero force -- refuse until set_press_wrench is wired (A2)."""
-        source = _EXAMPLE.read_text(encoding="utf-8")
-        self.assertIn('refusing contact under --dtc-law wrench', source)
+    def test_the_wrench_law_takes_the_press_wrench_path(self):
+        """The wrench law never reads set_tool_z_velocity (that lives in
+        compute_control_command, which it bypasses), so contact must route
+        through set_press_wrench or the tool hovers and the force log reads a
+        healthy zero."""
+        mod = _load_example()
+        wrench = mod.build_arg_parser().parse_args([])
+        self.assertEqual(wrench.contact_backend, "dtc")
+        self.assertEqual(wrench.dtc_law, "wrench")
+        self.assertTrue(mod.use_wrench_press(wrench))
+        vel = mod.build_arg_parser().parse_args(["--dtc-law", "velocity"])
+        self.assertFalse(mod.use_wrench_press(vel))
+        speedj = mod.build_arg_parser().parse_args(
+            ["--contact-backend", "speedj"])
+        self.assertFalse(mod.use_wrench_press(speedj))
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("contact_controller.set_on_press_wrench(", src)
+        self.assertNotIn("refusing contact under --dtc-law wrench", src)
+
+    def test_press_gains_reach_the_contact_controller(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args([])
+        self.assertAlmostEqual(args.press_kp, 0.5)
+        self.assertIsNone(args.press_max_n)
+        self.assertAlmostEqual(args.press_slew, 200.0)
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        for kw in ("press_kp_n_per_n=args.press_kp",
+                   "press_max_n=args.press_max_n",
+                   "press_slew_n_s=args.press_slew"):
+            self.assertIn(kw, src)
 
 
 class DtcDiagnosticsWiringTest(unittest.TestCase):
