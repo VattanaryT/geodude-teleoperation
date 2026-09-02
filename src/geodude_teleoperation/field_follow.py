@@ -611,12 +611,18 @@ def _rotation_or_none(R):
 def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
                        err_rad=0.05, map_target=None, live_xyz=None,
                        live_ee_xyz=None, max_ee_jump_m=0.08, stick_quiet=True,
-                       tangent=False):
+                       tangent=False, rebase_on_idle=True):
     """Apply a follow tick to the pose spring.
 
     Stick tick: live TCP + field-frame linear; commanded R is the field at the
     tip (orange-ghost contract), approached at ``rearm_slerp_s``. Quiet stick
     freezes (clears pending) so leftover xyz cannot keep pushing.
+
+    ``rebase_on_idle`` mirrors ``--dtc-hold-at-tick``: when False (compliance
+    hold / push test) a quiet stick clears pending only and keeps the last
+    commanded field pose so external pushes create spring error and return on
+    release. SpaceMouse motion still drives ``follow.tick()`` via pending
+    deltas; only the idle re-base onto ``live_xyz`` is skipped.
 
     What the quiet and catch-up branches do with *orientation* is
     ``hold_field_orientation``:
@@ -650,8 +656,10 @@ def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
             # Skipping it froze speedJ and the stick could not recover.
             if not np.isfinite(jump):
                 follow.revert_tick()
-                if live_xyz is not None:
+                if rebase_on_idle and live_xyz is not None:
                     follow.set_idle(live_xyz)
+                else:
+                    follow.set_idle(clear_pending=True)
                 controller.set_input_active(False)
                 print(
                     "\033[93mfield follow: skip set_target, non-finite EE jump; "
@@ -666,11 +674,14 @@ def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
     max_lead = float(getattr(follow, "_max_lead_m", 0.02))
     hold_R = bool(getattr(follow, "_hold_field_orientation", False))
     if stick_quiet:
-        if R_live is not None and not hold_R:
+        if rebase_on_idle and R_live is not None and not hold_R:
             follow._R = R_live
             follow._R_cmd = np.array(R_live, copy=True)
-        if live_xyz is not None:
-            follow.set_idle(live_xyz, clear_pending=True)
+        if rebase_on_idle:
+            if live_xyz is not None:
+                follow.set_idle(live_xyz, clear_pending=True)
+            else:
+                follow.set_idle(clear_pending=True)
         else:
             follow.set_idle(clear_pending=True)
         if follow.last_target is not None:
@@ -685,10 +696,12 @@ def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
     else:
         R_hold = R_live if R_live is not None else follow._R
     if leftover > max(max_lead, CATCHUP_TCP_M) + 1e-12:
-        if live_xyz is not None:
+        if rebase_on_idle and live_xyz is not None:
             # R=None under hold_R: snap_tcp re-bases the command deliberately,
             # and here only the position is being re-based.
             follow.snap_tcp(live_xyz, None if hold_R else R_hold)
+        elif follow.xyz is not None:
+            follow.last_target = _motor_at(follow.xyz, R_hold)
         if follow.last_target is not None:
             frozen = follow.last_target
             if map_target is not None:

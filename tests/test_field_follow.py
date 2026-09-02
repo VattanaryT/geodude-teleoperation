@@ -804,6 +804,86 @@ class FieldTcpToEeTest(unittest.TestCase):
         np.testing.assert_allclose(got[:3, :3], R_field, atol=1e-9)
 
 
+class ComplianceHoldFollowTest(unittest.TestCase):
+    """Push test: quiet stick must not drag the spring target onto live TCP."""
+
+    def test_quiet_without_rebase_keeps_command_when_live_moves(self):
+        vf = FakeVf()
+        follow = FieldFollow(
+            vf, hz=50.0, rebase_on_live=False, hold_field_orientation=True)
+        live0 = np.array([0.0, 0.0, 1.0])
+        follow.seed(live0, np.eye(3))
+        ctrl = FakeCtrl()
+        follow.add_body_linear(np.array([0.010, 0.0, 0.0]))
+        drive_field_follow(
+            follow, ctrl, 0.0, _motor_at(live0), live_xyz=live0,
+            live_R=np.eye(3), stick_quiet=False, rebase_on_idle=True)
+        commanded_x = float(follow.xyz[0])
+        self.assertGreater(commanded_x, 0.005)
+        pushed = np.array([0.020, 0.0, 1.0])
+        drive_field_follow(
+            follow, ctrl, 0.1, _motor_at(follow.xyz), live_xyz=pushed,
+            live_R=np.eye(3), stick_quiet=True, rebase_on_idle=False)
+        np.testing.assert_allclose(follow.xyz[0], commanded_x, atol=1e-9)
+        T = np.asarray(
+            ctrl.get_objective().target.to_transformation_matrix(), dtype=float)
+        self.assertAlmostEqual(float(T[0, 3]), commanded_x, places=9)
+        self.assertFalse(ctrl.active)
+
+    def test_quiet_with_rebase_still_snaps_to_live(self):
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0, hold_field_orientation=True)
+        live0 = np.array([0.0, 0.0, 1.0])
+        follow.seed(live0, np.eye(3))
+        ctrl = FakeCtrl()
+        follow.add_body_linear(np.array([0.010, 0.0, 0.0]))
+        drive_field_follow(
+            follow, ctrl, 0.0, _motor_at(live0), live_xyz=live0,
+            live_R=np.eye(3), stick_quiet=False)
+        pushed = np.array([0.020, 0.0, 1.0])
+        drive_field_follow(
+            follow, ctrl, 0.1, _motor_at(follow.xyz), live_xyz=pushed,
+            live_R=np.eye(3), stick_quiet=True, rebase_on_idle=True)
+        np.testing.assert_allclose(follow.xyz, pushed, atol=1e-9)
+
+    def test_stick_still_drives_after_external_deflection(self):
+        vf = FakeVf()
+        follow = FieldFollow(
+            vf, hz=50.0, rebase_on_live=False, hold_field_orientation=True)
+        live0 = np.array([0.0, 0.0, 1.0])
+        follow.seed(live0, np.eye(3))
+        ctrl = FakeCtrl()
+        follow.add_body_linear(np.array([0.010, 0.0, 0.0]))
+        drive_field_follow(
+            follow, ctrl, 0.0, _motor_at(live0), live_xyz=live0,
+            live_R=np.eye(3), stick_quiet=False, rebase_on_idle=True)
+        commanded_x = float(follow.xyz[0])
+        pushed = np.array([0.020, 0.0, 1.0])
+        drive_field_follow(
+            follow, ctrl, 0.1, _motor_at(follow.xyz), live_xyz=pushed,
+            live_R=np.eye(3), stick_quiet=True, rebase_on_idle=False)
+        np.testing.assert_allclose(follow.xyz[0], commanded_x, atol=1e-9)
+        follow.add_body_linear(np.array([0.005, 0.0, 0.0]))
+        drive_field_follow(
+            follow, ctrl, 0.2, _motor_at(follow.xyz), live_xyz=pushed,
+            live_R=np.eye(3), stick_quiet=False, rebase_on_idle=False)
+        self.assertTrue(ctrl.active)
+        self.assertGreater(float(follow.xyz[0]), commanded_x + 0.001)
+
+    def test_catch_up_does_not_snap_live_when_rebase_off(self):
+        vf = FakeVf()
+        follow = FieldFollow(vf, hz=50.0, max_lead_m=0.005, rebase_on_live=False)
+        follow.seed(np.array([0.030, 0.0, 1.0]), np.eye(3))
+        follow.last_target = _motor_at([0.030, 0.0, 1.0])
+        ctrl = FakeCtrl()
+        drive_field_follow(
+            follow, ctrl, 0.0, _motor_at([0.030, 0.0, 1.0]),
+            live_xyz=np.array([0.0, 0.0, 1.0]), stick_quiet=False,
+            rebase_on_idle=False)
+        self.assertTrue(ctrl.active)
+        np.testing.assert_allclose(follow.xyz, [0.030, 0.0, 1.0], atol=1e-9)
+
+
 class HardwareFollowRoutingTest(unittest.TestCase):
     def test_example_does_not_attach_vf_to_admittance(self):
         import ast
@@ -825,6 +905,7 @@ class HardwareFollowRoutingTest(unittest.TestCase):
         self.assertIn("max_dR_rad=args.follow_max_dr_rad", src)
         self.assertIn("--follow-max-dr-rad", src)
         self.assertIn("hold_field_orientation=", src)
+        self.assertIn("rebase_on_idle=args.dtc_hold_at_tick", src)
         self.assertIn("rearm_slerp_s=", src)
         self.assertIn("max_qddot=5.0", src)
         self.assertNotIn("set_orientation_compliant", src)

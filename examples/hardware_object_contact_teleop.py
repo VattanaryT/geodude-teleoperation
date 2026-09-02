@@ -41,20 +41,17 @@ To go back to the speedJ plant end-to-end, pass ``--contact-backend speedj
 --max-lead-m 0.005``: the 50 mm lead is a wrench-law force ceiling and is far
 too much slack for a velocity carrot chased by a position servo.
 
-**DTC compliance hold (no SpaceMouse)** — push-test the wrench spring in free
-space with Lambda inertia shaping (equal EE compliance in every direction)::
+**DTC compliance hold** — push-return spring physics on top of the normal flow
+(Enter → align → SpaceMouse field-follow teleop)::
 
-    --dtc-compliance-hold --no-viz --no-speedj-plot
-
-Bare command applies the measured-best push-test gains (override any of them
-explicitly)::
-
+    --dtc-compliance-hold
     --dtc-tau-max 140 140 140 30 30 30
     --dtc-fn-lin 3.0 --dtc-damping-ratio 0.94 --dtc-damping-ratio-ang 0.94
 
-``fn_ang`` tracks ``fn_lin`` (both 3 Hz). Skips startup align, field-follow,
-and any input device. Forces ``--dtc-lambda`` and disables joint-space hold.
-Ctrl+C to quit.
+Applies measured-best gains, forces ``--dtc-lambda``, disables joint-space hold,
+and sets ``hold_at_tick=false`` so external pushes return to the last commanded
+pose when the stick is quiet. SpaceMouse still drives the arm; only idle
+re-base-to-live is turned off.
 """
 from __future__ import annotations
 
@@ -668,9 +665,8 @@ def dtc_compliance_hold_mode(args) -> bool:
 
 def defer_dtc_until_align_done(*, dtc_backend, align, args=None) -> bool:
     """True: run speedJ through startup align, then hand off to DTC once."""
+    del args  # compliance-hold uses the same align → DTC path as teleop
     if dtc_backend is None:
-        return False
-    if args is not None and dtc_compliance_hold_mode(args):
         return False
     return align is not None and not align.finished
 
@@ -1103,14 +1099,11 @@ def build_arg_parser():
              "nothing actuates.")
     parser.add_argument(
         "--dtc-compliance-hold", action="store_true",
-        help="DTC wrench-law compliance test: no SpaceMouse, no startup align, no "
-             "field-follow. Freeze the pose target at handoff (disables per-tick "
-             "hold-at-tick re-base) so a push creates spring error and the arm "
-             "returns on release. Forces --dtc-lambda (Lambda = (J M^-1 J.T)^-1 "
-             "so the EE is a unit mass in every direction, not one wrench split "
-             "unevenly across joints) and turns off joint-space hold. Requires "
-             "--contact-backend dtc and --dtc-law wrench (the defaults). Pair "
-             "with --no-viz for a headless bench test.")
+        help="DTC wrench-law push-return mode on top of normal teleop: measured-best "
+             "gains, --dtc-lambda, joint hold off, and hold_at_tick=false so "
+             "external pushes return to the last commanded pose when the stick "
+             "is quiet. Enter → align → SpaceMouse field-follow unchanged. "
+             "Requires --contact-backend dtc and --dtc-law wrench (the defaults).")
     # --- contact lift-off fixes, independently switchable so a hardware run can
     # bisect which one actually matters. All three off reproduces the previous
     # behavior exactly: --press-loop legacy --no-free-along-normal
@@ -1343,7 +1336,6 @@ def configure_dtc_compliance_hold(args) -> None:
             "--dtc-compliance-hold requires --dtc-lambda (inertia shaping). "
             "Without Lambda the same task wrench maps unevenly across joints "
             "(wrist moves, shoulder takes force); see analyze_dtc_mobility.py.")
-    args.startup_align = False
     args.dtc_lambda = True
     # fn_ang defaults to fn_lin under Lambda via resolve_wrench_fn_ang when unset.
     # Joint-space hold adds extra stiffness on selected joints (default wrist 3)
@@ -1679,8 +1671,9 @@ def main():
             live_ee_xyz=T_ee_m[:3, 3],
             map_target=map_target,
             stick_quiet=quiet,
-            tangent=mode["active"] == "contact")
-        if not approach_controller._input_active:
+            tangent=mode["active"] == "contact",
+            rebase_on_idle=args.dtc_hold_at_tick)
+        if not approach_controller._input_active and args.dtc_hold_at_tick:
             approach_controller.hold_live_pose()
         # Publish the surface normal both loops need, in the *controller* world
         # (map_target has already taken the field pose through field_tcp_to_ee,
@@ -1951,7 +1944,8 @@ def main():
         if stick_is_idle(twist):
             if mode["active"] == "approach":
                 approach_controller.set_input_active(False)
-                approach_controller.hold_live_pose()
+                if args.dtc_hold_at_tick:
+                    approach_controller.hold_live_pose()
             elif mode["active"] == "contact":
                 # hardware_free_teleop: zero twist still update_command so the
                 # pose spring tracks live EE. DualLoop keeps tool Z.
@@ -2138,24 +2132,6 @@ def main():
 
     def start_control_and_device():
         nonlocal device, speedj_trace
-        if dtc_compliance_hold_mode(args):
-            if speedj_trace is None and args.speedj_plot:
-                from geodude_teleoperation.speedj_plot import SpeedJTrace
-                speedj_trace = SpeedJTrace()
-            approach_controller.set_input_active(False)
-            approach_controller.hold_live_pose()
-            enter_direct_torque()
-            if speedj_trace is not None and dtc_backend is not None:
-                dtc_backend.set_command_trace(speedj_trace.record)
-                speedj_trace.start(figsize=tuple(args.plot_size))
-            print(
-                "dtc compliance hold: lambda=on (task inertia shaping), "
-                "joint hold=off, pose frozen at handoff. Push the arm — EE "
-                "compliance should be even in every direction; it should "
-                "return when released. Ctrl+C to quit.",
-                flush=True,
-            )
-            return
         # Start frozen: no speedJ until a non-idle SpaceMouse reading arrives.
         defer = defer_dtc_until_align_done(
             dtc_backend=dtc_backend, align=align, args=args)
@@ -2210,6 +2186,13 @@ def main():
                 "(no VF project in approach)",
                 flush=True,
             )
+        if dtc_compliance_hold_mode(args):
+            print(
+                "dtc compliance hold: hold_at_tick=off — quiet stick keeps the "
+                "commanded pose; external pushes should return when released. "
+                "SpaceMouse still drives field-follow after align.",
+                flush=True,
+            )
 
     try:
         backend_note = {
@@ -2223,10 +2206,7 @@ def main():
         }[args.contact_backend]
         if args.no_viz:
             print(f"Teleoperating '{args.task_space}' on real geodude (headless) "
-                  f"-- {backend_note}"
-                  + ("" if dtc_compliance_hold_mode(args)
-                     else f"; button {args.mode_button} toggles")
-                  + ". Ctrl+C to quit.")
+                  f"-- {backend_note}; button {args.mode_button} toggles. Ctrl+C to quit.")
             start_control_and_device()
             if align is not None and args.align_delay is None:
                 print(
@@ -2235,26 +2215,7 @@ def main():
                     flush=True,
                 )
                 start_align_keys()
-            hold_log_t = {"t": float("-inf")}
             while True:
-                if dtc_compliance_hold_mode(args):
-                    now = time.monotonic()
-                    if (now - hold_log_t["t"]) >= 1.0 and dtc_backend is not None:
-                        hold_log_t["t"] = now
-                        st = dtc_backend.stats()
-                        if st.get("law") == "wrench":
-                            err_lin = np.linalg.norm(
-                                getattr(approach_controller, "_last_err_lin",
-                                        np.zeros(3))) * 1000.0
-                            print(
-                                f"dtc hold: |e_lin|={err_lin:.1f}mm "
-                                f"|W|={st.get('w_lin', 0.0):.1f}N "
-                                f"|W_ang|={st.get('w_ang', 0.0):.2f}Nm "
-                                f"tau_peak={st.get('tau_peak', 0.0):.2f}Nm",
-                                flush=True,
-                            )
-                    time.sleep(0.02)
-                    continue
                 q = q_with_vention()
                 T_flange = chamfer_flange_from_q(q)
                 T_ee = np.asarray(live_ee_motor().to_transformation_matrix())
@@ -2352,13 +2313,6 @@ def main():
                     print(f"viser tick skipped: {exc}", flush=True)
 
             def _update():
-                if dtc_compliance_hold_mode(args):
-                    if handoff_busy["busy"]:
-                        return
-                    q = q_with_vention()
-                    robot_viz.update(q)
-                    update_chamfer(q)
-                    return
                 if handoff_busy["busy"] or (
                     mode["active"] == "contact"
                     and args.contact_backend == "force_mode"

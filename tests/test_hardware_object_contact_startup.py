@@ -680,7 +680,7 @@ class WrenchLawWiringTest(unittest.TestCase):
         self.assertFalse(mod.defer_dtc_until_align_done(
             dtc_backend=None, align=_Align(False)))
 
-    def test_dtc_compliance_hold_skips_align_defer(self):
+    def test_dtc_compliance_hold_defers_dtc_until_align_done(self):
         mod = _load_example()
 
         class _Align:
@@ -689,15 +689,15 @@ class WrenchLawWiringTest(unittest.TestCase):
         class _Args:
             dtc_compliance_hold = True
 
-        self.assertFalse(mod.defer_dtc_until_align_done(
+        self.assertTrue(mod.defer_dtc_until_align_done(
             dtc_backend=object(), align=_Align(), args=_Args()))
 
-    def test_dtc_compliance_hold_forces_no_startup_align(self):
+    def test_dtc_compliance_hold_keeps_startup_align(self):
         mod = _load_example()
         args = mod.build_arg_parser().parse_args(["--dtc-compliance-hold"])
         mod.configure_dtc_compliance_hold(args)
         self.assertTrue(args.dtc_compliance_hold)
-        self.assertFalse(args.startup_align)
+        self.assertTrue(args.startup_align)
         self.assertFalse(args.dtc_hold_at_tick)
         self.assertTrue(args.dtc_lambda)
         self.assertIsNone(args.dtc_fn_ang)
@@ -731,6 +731,10 @@ class WrenchLawWiringTest(unittest.TestCase):
         mod.configure_dtc_compliance_hold(args)
         self.assertEqual(
             list(args.dtc_tau_max), [25.0, 25.0, 25.0, 5.0, 5.0, 15.0])
+
+    def test_compliance_hold_wires_field_follow_rebase_on_idle(self):
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("rebase_on_idle=args.dtc_hold_at_tick", src)
 
     def test_dtc_compliance_hold_keeps_explicit_damping_ratio(self):
         mod = _load_example()
