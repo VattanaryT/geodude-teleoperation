@@ -258,26 +258,36 @@ WRENCH_FN_ANG_NO_LAMBDA = 1.5
 # ran *less* damping than the run it was meant to exceed. Store what runs.
 COMPLIANCE_HOLD_ZETA_LIN = 0.318
 
-# The angular blade goes back to the teleop default, because the push test did
-# not test it. In compliance-hold-as-a-push-test (d90b1cd) ``startup_align`` was
+# The angular blade keeps the teleop default, because the push test could not
+# test it. In compliance-hold-as-a-push-test (d90b1cd) ``startup_align`` was
 # off, no SpaceMouse was opened and field-follow never ran, so
 # ``set_hold_rotation`` was never called: ``_hold_rotation`` stayed None,
 # ``hold_pose_at`` snapped target := live pose, and the angular error was
-# identically zero for the whole run. Under teleop (bf916d1) field-follow
-# commands the field orientation continuously, so the same flag now loads the
-# angular blade at D_ang = 12.0 against the 5.65 that WRENCH_ZETA_ANG was
-# measured stable at -- a 2.1x step, on the axis whose apparent inertia
-# LAMBDA_MIN_ANG_KGM2 already floors ~13x above its true 0.00154 kg.m^2, so the
-# *physical* damping rate there is ~13x the unit-mass number. That is the
-# delayed-damper pathology by construction. Tune this and --dtc-fn-ang from the
-# known-good baseline, one variable per run, with a --dtc-log to read after.
+# identically zero for the whole run. **Whatever the operator ran on the
+# angular blade, the push test did not exercise it.** Under teleop (bf916d1)
+# field-follow commands the field orientation continuously, so those gains load
+# for the first time -- same command line, different physics.
+#
+# The run remembered as optimal was ``--dtc-damping-ratio-ang 0.15
+# --dtc-fn-ang 2.0``, i.e. already this zeta with a *detuned* fn (K_ang 157.9
+# against 355.3 at fn_ang 3.0, D_ang 3.77 against 5.65). fn_ang 2.0 sits in the
+# regime resolve_wrench_fn_ang documents as worse on conformity -- 1.5 held
+# tool Z 4.17 deg / 22.75 deg p95 off the field normal where 3.0 held
+# 1.33 / 5.28 -- so it is a variable for the A/B, not a value to inherit.
 COMPLIANCE_HOLD_ZETA_ANG = WRENCH_ZETA_ANG
 
 # Raised only on the 150 N.m base/shoulder/elbow, which is where a push test
-# needs to resist a hand. The wrists keep the value measured on a *stable* arm:
-# during an oscillation tau_max is the only thing bounding the amplitude (see
-# WRENCH_TAU_MAX), the ringing on this rig lives on j3/j4, and 30 N.m is over
-# the UR5e wrist rating anyway.
+# needs to resist a hand. The wrists keep the value measured on a *stable* arm.
+#
+# The remembered-optimal command ran ``--dtc-tau-max 140 140 140 30 30 30``,
+# i.e. **5x** on j3/j4 -- the two joints that carry a width traverse's rotation.
+# In a push test that is free: nothing commands rotation, so those joints carry
+# almost no task torque and the rail is never approached. Under teleop they
+# carry the field, and WRENCH_TAU_MAX records what a raised wrist cap costs
+# there: 6.0 -> 10.0 was tried and reverted because during the 24.5 Hz limit
+# cycle j4 sat on the 10 N.m rail for 18.9% of ticks. During an oscillation
+# tau_max is the only thing bounding how hard the wrist shakes, and 30 is 3x
+# the value that was already too permissive -- and over the UR5e wrist rating.
 COMPLIANCE_HOLD_TAU_MAX = (140.0, 140.0, 140.0, 6.0, 6.0, 30.0)
 
 # Ceiling on the angular fn that resolve_wrench_fn_ang *derives* from
