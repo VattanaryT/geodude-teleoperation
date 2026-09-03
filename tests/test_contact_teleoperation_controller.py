@@ -905,3 +905,50 @@ class PressTwoRegimeTest(unittest.TestCase):
         self.assertTrue(c._press_engaged)
         self.assertAlmostEqual(c._press_force_n(fs=-9.0, now=0.0, dt=0.005), 0.0)
         self.assertFalse(c._press_engaged)
+
+
+class PressEngagementHandoffTest(unittest.TestCase):
+    """The pose spring keeps the normal until the press has arrived.
+
+    dtc_20260903_150932.csv: freeing the normal on contact entry left the press
+    alone to cross the gap, and it commanded a steady 23.0 N along the normal for
+    43 s with |qdot| median 0.0000 rad/s -- the press is force-limited, the gap
+    is friction-limited, and the spring has ~2x the authority.
+    """
+
+    def test_engagement_is_published_with_the_press(self):
+        c = _make_controller(target_force=10.0, press_slew_n_s=0.0,
+                             press_kp_n_per_n=1.8, press_kp_hold=0.5)
+        seen = []
+        c.set_on_press_engaged(seen.append)
+        c.set_on_press_wrench(lambda w: None)
+        c._press_force_n(fs=0.0, now=0.0, dt=0.005)      # approaching
+        c._emit_press_wrench(20.0)
+        c._press_force_n(fs=6.0, now=0.0, dt=0.005)      # touching
+        c._emit_press_wrench(10.0)
+        self.assertEqual(seen, [False, True])
+
+    def test_engagement_callback_never_raises_into_the_loop(self):
+        c = _make_controller(target_force=10.0)
+        c.set_on_press_engaged(
+            lambda e: (_ for _ in ()).throw(RuntimeError("x")))
+        c._emit_press_wrench(0.0)
+
+
+class SpringKeepsNormalUntilEngagedTest(unittest.TestCase):
+    def test_default_is_engaged_so_nothing_else_changes(self):
+        from geodude_teleoperation.controller import (
+            AdmittanceTeleoperationController)
+        self.assertIn("_press_engaged", inspect.getsource(
+            AdmittanceTeleoperationController.__init__))
+        src = inspect.getsource(
+            AdmittanceTeleoperationController.compute_control_wrench)
+        self.assertIn("self._press_engaged", src)
+
+    def test_the_velocity_path_never_reads_it(self):
+        """speedJ must stay bit-identical for the C153 A/B."""
+        from geodude_teleoperation.controller import (
+            AdmittanceTeleoperationController)
+        src = inspect.getsource(
+            AdmittanceTeleoperationController.compute_control_command)
+        self.assertNotIn("_press_engaged", src)

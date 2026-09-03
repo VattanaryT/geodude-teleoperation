@@ -1008,6 +1008,10 @@ def enter_wrench_contact(*, mode, contact_controller, approach_controller,
     approach_controller.set_press_wrench(None)
     approach_controller.set_z_compliant(True)
     contact_controller.set_on_press_wrench(approach_controller.set_press_wrench)
+    # The spring keeps the normal until the press has arrived: the press is
+    # force-limited and the gap is friction-limited.
+    approach_controller.set_press_engaged(False)
+    contact_controller.set_on_press_engaged(approach_controller.set_press_engaged)
     contact_controller.start()
 
 
@@ -1017,7 +1021,9 @@ def exit_wrench_contact(*, mode, contact_controller, approach_controller,
     del interface
     contact_controller.stop()
     contact_controller.set_on_press_wrench(None)
+    contact_controller.set_on_press_engaged(None)
     approach_controller.set_press_wrench(None)
+    approach_controller.set_press_engaged(True)
     approach_controller.set_z_compliant(False)
     approach_controller.hold_live_pose()
     approach_controller.set_input_active(False)

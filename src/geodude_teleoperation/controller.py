@@ -208,6 +208,11 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         # the K on the remaining axes gets a component along the true normal,
         # which outruns the press loop and lifts the tool off. Project it out.
         self._free_along_normal = bool(free_along_normal)
+        # Wrench law only: whether the press has reached the surface. Until it
+        # has, the pose spring keeps the normal so it can do the approaching.
+        # Default True so nothing outside the contact hand-off changes, and the
+        # velocity path never reads it -- speedJ stays bit-identical.
+        self._press_engaged = True
         # Damped-least-squares regularizer for the jacobian inverse. This was a
         # hardcoded 1e-6 (lambda = 1e-3), inherited from ufactory_demos via the
         # root commit and never validated here, while the sibling
@@ -439,6 +444,19 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         """Overlay tool-Z speed (m/s) on top of the pose spring. DualLoop press axis."""
         self._tool_z_velocity = float(vz)
 
+    def set_press_engaged(self, engaged):
+        """Has the press reached the surface? Wrench law only.
+
+        ``False`` keeps the pose spring on the contact normal so it can do the
+        approaching -- the press is force-limited and the gap is friction-
+        limited, and the spring has ~2x the authority. ``True`` frees the normal
+        so the force loop owns it alone, which is the invariant everything else
+        here depends on. Read by ``compute_control_wrench``;
+        ``compute_control_command`` never looks at it.
+        """
+        self._press_engaged = bool(engaged)
+
+
     def set_press_wrench(self, w_body):
         """Press force (N) in the *body* frame, for the wrench law.
 
@@ -650,10 +668,23 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
             wrench = np.asarray(inertia, dtype=float).reshape(6, 6) @ wrench
 
         if (self._z_compliant and self._free_along_normal
-                and self._n_body is not None):
+                and self._press_engaged and self._n_body is not None):
             # Align never owns the unbound axis -- force does. Identical to the
             # projection the velocity law applies to v_task[3:6]; the wrench is
             # the same vector one conversion earlier.
+            #
+            # ...but only once the press is actually on the surface. Freeing the
+            # normal the instant contact mode is entered leaves the *press*
+            # alone to cross the gap, and the press is force-limited while the
+            # gap is friction-limited: dtc_20260903_150932.csv commanded a
+            # steady |W_lin| of 23.0 N along the normal for 43 s with |qdot|
+            # median 0.0000 rad/s and Fs never above 0.73 N. The pose spring is
+            # the thing with enough authority to approach (Lambda*K*max_lead,
+            # ~46 N here) and it is what the operator is steering, so it keeps
+            # the normal until Fs says the tool has arrived. This is the
+            # standard hybrid hand-off -- position control to the surface, force
+            # control on it -- and it is what the DualLoop velocity seek was
+            # doing implicitly.
             #
             # This runs *after* Lambda deliberately: Lambda is not diagonal, so
             # projecting the acceleration command first would let the coupling
@@ -1170,6 +1201,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._on_force_abort = None
         self._on_vz = None
         self._on_press_wrench = None
+        self._on_press_engaged = None
         self._last_diag = {}
         self._t_tick = None
         # Optional () -> UR safety mode. After a protective stop the controller
@@ -1444,8 +1476,23 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         return np.asarray(R, dtype=float).reshape(3, 3).T @ (
             np.asarray(axis, dtype=float).reshape(3) * float(f_n))
 
+    def set_on_press_engaged(self, callback):
+        """Optional ``callback(bool)`` each force tick: is the tool on the part?
+
+        Wire it to ``AdmittanceTeleoperationController.set_press_engaged`` so the
+        pose spring keeps the contact normal until the press has arrived. Same
+        latch and hysteresis the press gains use, so the spring hands over on
+        exactly the tick the press stops needing breakaway authority.
+        """
+        self._on_press_engaged = callback
+
     def _emit_press_wrench(self, f_n):
         """Hand the press to the wrench law. Never raises into the force loop."""
+        if self._on_press_engaged is not None:
+            try:
+                self._on_press_engaged(bool(self._press_engaged))
+            except Exception as exc:
+                print(f"on_press_engaged failed: {exc}", flush=True)
         if self._on_press_wrench is None:
             return
         w = np.zeros(3) if f_n == 0.0 else self._press_wrench_body(f_n)
