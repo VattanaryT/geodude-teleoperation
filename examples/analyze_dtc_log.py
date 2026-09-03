@@ -225,6 +225,22 @@ def main():
     print(f"  dt_ms  median {q(dt,50):6.2f}  p95 {q(dt,95):6.2f}  max {dt.max():6.2f}"
           f"   -> {1e3/max(q(dt,50),1e-9):.0f} Hz median")
 
+    if all(f"q{j}" in rows[0] for j in range(n)):
+        qm = np.degrees(np.array(
+            [[float(r[f"q{j}"]) for j in range(n)] for r in rows]))
+        lo, hi = qm.min(axis=0), qm.max(axis=0)
+        print("  q deg  " + "  ".join(
+            f"j{j}:{lo[j]:.0f}" + ("" if hi[j] - lo[j] < 1.0 else f"..{hi[j]:.0f}")
+            for j in range(n)))
+        # Two runs at identical gains are only comparable in the same arm
+        # configuration, and "same pose" is easy to assume wrongly: 114126 was
+        # run as a reproduce of 171136 and sat in the opposite wrist branch
+        # (j3 -16 vs -207, j4 +78 vs -80, j5 +3 vs -180), never entering the
+        # region where the burst happened. Print it so the next comparison
+        # starts from the configuration, not from the flags.
+        print("     compare runs only against the same branch: a flipped wrist "
+              "is a different plant at the same gains.")
+
     live = phase == "live"
     if not live.any():
         print("  no live ticks (hold_zero or gated the whole run)")
