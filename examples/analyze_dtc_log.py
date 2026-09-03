@@ -95,7 +95,7 @@ REL_FLOOR_RADPS = 0.02
 
 
 def _rel_floor():
-    if _PUSH_TEST:
+    if _PUSH_TEST or _ACT_DEAD:
         return max(REL_FLOOR_RADPS, 2.5 * PUSH_ACTIVE_RADPS)
     return REL_FLOOR_RADPS
 REL_DECAY_FRAC = 0.5
@@ -136,10 +136,34 @@ PUSH_RELEASE_HOLD_S = 0.10
 # build an act mask are called from main() with different signatures and this
 # is a single-run script.
 _PUSH_TEST = False
+_ACT_DEAD = False
+# Below this fraction of ticks high, the `act` column is not a usable mask.
+ACT_DEAD_FRAC = 0.01
 
 
 def _is_push_test(meta):
     return any("--dtc-push-test" in line for line in meta)
+
+
+def _act_is_dead(rows):
+    """True when the `act` column never goes high, so it cannot be the mask.
+
+    --dtc-push-test is one way to get here. The other -- and it cost a hardware
+    run -- is any session where the operator drives the arm *by hand* instead of
+    by stick: dtc_20260902_171136.csv was launched with --dtc-compliance-hold
+    and the SpaceMouse was never touched, so `act` was 0 for all 6755 live
+    ticks, the step test reported "0 stick releases" and skipped itself, and
+    "quiet stick" pooled every hand push into a 0.620 rad/s p95. The flag is not
+    the signal; a dead column is.
+    """
+    if "act" not in rows[0]:
+        return True
+    hot = sum(1 for r in rows if r["act"] == "1")
+    # Not "never": dtc_20260902_171136.csv registered **one** non-idle stick
+    # sample in 9311 ticks -- a knock, or the operator brushing the puck -- and
+    # a strict `any()` handed the whole run back to a column that is 0.01% high.
+    # Below this the column cannot be the mask whatever produced the one tick.
+    return hot < max(1, int(ACT_DEAD_FRAC * len(rows)))
 
 
 def _act_array(rows, live, dt, qd=None):
@@ -149,7 +173,7 @@ def _act_array(rows, live, dt, qd=None):
     ``--dtc-push-test`` there is no stick, so it is derived from joint motion --
     see PUSH_ACTIVE_RADPS.
     """
-    if _PUSH_TEST and qd is not None:
+    if (_PUSH_TEST or _ACT_DEAD) and qd is not None:
         moving = np.abs(qd).max(axis=1) > PUSH_ACTIVE_RADPS
         hold = max(1, int(round(PUSH_RELEASE_HOLD_S / dt)))
         # Dilate forward: stay "driven" until motion has been absent for hold.
@@ -158,7 +182,8 @@ def _act_array(rows, live, dt, qd=None):
         for i in range(act.size):
             run = 0 if moving[i] else run + 1
             act[i] = moving[i] or run < hold
-        return act, "motion (push test: no stick, so act is derived from |qdot|)"
+        return act, ("motion (act never goes high, so it is derived from "
+                     "|qdot| -- hand-driven run or push test)")
     if "act" in rows[0]:
         return np.array([r["act"] == "1" for r in rows])[live], "act column"
     return np.ones(int(live.sum()), bool), "no act column (all ticks treated as driven)"
@@ -179,14 +204,17 @@ def main():
     rows, meta = _read(path)
     if not rows:
         sys.exit(f"{path}: empty")
-    global _PUSH_TEST
+    global _PUSH_TEST, _ACT_DEAD
     _PUSH_TEST = _is_push_test(meta)
+    _ACT_DEAD = _act_is_dead(rows)
     n = sum(1 for k in rows[0] if k.startswith("tau"))
     print(f"{path}: {len(rows)} ticks, {n} joints")
-    if _PUSH_TEST:
-        print("  --dtc-push-test: no stick, so \"driven\" is derived from joint "
-              f"motion (|qdot| > {PUSH_ACTIVE_RADPS:g} rad/s). Each push is a step "
-              "test; read the release response below.")
+    if _ACT_DEAD:
+        why = ("--dtc-push-test" if _PUSH_TEST
+               else "the act column is 0 for the whole run (hand-driven?)")
+        print(f"  {why}: \"driven\" is derived from joint motion "
+              f"(|qdot| > {PUSH_ACTIVE_RADPS:g} rad/s). Each push is a step test; "
+              "read the release response below.")
     for line in meta:
         print(f"  {line}")
 
@@ -226,6 +254,7 @@ def main():
     # the arm into a workstation is invisible in every percentile below.
     railed = rail_oscillation(rows, live, tau, n, meta)
     grew = release_response(rows, live, tau, n)
+    burst_oscillation(rows, live, n, _tau_max_from_meta(meta, n))
     wrist_travel(rows, live, n)
     lambda_floor(rows, live)
     oscillation(rows, live, W, n, railed, grew)
@@ -1037,6 +1066,109 @@ def roll(ea, n_deg, mask):
 
 def q95(a):
     return q(a, 95)
+
+
+
+# Sliding window for burst_oscillation. Long enough to resolve a 20 Hz line
+# (10 cycles), short enough that a 1 s event is not averaged away.
+BURST_WIN_S = 0.5
+# A burst counts when this much of the window's qdot power sits above
+# BURST_FLOOR_HZ *and* the arm is actually moving. Nothing an operator or a
+# structure driven by one puts a third of its energy above 20 Hz.
+BURST_MIN_SHARE = 0.30
+BURST_FLOOR_HZ = 20.0
+BURST_MIN_QDOT = 0.10
+
+
+def burst_oscillation(rows, live, n, tau_max):
+    """Time-resolved limit-cycle detector that does NOT need the torque rail.
+
+    ``rail_oscillation`` above only sees a cycle that reaches ``+/-tau_max``,
+    which makes its sensitivity *inversely* tied to a number the operator
+    raises for unrelated reasons. dtc_20260902_171136.csv is the case:
+    ``--dtc-tau-max 140 140 140 30 30 30`` ran a 30 Hz cycle that peaked at
+    **83.24 N.m on j1 and 1.33 rad/s** and never came near the 140 rail, so the
+    guard read 0 flips, the aggregate 5-40 Hz share read 8.0% (under
+    RING_MIN_SHARE) and this file printed "no ringing". The operator hit the
+    emergency stop. At the previously-tested tau_max of 50 that same cycle
+    would have railed j1 and cut out on its own.
+
+    Every aggregate here is blind to a one-second event -- the same lesson as
+    the workstation run, which is why rail_oscillation exists. This is the same
+    idea with the rail taken out of it: slide a window, and ask how much of the
+    motion is at a frequency no operator can produce.
+    """
+    if f"qd{n - 1}" not in rows[0]:
+        return
+    t = np.array([float(r["t"]) for r in rows])[live]
+    if t.size < 128:
+        return
+    dt = float(np.median(np.diff(t)))
+    if not np.isfinite(dt) or dt <= 0:
+        return
+    qd = np.array([[float(r[f"qd{j}"]) for j in range(n)] for r in rows])[live]
+    tau = np.array([[float(r[f"tau{j}"]) for j in range(n)] for r in rows])[live]
+    w = int(round(BURST_WIN_S / dt))
+    if w < 32 or w > t.size:
+        return
+    freq = np.fft.rfftfreq(w, dt)
+    hi = freq > BURST_FLOOR_HZ
+    if not hi.any():
+        return
+    win = np.hanning(w)
+    f90 = 1.0 / (4.0 * 1.5 * dt)
+    hits = []
+    for s0 in range(0, t.size - w, max(1, w // 2)):
+        seg = qd[s0:s0 + w]
+        if np.abs(seg).max() < BURST_MIN_QDOT:
+            continue
+        P = np.zeros(freq.size)
+        for k in range(n):
+            P += np.abs(np.fft.rfft((seg[:, k] - seg[:, k].mean()) * win)) ** 2
+        P[0] = 0.0
+        tot = P.sum()
+        if tot <= 0:
+            continue
+        share = float(P[hi].sum() / tot)
+        if share < BURST_MIN_SHARE:
+            continue
+        f_pk = float(freq[hi][int(np.argmax(P[hi]))])
+        seg_tau = np.abs(tau[s0:s0 + w])
+        j = int(seg_tau.max(axis=0).argmax())
+        hits.append((float(t[s0]), share, f_pk, float(np.abs(seg).max()),
+                     float(seg_tau.max()), j))
+    print(f"\n  burst oscillation ({BURST_WIN_S:g} s windows, "
+          f">{BURST_FLOOR_HZ:g} Hz share, rail-independent)")
+    if not hits:
+        print("     none: no window put a third of its motion above "
+              f"{BURST_FLOOR_HZ:g} Hz while moving.")
+        return
+    print("        t    >20Hz    f_pk   |qdot|max   |tau|max  joint")
+    for ts, share, f_pk, qm, tm, j in hits[:12]:
+        print(f"   {ts:7.2f}  {share:6.1%}  {f_pk:6.1f}Hz   {qm:8.3f}   "
+              f"{tm:8.2f}   j{j}")
+    worst = max(hits, key=lambda h: h[4])
+    tm_j = float(np.asarray(tau_max).reshape(-1)[worst[5]])
+    print(f"\n     \033[93m{len(hits)} burst window(s): the arm was moving at a "
+          f"frequency no operator produces.\033[0m")
+    print(f"     worst: {worst[4]:.1f} N.m on j{worst[5]} at {worst[2]:.0f} Hz, "
+          f"|qdot| {worst[3]:.2f} rad/s, against tau_max {tm_j:g} N.m "
+          f"({worst[4] / max(tm_j, 1e-9):.0%} of the rail)")
+    if worst[4] < 0.9 * tm_j:
+        print("     \033[93mThis never reached the rail, so RailOscillationGuard "
+              "could not fire and rail_oscillation above reads clean. Raising "
+              "--dtc-tau-max raises the amplitude this can reach before "
+              "anything cuts out.\033[0m")
+    if worst[2] > 0.7 * f90:
+        print(f"     {worst[2]:.0f} Hz is at f_90 = 1/(4T) = {f90:.0f} Hz, where "
+              "the damper's own output is a quarter cycle late and stops "
+              "opposing the motion. Above that line -D*v is the source: "
+              "\033[93mlower --dtc-damping-max / --dtc-damping-ratio. Do NOT "
+              "raise fn, and do NOT add damping.\033[0m")
+    else:
+        print(f"     {worst[2]:.0f} Hz is well under f_90 = {f90:.0f} Hz, so the "
+              "damper is still damping and this is a bandwidth problem: lower "
+              "--dtc-fn-lin/--dtc-fn-ang.")
 
 
 def wrist_travel(rows, live, n):
