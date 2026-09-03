@@ -212,6 +212,16 @@ DEFAULT_VENTION_HEIGHT = 0.51
 WRENCH_TAU_MAX = (50.0, 50.0, 50.0, 6.0, 6.0, 30.0)
 
 
+# Measured operational-space linear inertia and tool-frame breakaway friction on
+# this rig, for the startup force-ceiling check only -- never used in control.
+# Lambda: dtc_20260902_154438.csv settled at 9.66 N over 4.39 mm with K_lin
+# 355.3, so |W|/(K*e) = 6.19 kg; dtc_20260903_130725.csv reads 6.4 kg the same
+# way. Breakaway: the force the arm holds while stalled, 17.3-18.3 N across
+# dtc_20260903_130302/130725/131641.csv. Both are pose-dependent -- these are
+# the middle of the measured range, good enough for an order-of-magnitude gate.
+LAMBDA_LIN_NOMINAL_KG = 6.2
+BREAKAWAY_LIN_NOMINAL_N = 18.0
+
 # --dtc-rearm-wrench-s default. The wrench-law counterpart to --rearm-slerp-s,
 # which only ever ramped the commanded *rotation*. On dtc_20260830_115039.csv
 # the input_active 0->1 edge stepped |W_lin| 9.25 -> 38.30 N and |W_ang|
@@ -677,6 +687,23 @@ def _wrench_law_kwargs(args):
                  f"  D_lin={2.0 * zeta_lin * 2.0 * math.pi * args.dtc_fn_lin:.2f}"
                  f" D_ang={2.0 * zeta_ang * 2.0 * math.pi * fn_ang:.2f} 1/s"
                  f"  (cap {dmax:g} at --dtc-hz {args.dtc_hz:g})")
+        # The number that decides whether the arm can move at all, and it is a
+        # product of two flags that look independent. Under --no-follow-rebase-
+        # on-live a held stick accumulates lead up to --max-lead-m, so the most
+        # force the spring can ever make is Lambda * K * max_lead. Measured on
+        # this rig Lambda_lin is ~6 kg and breakaway is ~18 N at the tool, and
+        # dtc_20260903_131641.csv (fn 2.0 + --max-lead-m 0.02 -> 19.6 N) stalled
+        # on 66.3% of spring-on ticks with the operator holding the stick: a
+        # 1.1x margin over friction is not a margin. Want >= 2x.
+        f_max = LAMBDA_LIN_NOMINAL_KG * (2.0 * math.pi * args.dtc_fn_lin) ** 2 \
+            * args.max_lead_m
+        warn = "" if f_max >= 2.0 * BREAKAWAY_LIN_NOMINAL_N else (
+            f"  \033[93m<{2.0 * BREAKAWAY_LIN_NOMINAL_N:.0f}N = 2x breakaway; "
+            f"raise --max-lead-m or --dtc-fn-lin\033[0m")
+        note += (f"\n  stick force ceiling ~{f_max:.0f} N "
+                 f"(Lambda~{LAMBDA_LIN_NOMINAL_KG:g}kg * K_lin * --max-lead-m "
+                 f"{args.max_lead_m:g}), breakaway ~{BREAKAWAY_LIN_NOMINAL_N:g} N"
+                 + warn)
     print(note, flush=True)
     return dict(
         wrench_law=True,
