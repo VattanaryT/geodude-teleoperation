@@ -705,6 +705,13 @@ def _wrench_law_kwargs(args):
                  f"(Lambda~{LAMBDA_LIN_NOMINAL_KG:g}kg * K_lin * --max-lead-m "
                  f"{args.max_lead_m:g}), breakaway ~{BREAKAWAY_LIN_NOMINAL_N:g} N"
                  + warn)
+    if getattr(args, "target_force", None) is not None:
+        fd = abs(float(args.target_force))
+        pm = resolve_press_max_n(args)
+        note += (f"\n  press ceiling {pm:.0f} N for --target-force {fd:g} N, "
+                 f"breakaway ~{BREAKAWAY_LIN_NOMINAL_N:g} N"
+                 + ("" if pm >= BREAKAWAY_LIN_NOMINAL_N + fd else
+                    f"  \033[93m<breakaway+Fd; the arm cannot approach\033[0m"))
     print(note, flush=True)
     return dict(
         wrench_law=True,
@@ -884,6 +891,30 @@ def drive_startup_align(align, controller, now, T_flange, R_field, T_ee,
         controller.set_input_active(False)
         controller.hold_live_pose()
     return cmd
+
+
+def resolve_press_max_n(args):
+    """Ceiling on the commanded press, in newtons.
+
+    The library default is ``3 * Fd``, which is right for a low-friction rig and
+    **wrong here**. Entering contact frees the normal axis of pose spring
+    (``free_along_normal``), so ``F_press`` is the *only* force along it -- and
+    it must first overcome the arm's own breakaway friction before any of it
+    reaches the part. Measured on this rig breakaway is ~18 N at the tool, so at
+    ``--target-force 5`` a 15 N ceiling cannot move the arm at all: the tool
+    hovers over the surface and Fs never rises, which is exactly what the first
+    contact attempt did.
+
+    So the floor is ``breakaway + 2*Fd`` -- enough to break away and still have
+    Fd left over, with Fd of margin for the trim. Raising this is not the safety
+    risk it looks like: the P trim can only reach the ceiling if Fs reads far
+    *negative*, and the wrong-sign guard zeroes the press at
+    ``Fs <= min(-2, -0.5*Fd)`` long before that.
+    """
+    if args.press_max_n is not None:
+        return float(args.press_max_n)
+    fd = abs(float(args.target_force))
+    return max(3.0 * fd, BREAKAWAY_LIN_NOMINAL_N + 2.0 * fd)
 
 
 def _contact_log_path(spec, save_dir="speedj_logs", prefix="contact"):
@@ -1936,7 +1967,7 @@ def main():
             press_loop=args.press_loop,
             force_tare=args.force_tare,
             press_kp_n_per_n=args.press_kp,
-            press_max_n=args.press_max_n,
+            press_max_n=resolve_press_max_n(args),
             press_slew_n_s=args.press_slew,
             measured_fz_fn=measured_fz_fn,
             measured_force_fn=measured_force_fn)

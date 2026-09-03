@@ -1044,7 +1044,9 @@ class WrenchLawWiringTest(unittest.TestCase):
         self.assertAlmostEqual(args.press_slew, 200.0)
         src = _EXAMPLE.read_text(encoding="utf-8")
         for kw in ("press_kp_n_per_n=args.press_kp",
-                   "press_max_n=args.press_max_n",
+                   # Not args.press_max_n directly: the default has to clear
+                   # this arm's breakaway, see resolve_press_max_n.
+                   "press_max_n=resolve_press_max_n(args)",
                    "press_slew_n_s=args.press_slew"):
             self.assertIn(kw, src)
 
@@ -1152,3 +1154,38 @@ class TerminationGuardTest(unittest.TestCase):
         i = src.index("def main():")
         self.assertIn("install_termination_guards()",
                       src[i:src.index("ri.RobotInterface(", i)])
+
+
+class PressCeilingTest(unittest.TestCase):
+    """The press must clear breakaway or the arm cannot approach at all.
+
+    Entering contact frees the normal axis of pose spring, so F_press is the only
+    force along it and has to overcome the arm's own friction before any of it
+    reaches the part. The library's 3*Fd default is below the ~18 N measured here
+    for any Fd under 9 N.
+    """
+
+    def test_small_targets_still_clear_breakaway(self):
+        mod = _load_example()
+        for fd in (2.0, 5.0, 8.0):
+            args = mod.build_arg_parser().parse_args(
+                ["--target-force", str(fd)])
+            pm = mod.resolve_press_max_n(args)
+            self.assertGreaterEqual(
+                pm, mod.BREAKAWAY_LIN_NOMINAL_N + fd,
+                msg=f"Fd={fd} ceiling {pm} cannot break away")
+
+    def test_large_targets_keep_the_three_times_rule(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args(["--target-force", "20"])
+        self.assertAlmostEqual(mod.resolve_press_max_n(args), 60.0)
+
+    def test_explicit_flag_wins(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args(
+            ["--target-force", "5", "--press-max-n", "12"])
+        self.assertAlmostEqual(mod.resolve_press_max_n(args), 12.0)
+
+    def test_it_reaches_the_contact_controller(self):
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("press_max_n=resolve_press_max_n(args)", src)
