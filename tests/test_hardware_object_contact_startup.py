@@ -1039,11 +1039,11 @@ class WrenchLawWiringTest(unittest.TestCase):
     def test_press_gains_reach_the_contact_controller(self):
         mod = _load_example()
         args = mod.build_arg_parser().parse_args([])
-        self.assertAlmostEqual(args.press_kp, 0.5)
+        self.assertIsNone(args.press_kp)
         self.assertIsNone(args.press_max_n)
         self.assertAlmostEqual(args.press_slew, 200.0)
         src = _EXAMPLE.read_text(encoding="utf-8")
-        for kw in ("press_kp_n_per_n=args.press_kp",
+        for kw in ("press_kp_n_per_n=resolve_press_kp(args)",
                    # Not args.press_max_n directly: the default has to clear
                    # this arm's breakaway, see resolve_press_max_n.
                    "press_max_n=resolve_press_max_n(args)",
@@ -1189,3 +1189,48 @@ class PressCeilingTest(unittest.TestCase):
     def test_it_reaches_the_contact_controller(self):
         src = _EXAMPLE.read_text(encoding="utf-8")
         self.assertIn("press_max_n=resolve_press_max_n(args)", src)
+
+
+DEAD_DEFAULT_KP = 0.5  # the value that could not approach
+
+
+class PressApproachAuthorityTest(unittest.TestCase):
+    """F = Fd + kp*(Fd - Fs), so the free-space command is Fd*(1+kp).
+
+    A force command below breakaway is a permanent standoff, not a slow
+    approach: the arm does not move, so Fs never changes, so F never changes.
+    contact_20260903_135326.csv is that case -- F_press median 7.33 N against
+    ~18 N breakaway, Fs median +0.34, 3832 rows of hovering.
+    """
+
+    def test_the_free_space_command_clears_breakaway(self):
+        mod = _load_example()
+        for fd in (2.0, 5.0, 10.0, 20.0):
+            args = mod.build_arg_parser().parse_args(["--target-force", str(fd)])
+            kp = mod.resolve_press_kp(args)
+            self.assertGreaterEqual(
+                fd * (1.0 + kp), fd + mod.BREAKAWAY_LIN_NOMINAL_N - 1e-9,
+                msg=f"Fd={fd}: free-space command cannot break away")
+
+    def test_the_old_default_could_not_approach(self):
+        """Regression: 0.5 at Fd 5 commands 7.5 N against ~18 N of breakaway."""
+        mod = _load_example()
+        self.assertLess(5.0 * (1.0 + DEAD_DEFAULT_KP), mod.BREAKAWAY_LIN_NOMINAL_N)
+
+    def test_explicit_kp_wins(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args(
+            ["--target-force", "5", "--press-kp", "0.5"])
+        self.assertAlmostEqual(mod.resolve_press_kp(args), 0.5)
+
+    def test_kp_is_free_at_the_target(self):
+        """In contact Fs -> F, so F = Fd + kp(Fd - F) solves to F = Fd for any kp.
+
+        Solved rather than iterated: the fixed-point map diverges for kp > 1
+        even though the physical equilibrium is the same, and it is the
+        equilibrium that says kp costs nothing at the target.
+        """
+        for kp in (0.5, 3.6, 10.0):
+            fd = 5.0
+            f = fd * (1.0 + kp) / (1.0 + kp)      # F(1+kp) = Fd(1+kp)
+            self.assertAlmostEqual(f, fd, places=9, msg=f"kp={kp}")

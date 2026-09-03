@@ -220,6 +220,7 @@ WRENCH_TAU_MAX = (50.0, 50.0, 50.0, 6.0, 6.0, 30.0)
 # way. Breakaway: the force the arm holds while stalled, 17.3-18.3 N across
 # dtc_20260903_130302/130725/131641.csv. Both are pose-dependent -- these are
 # the middle of the measured range, good enough for an order-of-magnitude gate.
+DEFAULT_PRESS_KP = 0.5
 LAMBDA_LIN_NOMINAL_KG = 6.2
 BREAKAWAY_LIN_NOMINAL_N = 18.0
 
@@ -708,7 +709,10 @@ def _wrench_law_kwargs(args):
     if getattr(args, "target_force", None) is not None:
         fd = abs(float(args.target_force))
         pm = resolve_press_max_n(args)
-        note += (f"\n  press ceiling {pm:.0f} N for --target-force {fd:g} N, "
+        kp = resolve_press_kp(args)
+        note += (f"\n  press kp {kp:.2f} -> free-space command "
+                 f"{fd * (1.0 + kp):.0f} N (must clear breakaway to approach); "
+                 f"ceiling {pm:.0f} N for --target-force {fd:g} N, "
                  f"breakaway ~{BREAKAWAY_LIN_NOMINAL_N:g} N"
                  + ("" if pm >= BREAKAWAY_LIN_NOMINAL_N + fd else
                     f"  \033[93m<breakaway+Fd; the arm cannot approach\033[0m"))
@@ -891,6 +895,38 @@ def drive_startup_align(align, controller, now, T_flange, R_field, T_ee,
         controller.set_input_active(False)
         controller.hold_live_pose()
     return cmd
+
+
+def resolve_press_kp(args):
+    """Proportional trim on the press, N per N of force error.
+
+    **This sets the approach authority, and 0.5 could not approach at all.**
+    The law is ``F = Fd + kp*(Fd - Fs)``, so with the tool clear of the part
+    (``Fs ~ 0``) the most it will ever command is ``Fd * (1 + kp)``. At Fd 5 and
+    kp 0.5 that is **7.5 N against ~18 N of breakaway**, so the arm never moves,
+    Fs never changes, and the loop sits there forever -- measured exactly that
+    on contact_20260903_135326.csv: 3832 rows, ``F_press`` median **7.33 N**
+    (= 5 + 0.5*(5 - 0.34), the law working perfectly), ``Fs`` median +0.34, and
+    the tool hovering. A *velocity* command escapes this because velocity
+    integrates into position; a *force* command does not, so an under-sized
+    command is a permanent standoff rather than a slow approach.
+
+    **Raising kp is free in steady state.** In contact the surface reacts what
+    the arm pushes, so ``Fs -> F`` and ``F = Fd + kp*(Fd - F)`` gives
+    ``F = Fd`` for *any* kp. kp buys approach authority and changes nothing at
+    the target. The default is therefore sized so the free-space command clears
+    breakaway: ``Fd*(1 + kp) >= Fd + breakaway`` i.e. ``kp >= breakaway/Fd``.
+
+    Deliberately still not an integrator: an I term on a stiction nonlinearity
+    is a stick-slip amplifier, and this gets the same approach authority from a
+    term that vanishes at the target instead of winding up at it.
+    """
+    if args.press_kp is not None:
+        return float(args.press_kp)
+    fd = abs(float(args.target_force))
+    if fd <= 0.0:
+        return DEFAULT_PRESS_KP
+    return max(DEFAULT_PRESS_KP, BREAKAWAY_LIN_NOMINAL_N / fd)
 
 
 def resolve_press_max_n(args):
@@ -1445,14 +1481,19 @@ def build_arg_parser():
         "--no-startup-align", dest="startup_align", action="store_false",
         help="skip the one-shot field orientation align")
     parser.add_argument(
-        "--press-kp", type=float, default=0.5, metavar="N_PER_N",
+        "--press-kp", type=float, default=None, metavar="N_PER_N",
         help="--dtc-law wrench contact: proportional trim on the press, in N "
              "per N of force error. The commanded press is "
              "Fd + press_kp*(Fd - Fs), so 0 is pure feedforward (command Fd, "
              "get Fd -- which under a wrench law is already the right steady "
              "state) and this only covers sensor bias and a surface that "
-             "moves. Deliberately no integral term: an I on a stiction "
-             "nonlinearity is a stick-slip amplifier (default %(default)s)")
+             "moves. It is also the *approach* authority: with the tool clear "
+             "of the part the command is Fd*(1+kp), which must clear breakaway "
+             "(~18 N here) or the arm never moves at all. Default is "
+             "max(0.5, breakaway/Fd), so Fd*(1+kp) = Fd + breakaway. Free in "
+             "steady state -- in contact Fs -> F and F = Fd for any kp. "
+             "Deliberately no integral term: an I on a stiction nonlinearity is "
+             "a stick-slip amplifier.")
     parser.add_argument(
         "--press-max-n", type=float, default=None, metavar="N",
         help="--dtc-law wrench contact: hard ceiling on the commanded press "
@@ -1966,7 +2007,7 @@ def main():
             force_sign=args.force_sign,
             press_loop=args.press_loop,
             force_tare=args.force_tare,
-            press_kp_n_per_n=args.press_kp,
+            press_kp_n_per_n=resolve_press_kp(args),
             press_max_n=resolve_press_max_n(args),
             press_slew_n_s=args.press_slew,
             measured_fz_fn=measured_fz_fn,
