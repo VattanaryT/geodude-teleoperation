@@ -642,15 +642,41 @@ def _rotation_or_none(R):
     return Rm if _is_rotation(Rm) else None
 
 
+def _target_changed(follow, motor, eps=1e-9):
+    """True when this mapped target differs from the last one sent.
+
+    State lives on ``follow`` so the caller stays stateless. Compared as a 4x4
+    rather than by identity: ``map_target`` builds a fresh Motor every call, so
+    identity is always False and the value is what matters.
+    """
+    T = np.asarray(motor.to_transformation_matrix(), dtype=float)
+    prev = getattr(follow, "_last_sent_target", None)
+    follow._last_sent_target = T
+    return prev is None or float(np.abs(T - prev).max()) > eps
+
+
 def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
                        err_rad=0.05, map_target=None, live_xyz=None,
                        live_ee_xyz=None, max_ee_jump_m=0.08, stick_quiet=True,
-                       tangent=False, rebase_on_idle=True):
+                       tangent=False, rebase_on_idle=True, resend_target=True):
     """Apply a follow tick to the pose spring.
 
     Stick tick: live TCP + field-frame linear; commanded R is the field at the
     tip (orange-ghost contract), approached at ``rearm_slerp_s``. Quiet stick
     freezes (clears pending) so leftover xyz cannot keep pushing.
+
+    ``resend_target`` (``--no-follow-target-resend`` turns it off) controls
+    whether the quiet branch re-writes an *unchanged* target to the objective on
+    every call. It writes at the caller's rate -- the main loop's fixed 50 Hz,
+    **not** ``--follow-hz``, because ``tick()`` returns idle before its own rate
+    gate whenever the stick is untouched -- and it writes from a different
+    thread than the 200 Hz control loop that reads it. The value is provably
+    constant while quiet (``map_target`` is pose-invariant: at ``alpha=1.0``
+    ``ghost_flange_world`` drops the live flange entirely, measured spread
+    9e-16), so skipping the redundant write is semantically a no-op and is a
+    clean bisection for whether that cross-thread write is behind the 30 Hz
+    burst on dtc_20260902_171136.csv. Default True = the behavior every log so
+    far was recorded with.
 
     ``rebase_on_idle`` mirrors ``--dtc-hold-at-tick``: when False (compliance
     hold / push test) a quiet stick clears pending only and keeps the last
@@ -722,7 +748,8 @@ def drive_field_follow(follow, controller, now, proposed_motor, live_R=None,
             frozen = follow.last_target
             if map_target is not None:
                 frozen = map_target(frozen)
-            controller.get_objective().set_target(frozen)
+            if resend_target or _target_changed(follow, frozen):
+                controller.get_objective().set_target(frozen)
         controller.set_input_active(False)
         return tick
     if hold_R:

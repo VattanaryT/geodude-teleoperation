@@ -1059,3 +1059,67 @@ class PendingBacklogTest(unittest.TestCase):
         a = self._hold_stick(self._follow(), [1.0, 0.0, 0.0])
         b = self._hold_stick(self._follow(max_pending_m=0.0), [1.0, 0.0, 0.0])
         self.assertAlmostEqual(a, b)
+
+
+class QuietTargetResendTest(unittest.TestCase):
+    """--no-follow-target-resend: skip the redundant cross-thread write.
+
+    While the stick is quiet the mapped target is constant (map_target is
+    pose-invariant), so re-writing it 50x a second to the objective the 200 Hz
+    control loop is reading is pure redundancy. This is the bisection for the
+    30 Hz burst; default True preserves every recorded log's behavior.
+    """
+
+    class _Obj:
+        def __init__(self):
+            self.n = 0
+
+        def set_target(self, motor):
+            self.n += 1
+
+    class _Ctl:
+        def __init__(self, obj):
+            self._obj = obj
+            self.active = None
+
+        def get_objective(self):
+            return self._obj
+
+        def set_input_active(self, a):
+            self.active = a
+
+    @staticmethod
+    def _motor(x=0.0):
+        T = np.eye(4)
+        T[:3, 3] = [x, 0.0, 0.0]
+        return ga.Motor.from_matrix(T)
+
+    def _drive(self, resend, n=10, moving=False):
+        class _VF:
+            def project(self, m):
+                return m
+
+            def approach_basis_at(self, p):
+                return np.eye(3)
+
+        follow = FieldFollow(_VF(), hz=20.0, max_step_m=0.004,
+                             rebase_on_live=False, snap_to_surface=False)
+        follow.last_target = self._motor()
+        obj = self._Obj()
+        ctl = self._Ctl(obj)
+        for i in range(n):
+            tgt = self._motor(0.001 * i if moving else 0.0)
+            drive_field_follow(
+                follow, ctl, 100.0 + i, self._motor(), stick_quiet=True,
+                map_target=lambda _m, t=tgt: t, resend_target=resend)
+        return obj.n
+
+    def test_default_resends_every_call(self):
+        self.assertEqual(self._drive(resend=True, n=10), 10)
+
+    def test_opting_out_writes_an_unchanged_target_once(self):
+        self.assertEqual(self._drive(resend=False, n=10), 1)
+
+    def test_opting_out_still_writes_when_the_target_moves(self):
+        """It must skip only redundancy, never an actual command."""
+        self.assertEqual(self._drive(resend=False, n=10, moving=True), 10)

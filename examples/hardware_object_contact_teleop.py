@@ -1408,6 +1408,19 @@ def build_arg_parser():
              "a step in tau and this rig is lightly damped at ~15 Hz; 200 N/s "
              "reaches a 10 N target in 50 ms (default %(default)s)")
     parser.add_argument(
+        "--follow-target-resend", dest="follow_target_resend",
+        action=argparse.BooleanOptionalAction, default=True,
+        help="Re-write the pose target to the objective on every field-follow "
+             "call even when the stick is quiet and the value has not changed "
+             "(default: on, which is how every log so far was recorded). That "
+             "write happens at the main loop's fixed 50 Hz -- NOT --follow-hz, "
+             "which gates nothing on an untouched stick -- and from a different "
+             "thread than the 200 Hz control loop that reads it. The value is "
+             "provably constant while quiet (map_target is pose-invariant), so "
+             "--no-follow-target-resend is semantically a no-op and is the "
+             "bisection for whether that cross-thread write is behind the 30 Hz "
+             "burst on dtc_20260902_171136.csv.")
+    parser.add_argument(
         "--follow-max-pending-m", type=float, default=0.0, metavar="M",
         help="Bound (m) on the undrained SpaceMouse backlog in FieldFollow. "
              "0 (default) keeps the historical unbounded queue. The stick feeds "
@@ -1917,7 +1930,8 @@ def main():
             map_target=map_target,
             stick_quiet=quiet,
             tangent=mode["active"] == "contact",
-            rebase_on_idle=follow_rebase_on_idle(args, on_dtc=on_dtc_now()))
+            rebase_on_idle=follow_rebase_on_idle(args, on_dtc=on_dtc_now()),
+            resend_target=args.follow_target_resend)
         if not approach_controller._input_active and follow_rebase_on_idle(
                 args, on_dtc=on_dtc_now()):
             approach_controller.hold_live_pose()
