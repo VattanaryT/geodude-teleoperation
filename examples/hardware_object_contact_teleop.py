@@ -1421,6 +1421,19 @@ def build_arg_parser():
              "bisection for whether that cross-thread write is behind the 30 Hz "
              "burst on dtc_20260902_171136.csv.")
     parser.add_argument(
+        "--stick-linear-scale", type=float, default=STICK_LINEAR_SCALE,
+        metavar="M", help="metres of carrot advance per SpaceMouse sample at "
+             "full deflection. The poll thread runs at 50 Hz, so this times 50 "
+             "is the top carrot speed: %(default)s gives 75 mm/s. This is the "
+             "sensitivity knob -- halve it for finer control, and note it is "
+             "NOT the same as --max-lead-m, which bounds how far the carrot may "
+             "get ahead of the arm (and so bounds the force and the lurch when "
+             "friction lets go) (default %(default)s)")
+    parser.add_argument(
+        "--stick-angular-scale", type=float, default=STICK_ANGULAR_SCALE,
+        metavar="RAD", help="radians of commanded rotation per SpaceMouse "
+             "sample at full deflection (default %(default)s)")
+    parser.add_argument(
         "--follow-max-pending-m", type=float, default=0.0, metavar="M",
         help="Bound (m) on the undrained SpaceMouse backlog in FieldFollow. "
              "0 (default) keeps the historical unbounded queue. The stick feeds "
@@ -2431,7 +2444,8 @@ def main():
             step=0.0025) if args.device == "keyboard" else SpaceMouseTeleop(
                 # Slow enough that the 20 Hz field carrot stays inside the 2 cm
                 # lead and speedJ can catch it (full stick ~7.5 cm/s at 50 Hz).
-                linear_scale=STICK_LINEAR_SCALE, angular_scale=STICK_ANGULAR_SCALE,
+                linear_scale=args.stick_linear_scale,
+                angular_scale=args.stick_angular_scale,
                 deadzone=0.02,
                 device_path=args.spacemouse_path,
                 device_index=args.spacemouse_index)

@@ -1086,3 +1086,30 @@ class DtcDiagnosticsWiringTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StickSensitivityTest(unittest.TestCase):
+    """--stick-linear-scale: the carrot's velocity gain, exposed.
+
+    The poll thread runs at 50 Hz, so scale * 50 is the top carrot speed. It is
+    deliberately separate from --max-lead-m, which bounds how far the carrot may
+    run ahead of the arm: under the wrench law with rebase-on-live off, a held
+    stick accumulates to that lead, so the lead sets the force and the size of
+    the lurch when friction lets go, while the scale sets how fast you get there.
+    """
+
+    def test_defaults_match_the_module_constants(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args([])
+        self.assertAlmostEqual(args.stick_linear_scale, mod.STICK_LINEAR_SCALE)
+        self.assertAlmostEqual(args.stick_angular_scale, mod.STICK_ANGULAR_SCALE)
+
+    def test_the_flags_reach_the_device(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args(
+            ["--stick-linear-scale", "0.0006", "--stick-angular-scale", "0.02"])
+        self.assertAlmostEqual(args.stick_linear_scale, 0.0006)
+        self.assertAlmostEqual(args.stick_angular_scale, 0.02)
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("linear_scale=args.stick_linear_scale", src)
+        self.assertIn("angular_scale=args.stick_angular_scale", src)
