@@ -1113,3 +1113,42 @@ class StickSensitivityTest(unittest.TestCase):
         src = _EXAMPLE.read_text(encoding="utf-8")
         self.assertIn("linear_scale=args.stick_linear_scale", src)
         self.assertIn("angular_scale=args.stick_angular_scale", src)
+
+
+class TerminationGuardTest(unittest.TestCase):
+    """Ctrl-Z must not leave a floating arm.
+
+    Under DTC the arm is held only by our torque stream, and tau=0 is float
+    (gravity is compensated on-controller). SIGTSTP suspends without running any
+    handler or `finally`, so the streamer stops, the on-robot latch decays tau to
+    zero, and the arm becomes back-drivable while the script looks stopped --
+    observed on hardware as the elbow folding under a hand push after Ctrl-Z.
+    """
+
+    def test_sigtstp_is_refused_and_term_raises(self):
+        import signal as _signal
+
+        mod = _load_example()
+        saved = {s: _signal.getsignal(getattr(_signal, s))
+                 for s in ("SIGTSTP", "SIGTERM", "SIGHUP")
+                 if hasattr(_signal, s)}
+        try:
+            mod.install_termination_guards()
+            tstp = _signal.getsignal(_signal.SIGTSTP)
+            self.assertTrue(callable(tstp))
+            # Refusing means returning normally: no suspend, no exception.
+            self.assertIsNone(tstp(_signal.SIGTSTP, None))
+            for name in ("SIGTERM", "SIGHUP"):
+                h = _signal.getsignal(getattr(_signal, name))
+                self.assertTrue(callable(h), name)
+                with self.assertRaises(KeyboardInterrupt, msg=name):
+                    h(getattr(_signal, name), None)
+        finally:
+            for name, h in saved.items():
+                _signal.signal(getattr(_signal, name), h)
+
+    def test_main_installs_them_before_touching_hardware(self):
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        i = src.index("def main():")
+        self.assertIn("install_termination_guards()",
+                      src[i:src.index("ri.RobotInterface(", i)])

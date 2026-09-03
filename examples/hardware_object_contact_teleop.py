@@ -85,6 +85,7 @@ from __future__ import annotations
 import argparse
 import math
 import pathlib
+import signal
 import select
 import socket
 import sys
@@ -1645,8 +1646,54 @@ def configure_dtc_compliance_hold(args) -> None:
         args.startup_align = False
 
 
+def install_termination_guards():
+    """Make every ordinary way of ending this script run the teardown.
+
+    Under ``--contact-backend dtc`` the arm is held by *our* torque stream and
+    nothing else: tau = 0 means float, because gravity is compensated
+    on-controller. So a process that stops running without tearing down leaves a
+    back-drivable arm -- observed on hardware as "I pushed it and the elbow
+    folded after the script had stopped".
+
+    - **SIGTSTP (Ctrl-Z) is the dangerous one and is refused outright.** It
+      suspends the process without running any handler or ``finally``, so the
+      tau streamer stops republishing, the on-robot latch decays tau to zero
+      after ``--dtc-stale-tau-ms``, and the arm floats with the script apparently
+      "stopped". There is no safe way to suspend this program; Ctrl-C instead.
+    - **SIGTERM / SIGHUP** (kill, terminal closed) raise KeyboardInterrupt so
+      the existing ``finally`` runs -- zero tau, servoJ hold, stopScript,
+      disconnect.
+
+    SIGKILL and a hard crash cannot be caught. The on-robot latch's stale decay
+    is the backstop there, and it lands on float, so the pendant's stop is the
+    real last line of defence. Say so once at startup rather than implying the
+    arm is safe.
+    """
+    def _refuse_suspend(signum, frame):
+        del signum, frame
+        print("\033[91mCtrl-Z ignored: suspending would leave the arm floating "
+              "at tau=0 with no teardown. Use Ctrl-C.\033[0m", flush=True)
+
+    def _terminate(signum, frame):
+        del frame
+        raise KeyboardInterrupt(f"signal {signum}")
+
+    for name, handler in (("SIGTSTP", _refuse_suspend),
+                          ("SIGTERM", _terminate),
+                          ("SIGHUP", _terminate)):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, handler)
+        except (ValueError, OSError):
+            # Not the main thread, or the platform refuses it. Not fatal.
+            pass
+
+
 def main():
     args = build_arg_parser().parse_args()
+    install_termination_guards()
     configure_dtc_compliance_hold(args)
     if args.check_spacemouse:
         paths = list_spacemouse_paths()
