@@ -1268,7 +1268,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         "t", "elapsed", "dt", "mode", "press_loop", "fz_raw", "bias_x",
         "bias_y", "bias_z", "Fs", "Fd", "v_press", "v_z", "aborted",
         "Fs_n", "Fs_n_raw", "Fe_n", "dFs_dt", "gain", "v_along", "spike",
-        "osc", "wrong_sign", "fault_fs", "F_press",
+        "osc", "wrong_sign", "fault_fs", "F_press", "engaged",
         "sigma_min", "clamp_scale", "qdot_max",
         "err_x", "err_y", "err_z", "vtask_lin",
         "err_rx", "err_ry", "err_rz", "k_xy", "k_ang",
@@ -1804,6 +1804,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                     "bias_z": f"{bias_tool[2]:.4f}",
                     "Fs": f"{fs:.4f}", "Fd": f"{self._target_force:.3f}",
                     "v_press": "0.0", "v_z": "0.0", "F_press": "0.0",
+                    "engaged": int(self._press_engaged),
                     "aborted": int(self._force_aborted),
                 })
             return np.zeros(6)
@@ -1885,6 +1886,9 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                 "Fs": f"{fs:.4f}", "Fd": f"{self._target_force:.3f}",
                 "v_press": f"{v_press:.6f}", "v_z": f"{v_z:.6f}",
                 "F_press": f"{f_press:.4f}",
+                # The latch itself. Recomputing it from Fs afterwards is
+                # guesswork about hysteresis state; this is what the loop did.
+                "engaged": int(self._press_engaged),
                 "aborted": int(self._force_aborted),
                 "Fs_n": f"{d.get('Fs_N', float('nan')):.4f}",
                 "Fs_n_raw": f"{d.get('Fs_raw_N', float('nan')):.4f}",
