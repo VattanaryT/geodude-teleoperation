@@ -977,6 +977,14 @@ class LineAdmittanceTeleoperationController(gafropy.control.VelocityAdmittanceCo
 # flips tick to tick. Same threshold as the velocity path's near-perpendicular
 # guard, but the answer differs: that one falls back to tool Z (millimetres per
 # second, survivable), this one refuses to press at all (newtons, not).
+# Fs thresholds, as fractions of Fd, for latching out of the approach regime
+# into the hold regime. Hysteresis, because Fs noise is ~0.3 N and chattering
+# between a breakaway-sized command and a hold-sized one at 200 Hz would be a
+# square wave into the surface.
+PRESS_ENGAGE_FRAC = 0.5
+PRESS_RELEASE_FRAC = 0.15
+
+
 PRESS_AXIS_MIN_DOT_TOOL_Z = 0.2
 
 
@@ -1027,7 +1035,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                  unload_v_m_s=0.004, spike_dF_dt_N_s=None,
                  safety_mode_fn=None,
                  press_kp_n_per_n=0.5, press_max_n=None,
-                 press_slew_n_s=200.0):
+                 press_slew_n_s=200.0, press_kp_hold=0.5):
         super().__init__(config)
         self.vf = vf
         self._target_force = abs(float(target_force))
@@ -1057,6 +1065,14 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         # force is a step in tau, and the arm is a lightly damped structure.
         self._press_slew_n_s = abs(float(press_slew_n_s))
         self._prev_press_n = None
+        # Approach and hold are two regimes, latched with hysteresis on Fs.
+        # Approach needs enough command to break static friction; hold needs the
+        # opposite, because that same command keeps accelerating the tool into
+        # the part once it IS free. Measured on contact_20260903_140311.csv with
+        # one gain for both: F_press median 20.6 N got the tool moving and then
+        # drove Fs to a p95 of 19.6 and a max of 33.2 against Fd = 5.
+        self._press_kp_hold = abs(float(press_kp_hold))
+        self._press_engaged = False
         self._linear_scale = linear_scale
         self._force_sign = float(force_sign)
         # DualLoop: |Fs| ≥ max(0.4 N, 0.25·|Fd|) on the same-tick tared wrench.
@@ -1364,19 +1380,35 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         del now
         fd = float(self._target_force)
         if fs <= min(self._wrong_sign_fs_n, self._wrong_sign_fd_frac * -fd):
-            return 0.0
-        f = fd + self._press_kp_n_per_n * (fd - fs)
+            self._press_engaged = False
+            return self._slew_press(0.0, dt)
+        # Latch with hysteresis so a noisy Fs near the threshold cannot chatter
+        # between a 23 N command and a 5 N one at 200 Hz.
+        if fs >= PRESS_ENGAGE_FRAC * fd:
+            self._press_engaged = True
+        elif fs < PRESS_RELEASE_FRAC * fd:
+            self._press_engaged = False
+        kp = self._press_kp_hold if self._press_engaged else self._press_kp_n_per_n
+        f = fd + kp * (fd - fs)
         f = float(np.clip(f, 0.0, self._press_max_n))
         return self._slew_press(f, dt)
 
     def _slew_press(self, f_n, dt):
-        """Rate-limit the commanded press in N/s. Mirror of ``_slew_vz``."""
+        """Rate-limit the commanded press. **Rising only** -- falling is instant.
+
+        A symmetric limit is wrong here and it cost a run. Backing off is always
+        the safe direction, and at 200 N/s a drop from the 23 N breakaway
+        command to 5 N takes 90 ms -- during which the tool, having just broken
+        free, is still being driven into the part. On
+        contact_20260903_140311.csv that is how Fs reached 33.2 N against a
+        target of 5. Rising stays limited because a step in commanded force is a
+        step in tau into a lightly damped structure.
+        """
         if self._press_slew_n_s <= 0.0 or self._prev_press_n is None:
             self._prev_press_n = f_n
             return f_n
         max_df = self._press_slew_n_s * float(dt)
-        f_n = float(np.clip(f_n, self._prev_press_n - max_df,
-                            self._prev_press_n + max_df))
+        f_n = float(min(f_n, self._prev_press_n + max_df))
         self._prev_press_n = f_n
         return f_n
 
@@ -1840,6 +1872,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._contact_since = None
         self._prev_v_z = None
         self._prev_press_n = None
+        self._press_engaged = False
         self._external_wrench = np.zeros(6)
         self._last_diag = {}
         self._t_last_log = None

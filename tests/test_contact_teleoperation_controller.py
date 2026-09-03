@@ -851,3 +851,57 @@ class WrenchPressAdapterTest(unittest.TestCase):
         src = inspect.getsource(ContactTeleoperationController._run)
         self.assertIn(
             "self._on_vz is None and self._on_press_wrench is None", src)
+
+
+class PressTwoRegimeTest(unittest.TestCase):
+    """Approach and hold need opposite gains, latched on Fs with hysteresis.
+
+    contact_20260903_140311.csv ran one gain for both: the 20.6 N median command
+    broke the tool free and then drove Fs to a p95 of 19.6 and a max of 33.2
+    against Fd = 5.
+    """
+
+    def _ctrl(self, **kw):
+        kw.setdefault("target_force", 10.0)
+        kw.setdefault("press_slew_n_s", 0.0)
+        kw.setdefault("press_kp_n_per_n", 1.8)   # breakaway-sized
+        kw.setdefault("press_kp_hold", 0.5)
+        return _make_controller(**kw)
+
+    def test_approach_uses_the_breakaway_gain(self):
+        c = self._ctrl()
+        # Fs ~ 0: 10 + 1.8*(10-0) = 28
+        self.assertAlmostEqual(c._press_force_n(fs=0.0, now=0.0, dt=0.005), 28.0)
+
+    def test_touching_switches_to_the_hold_gain(self):
+        c = self._ctrl()
+        c._press_force_n(fs=0.0, now=0.0, dt=0.005)      # approach
+        # Fs past 0.5*Fd latches hold: 10 + 0.5*(10-6) = 12
+        self.assertAlmostEqual(c._press_force_n(fs=6.0, now=0.0, dt=0.005), 12.0)
+
+    def test_the_latch_has_hysteresis(self):
+        c = self._ctrl()
+        c._press_force_n(fs=6.0, now=0.0, dt=0.005)      # engage
+        self.assertTrue(c._press_engaged)
+        c._press_force_n(fs=2.0, now=0.0, dt=0.005)      # above release, stays
+        self.assertTrue(c._press_engaged)
+        c._press_force_n(fs=1.0, now=0.0, dt=0.005)      # below 0.15*Fd
+        self.assertFalse(c._press_engaged)
+
+    def test_backing_off_is_instant_but_rising_is_limited(self):
+        c = self._ctrl(press_slew_n_s=200.0)
+        c._prev_press_n = 25.0
+        # A large drop must land in one tick -- 90 ms of a stale breakaway
+        # command is what drove Fs to 33 N on hardware.
+        self.assertAlmostEqual(
+            c._press_force_n(fs=30.0, now=0.0, dt=0.005), 0.0)
+        c._prev_press_n = 0.0
+        self.assertAlmostEqual(
+            c._press_force_n(fs=0.0, now=0.0, dt=0.005), 1.0)   # 200 N/s * 5 ms
+
+    def test_wrong_sign_still_drops_the_latch(self):
+        c = self._ctrl()
+        c._press_force_n(fs=6.0, now=0.0, dt=0.005)
+        self.assertTrue(c._press_engaged)
+        self.assertAlmostEqual(c._press_force_n(fs=-9.0, now=0.0, dt=0.005), 0.0)
+        self.assertFalse(c._press_engaged)

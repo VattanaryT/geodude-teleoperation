@@ -710,7 +710,8 @@ def _wrench_law_kwargs(args):
         fd = abs(float(args.target_force))
         pm = resolve_press_max_n(args)
         kp = resolve_press_kp(args)
-        note += (f"\n  press kp {kp:.2f} -> free-space command "
+        note += (f"\n  press kp {kp:.2f} approach / {args.press_kp_hold:g} hold"
+                 f" -> free-space command "
                  f"{fd * (1.0 + kp):.0f} N (must clear breakaway to approach); "
                  f"ceiling {pm:.0f} N for --target-force {fd:g} N, "
                  f"breakaway ~{BREAKAWAY_LIN_NOMINAL_N:g} N"
@@ -1495,6 +1496,15 @@ def build_arg_parser():
              "Deliberately no integral term: an I on a stiction nonlinearity is "
              "a stick-slip amplifier.")
     parser.add_argument(
+        "--press-kp-hold", type=float, default=DEFAULT_PRESS_KP,
+        metavar="N_PER_N",
+        help="proportional trim once the tool is actually touching (Fs above "
+             "half of --target-force). --press-kp is sized to break static "
+             "friction and is far too strong to hold with: the same command "
+             "that gets the tool moving keeps accelerating it into the part. "
+             "The loop latches between the two on Fs with hysteresis "
+             "(default %(default)s)")
+    parser.add_argument(
         "--press-max-n", type=float, default=None, metavar="N",
         help="--dtc-law wrench contact: hard ceiling on the commanded press "
              "(default 3x --target-force). Under --dtc-compliance-hold the "
@@ -2008,6 +2018,7 @@ def main():
             press_loop=args.press_loop,
             force_tare=args.force_tare,
             press_kp_n_per_n=resolve_press_kp(args),
+            press_kp_hold=args.press_kp_hold,
             press_max_n=resolve_press_max_n(args),
             press_slew_n_s=args.press_slew,
             measured_fz_fn=measured_fz_fn,
