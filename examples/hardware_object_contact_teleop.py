@@ -710,13 +710,10 @@ def _wrench_law_kwargs(args):
         fd = abs(float(args.target_force))
         pm = resolve_press_max_n(args)
         kp = resolve_press_kp(args)
-        note += (f"\n  press kp {kp:.2f} approach / {args.press_kp_hold:g} hold"
-                 f" -> free-space command "
-                 f"{fd * (1.0 + kp):.0f} N (must clear breakaway to approach); "
-                 f"ceiling {pm:.0f} N for --target-force {fd:g} N, "
-                 f"breakaway ~{BREAKAWAY_LIN_NOMINAL_N:g} N"
-                 + ("" if pm >= BREAKAWAY_LIN_NOMINAL_N + fd else
-                    f"  \033[93m<breakaway+Fd; the arm cannot approach\033[0m"))
+        del kp
+        note += (f"\n  press: approach {args.press_approach_n:g} N (the pose "
+                 f"spring approaches), hold Fd + {args.press_kp_hold:g}*(Fd-Fs), "
+                 f"ceiling {pm:.0f} N for --target-force {fd:g} N")
     print(note, flush=True)
     return dict(
         wrench_law=True,
@@ -924,10 +921,10 @@ def resolve_press_kp(args):
     """
     if args.press_kp is not None:
         return float(args.press_kp)
-    fd = abs(float(args.target_force))
-    if fd <= 0.0:
-        return DEFAULT_PRESS_KP
-    return max(DEFAULT_PRESS_KP, BREAKAWAY_LIN_NOMINAL_N / fd)
+    # Breakaway sizing is retired: the pose spring does the approach now, so
+    # the press never has to start the arm moving. Kept as a flag because a rig
+    # without spring authority on the normal would still need it.
+    return DEFAULT_PRESS_KP
 
 
 def resolve_press_max_n(args):
@@ -1511,6 +1508,14 @@ def build_arg_parser():
              "The loop latches between the two on Fs with hysteresis "
              "(default %(default)s)")
     parser.add_argument(
+        "--press-approach-n", type=float, default=0.0, metavar="N",
+        help="press force commanded before the tool has touched (default 0: the "
+             "pose spring does the whole approach). Non-zero re-creates the "
+             "failure it was added to fix -- a pure force at the TCP is turned "
+             "into wrist torque by J.T, and the wrist is the compliant "
+             "direction, so the tool rotates out of orthogonality instead of "
+             "the arm translating.")
+    parser.add_argument(
         "--press-max-n", type=float, default=None, metavar="N",
         help="--dtc-law wrench contact: hard ceiling on the commanded press "
              "(default 3x --target-force). Under --dtc-compliance-hold the "
@@ -2025,6 +2030,7 @@ def main():
             force_tare=args.force_tare,
             press_kp_n_per_n=resolve_press_kp(args),
             press_kp_hold=args.press_kp_hold,
+            press_approach_n=args.press_approach_n,
             press_max_n=resolve_press_max_n(args),
             press_slew_n_s=args.press_slew,
             measured_fz_fn=measured_fz_fn,

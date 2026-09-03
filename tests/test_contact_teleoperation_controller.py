@@ -759,15 +759,21 @@ class WrenchPressAdapterTest(unittest.TestCase):
         kw.setdefault("press_slew_n_s", 0.0)  # off, so the law is visible
         return _make_controller(**kw)
 
+    def _engaged(self, **kw):
+        """A controller already latched into the hold regime (tool touching)."""
+        c = self._ctrl(**kw)
+        c._press_force_n(fs=10.0, now=0.0, dt=0.005)   # Fs >= 0.5*Fd engages
+        return c
+
     def test_feedforward_alone_commands_fd(self):
-        c = self._ctrl(press_kp_n_per_n=0.0)
-        self.assertAlmostEqual(c._press_force_n(fs=0.0, now=0.0, dt=0.005), 10.0)
+        c = self._engaged(press_kp_hold=0.0)
         self.assertAlmostEqual(c._press_force_n(fs=10.0, now=0.0, dt=0.005), 10.0)
+        self.assertAlmostEqual(c._press_force_n(fs=6.0, now=0.0, dt=0.005), 10.0)
 
     def test_the_trim_pushes_harder_when_under_target(self):
-        c = self._ctrl(press_kp_n_per_n=0.5)
+        c = self._engaged(press_kp_hold=0.5)
         # Fd + 0.5*(Fd - Fs)
-        self.assertAlmostEqual(c._press_force_n(fs=4.0, now=0.0, dt=0.005), 13.0)
+        self.assertAlmostEqual(c._press_force_n(fs=6.0, now=0.0, dt=0.005), 12.0)
         self.assertAlmostEqual(c._press_force_n(fs=16.0, now=0.0, dt=0.005), 7.0)
 
     def test_the_command_never_goes_negative(self):
@@ -777,24 +783,23 @@ class WrenchPressAdapterTest(unittest.TestCase):
         self.assertAlmostEqual(c._press_force_n(fs=40.0, now=0.0, dt=0.005), 0.0)
 
     def test_the_ceiling_defaults_to_three_times_fd(self):
-        c = self._ctrl(press_kp_n_per_n=10.0)
+        c = self._engaged(press_kp_hold=10.0)
         self.assertAlmostEqual(c._press_max_n, 30.0)
-        self.assertAlmostEqual(c._press_force_n(fs=0.0, now=0.0, dt=0.005), 30.0)
-        c = self._ctrl(press_kp_n_per_n=10.0, press_max_n=12.0)
-        self.assertAlmostEqual(c._press_force_n(fs=0.0, now=0.0, dt=0.005), 12.0)
+        self.assertAlmostEqual(c._press_force_n(fs=6.0, now=0.0, dt=0.005), 30.0)
+        c = self._engaged(press_kp_hold=10.0, press_max_n=12.0)
+        self.assertAlmostEqual(c._press_force_n(fs=6.0, now=0.0, dt=0.005), 12.0)
 
     def test_wrong_sign_commands_no_press(self):
         """Fs at or below min(-2, -0.5*Fd) is a bounce or a flipped reading,
         not more force owed. Both seek laws answer it the same way."""
-        c = self._ctrl(press_kp_n_per_n=0.5)
+        c = self._engaged(press_kp_hold=0.5)
         self.assertAlmostEqual(c._press_force_n(fs=-6.0, now=0.0, dt=0.005), 0.0)
 
-    def test_the_slew_bounds_the_step_in_newtons(self):
-        c = self._ctrl(press_kp_n_per_n=0.0, press_slew_n_s=200.0)
-        self.assertAlmostEqual(c._press_force_n(fs=0.0, now=0.0, dt=0.005), 10.0)
+    def test_the_slew_bounds_the_rise_in_newtons(self):
+        c = self._engaged(press_kp_hold=0.0, press_slew_n_s=200.0)
         c._prev_press_n = 0.0
         self.assertAlmostEqual(
-            c._press_force_n(fs=0.0, now=0.0, dt=0.005), 1.0)  # 200 N/s * 5 ms
+            c._press_force_n(fs=10.0, now=0.0, dt=0.005), 1.0)  # 200 N/s * 5 ms
 
     def test_the_body_vector_is_the_normal_rotated_by_the_live_tool(self):
         c = self._ctrl()
@@ -868,10 +873,14 @@ class PressTwoRegimeTest(unittest.TestCase):
         kw.setdefault("press_kp_hold", 0.5)
         return _make_controller(**kw)
 
-    def test_approach_uses_the_breakaway_gain(self):
+    def test_approach_commands_nothing_by_default(self):
+        """The spring approaches; a TCP force would rotate the wrist instead."""
         c = self._ctrl()
-        # Fs ~ 0: 10 + 1.8*(10-0) = 28
-        self.assertAlmostEqual(c._press_force_n(fs=0.0, now=0.0, dt=0.005), 28.0)
+        self.assertAlmostEqual(c._press_force_n(fs=0.0, now=0.0, dt=0.005), 0.0)
+
+    def test_approach_press_is_configurable_for_a_rig_that_needs_it(self):
+        c = self._ctrl(press_approach_n=4.0)
+        self.assertAlmostEqual(c._press_force_n(fs=0.0, now=0.0, dt=0.005), 4.0)
 
     def test_touching_switches_to_the_hold_gain(self):
         c = self._ctrl()
@@ -889,7 +898,7 @@ class PressTwoRegimeTest(unittest.TestCase):
         self.assertFalse(c._press_engaged)
 
     def test_backing_off_is_instant_but_rising_is_limited(self):
-        c = self._ctrl(press_slew_n_s=200.0)
+        c = self._ctrl(press_slew_n_s=200.0, press_approach_n=25.0)
         c._prev_press_n = 25.0
         # A large drop must land in one tick -- 90 ms of a stale breakaway
         # command is what drove Fs to 33 N on hardware.

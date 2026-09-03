@@ -1066,7 +1066,8 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                  unload_v_m_s=0.004, spike_dF_dt_N_s=None,
                  safety_mode_fn=None,
                  press_kp_n_per_n=0.5, press_max_n=None,
-                 press_slew_n_s=200.0, press_kp_hold=0.5):
+                 press_slew_n_s=200.0, press_kp_hold=0.5,
+                 press_approach_n=0.0):
         super().__init__(config)
         self.vf = vf
         self._target_force = abs(float(target_force))
@@ -1103,6 +1104,9 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         # one gain for both: F_press median 20.6 N got the tool moving and then
         # drove Fs to a p95 of 19.6 and a max of 33.2 against Fd = 5.
         self._press_kp_hold = abs(float(press_kp_hold))
+        # What the press commands before the tool has arrived. 0 = the spring
+        # does the whole approach, which is the point of the hand-off.
+        self._press_approach_n = abs(float(press_approach_n))
         self._press_engaged = False
         self._linear_scale = linear_scale
         self._force_sign = float(force_sign)
@@ -1420,8 +1424,21 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
             self._press_engaged = True
         elif fs < PRESS_RELEASE_FRAC * fd:
             self._press_engaged = False
-        kp = self._press_kp_hold if self._press_engaged else self._press_kp_n_per_n
-        f = fd + kp * (fd - fs)
+        if not self._press_engaged:
+            # **The spring approaches; the press does not.** Commanding
+            # breakaway-sized force here was the error in the first hand-off:
+            # the spring kept the normal *and* the press pushed 23 N, so both
+            # drove, and `tau = J.T @ W` turns a TCP force into wrist torque.
+            # dtc_20260903_151838.csv: 23.2 N median along the normal moved
+            # **j3 through 16.7 degrees** while j0/j4/j5 moved 0.0 and j1/j2
+            # about 2 -- the wrist is the compliant direction, so a pure force
+            # at the TCP rotates it rather than translating the arm, and the
+            # tool stopped being orthogonal to the surface. The pose spring does
+            # not have this problem because it commands a *pose*: its angular
+            # block resists exactly the rotation the linear block would
+            # otherwise cause.
+            return self._slew_press(self._press_approach_n, dt)
+        f = fd + self._press_kp_hold * (fd - fs)
         f = float(np.clip(f, 0.0, self._press_max_n))
         return self._slew_press(f, dt)
 
