@@ -1195,10 +1195,21 @@ def burst_oscillation(rows, live, n, tau_max, w_lin=None):
               "anything cuts out.\033[0m")
     if worst[2] > 0.7 * f90:
         print(f"     {worst[2]:.0f} Hz is at f_90 = 1/(4T) = {f90:.0f} Hz, where "
-              "the damper's own output is a quarter cycle late and stops "
-              "opposing the motion. Above that line -D*v is the source: "
-              "\033[93mlower --dtc-damping-max / --dtc-damping-ratio. Do NOT "
-              "raise fn, and do NOT add damping.\033[0m")
+              "the damper's own output is a quarter cycle late and contributes "
+              "almost nothing either way (cos 83 deg = 0.13 at 30 Hz).")
+        # Measured, and it overrules the phase argument that used to live here.
+        # Eight runs on this rig separate PERFECTLY on shoulder leverage and not
+        # at all on D: clean at 0.206/0.282/0.312/0.316/0.342 with D_lin
+        # 8,9,10,12 mixed through them, and bursting at 0.382/0.386/0.438 with
+        # D_lin 10 and 12. D changed the severity a little (83% -> 75% at the
+        # same leverage) and never changed which side of the boundary a run
+        # landed on. So "lower D" is not the advice; loop gain is
+        # leverage * K, leverage is the arm's geometry, so K is the knob left.
+        print("     \033[93mMeasured on this rig, D in 8..12 does NOT move the "
+              "boundary -- eight runs separate on shoulder leverage alone "
+              "(clean <=0.34, burst >=0.38) with D mixed through both sides. "
+              "Loop gain is leverage * K and leverage is geometry, so the "
+              "untested lever is K: lower --dtc-fn-lin.\033[0m")
     else:
         print(f"     {worst[2]:.0f} Hz is well under f_90 = {f90:.0f} Hz, so the "
               "damper is still damping and this is a bandwidth problem: lower "
