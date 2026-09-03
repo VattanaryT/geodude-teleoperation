@@ -1137,6 +1137,7 @@ def burst_oscillation(rows, live, n, tau_max, w_lin=None):
     win = np.hanning(w)
     f90 = 1.0 / (4.0 * 1.5 * dt)
     hits = []
+    shares = []
     for s0 in range(0, t.size - w, max(1, w // 2)):
         seg = qd[s0:s0 + w]
         if np.abs(seg).max() < BURST_MIN_QDOT:
@@ -1149,6 +1150,7 @@ def burst_oscillation(rows, live, n, tau_max, w_lin=None):
         if tot <= 0:
             continue
         share = float(P[hi].sum() / tot)
+        shares.append(share)
         if share < BURST_MIN_SHARE:
             continue
         f_pk = float(freq[hi][int(np.argmax(P[hi]))])
@@ -1173,6 +1175,21 @@ def burst_oscillation(rows, live, n, tau_max, w_lin=None):
                   f"under ~0.35 has not been tested where it fails.")
     print(f"\n  burst oscillation ({BURST_WIN_S:g} s windows, "
           f">{BURST_FLOOR_HZ:g} Hz share, rail-independent)")
+    # The margin, not just the verdict. A binary "none" hides how close a run
+    # came: dtc_20260903_132243.csv reads "none" and yet its worst window is
+    # 26.4% -- three consecutive windows at 26/17/16% around t=30 -- which is
+    # the "it almost oscillated but didn't" the operator reported. The same run
+    # at fn 2.0 (dtc_20260903_130725.csv) peaks at 3.6%. Same verdict, 7x the
+    # margin, and only this line shows it.
+    if shares:
+        a = np.array(shares)
+        print(f"     margin: worst window {a.max():.1%}, p95 {np.percentile(a, 95):.1%}, "
+              f"median {np.median(a):.1%} of qdot power >{BURST_FLOOR_HZ:g} Hz "
+              f"(threshold {BURST_MIN_SHARE:.0%})")
+        if a.max() > 0.5 * BURST_MIN_SHARE:
+            print("     \033[93mworst window is over half the threshold -- this "
+                  "run has little margin; a harder push or a higher-leverage "
+                  "pose may cross it.\033[0m")
     if not hits:
         print("     none: no window put a third of its motion above "
               f"{BURST_FLOOR_HZ:g} Hz while moving.")
