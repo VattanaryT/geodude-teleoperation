@@ -276,6 +276,7 @@ def main():
                              if "w3" in rows[0] else None))
     wrist_travel(rows, live, n)
     lambda_floor(rows, live)
+    leverage_section(rows, live, W, n)
     oscillation(rows, live, W, n, railed, grew)
     stall(rows, live, W, n)
     tracking(rows, live, W)
@@ -313,6 +314,61 @@ def lambda_floor(rows, live):
     elif bound < 0.05:
         print("     the floor is inert -- a stuck roll is not this, and "
               "raising it would change nothing.")
+
+
+def leverage_section(rows, live, W, n):
+    """The direction-dependent half of the dead band.
+
+    The settled offset of a P-only law is
+    ``e = tau_friction / (lev * Lambda * K)``. Of those three denominators only
+    ``lev = |J_lin.T u|`` depends on which way the arm is pushed: Lambda is
+    symmetric by construction, so it treats ``+u`` and ``-u`` alike, and its
+    measured linear anisotropy on this rig is 17% against the 4.2x ``lev``
+    spans between body x and body z. That ratio is the whole reason a push
+    along the stringer's width dead-zones while a push along its length is
+    springy -- geometry, not a gain and not a bug in the shaping.
+
+    Reported as a spread rather than a median because a run that only ever
+    pushed one way has nothing to compare: a low ``lev`` is only damning next
+    to a high one in the same run.
+    """
+    if "lev" not in rows[0]:
+        return
+    lev = np.array([float(r["lev"]) if r["lev"] else np.nan for r in rows])
+    lam = np.array([float(r["lam_lin"]) if r.get("lam_lin") else np.nan
+                    for r in rows])
+    wl = np.linalg.norm(W[:, 3:], axis=1)
+    # Only ticks with a real linear command: below that the direction is noise.
+    m = live & np.isfinite(lev) & (wl > 5.0)
+    if m.sum() < 50:
+        return
+    lo, hi = q(lev[m], 5), q(lev[m], 95)
+    print(f"\n  effective moment arm |J_lin.T u| m   median {q(lev[m],50):.3f}"
+          f"  p5 {lo:.3f}  p95 {hi:.3f}   ({m.sum()} ticks over 5 N)")
+    if np.isfinite(lam).any():
+        lm = lam[m & np.isfinite(lam)]
+        if lm.size:
+            print(f"  Lambda linear min eig kg           median "
+                  f"{np.median(lm):.2f}  p5 {q(lm,5):.2f}  p95 {q(lm,95):.2f}")
+    if lo > 1e-6 and hi / lo > 2.0:
+        print(f"     {hi/lo:.1f}x spread: the same joint friction costs that "
+              f"many times more error in the p5 direction than the p95 one. "
+              f"A dead zone in one direction only is this, not a gain.")
+    # What was the arm actually holding where it stalled?
+    qd = np.stack([np.array([float(r[f"qd{i}"]) for r in rows])
+                   for i in range(n)], axis=1)
+    tau = np.stack([np.array([float(r[f"tau{i}"]) for r in rows])
+                    for i in range(n)], axis=1)
+    stuck = m & (np.linalg.norm(qd, axis=1) < 0.002)
+    if stuck.sum() > 50:
+        j = int(np.argmax(np.abs(tau[stuck]).mean(0)))
+        held = float(np.median(np.abs(tau[stuck][:, j])))
+        print(f"     stalled on {stuck.sum()} of them, carrying "
+              f"{np.median(wl[stuck]):.1f} N at lev {np.median(lev[stuck]):.3f} m"
+              f" -- worst joint j{j} holding {held:.2f} N.m")
+        print(f"     that is the number --dtc-stiction-max-nm has to exceed: "
+              f"its room is (max_nm - |tau_task|), so a cap under {held:.2f} "
+              f"delivers exactly zero on j{j}.")
 
 
 # Rail-to-rail sign alternation, the one signature a limit cycle has and a

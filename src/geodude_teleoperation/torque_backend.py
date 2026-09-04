@@ -417,6 +417,28 @@ def _clamp_spd(ang, ang_lo, ang_hi, lin, lin_lo, lin_hi, full):
     return out
 
 
+def _leverage_m(jacobian, wrench):
+    """Effective moment arm, in metres, along the commanded linear direction.
+
+    ``tau = J.T W``, so ``J[3:, :].T u`` is the joint torque one newton of TCP
+    force buys when pushed along the unit direction ``u``. Its norm is the only
+    direction-dependent term in the deadband
+    ``e = tau_friction / (lev * Lambda * K)`` -- Lambda is symmetric, so it
+    cannot distinguish ``+u`` from ``-u``, and its measured linear anisotropy on
+    this rig is 17% against the 4.2x this reads between body x and body z.
+
+    Returns NaN when the linear command is too small for the direction to mean
+    anything, rather than a large ratio built out of noise.
+    """
+    w = np.asarray(wrench, dtype=float).reshape(-1)
+    lin = w[3:6]
+    n = float(np.linalg.norm(lin))
+    if n < 1e-9:
+        return float("nan")
+    return float(np.linalg.norm(np.asarray(jacobian, dtype=float)[3:, :].T
+                                @ (lin / n)))
+
+
 def splice_ur(base, ur_values, ur_slots):
     """Copy of ``base`` with ``ur_values`` written into ``ur_slots``.
 
@@ -682,6 +704,18 @@ class DirectTorqueBackend:
         self._last_lambda_alpha = 1.0
         self._n_lambda_ang_floor = 0
         self._last_lambda_ang_min = float("nan")
+        self._last_lambda_lin_min = float("nan")
+        # Effective moment arm |J_lin.T u| for the unit direction the linear
+        # wrench is currently pointing: how many N.m of joint torque one N of
+        # TCP force buys. Measured 0.195 m along body x and 0.82 m along z on
+        # dtc_20260904_105747.csv, and the settled deadband tracked that 4.2x
+        # ratio exactly (13.85 mm at 40 N vs 3.25 mm at 8.4 N). Lambda cannot
+        # cause that -- it is symmetric by construction, so it treats +u and -u
+        # alike and its measured linear anisotropy here is 17%. J.T is the
+        # direction-dependent map, and the deadband is
+        # tau_friction / (lev * Lambda * K), so a low-leverage direction pays
+        # for the same joint friction with proportionally more error.
+        self._last_leverage_m = float("nan")
         self._safety_mode_fn = safety_mode_fn
         self._stale_after_s = float(stale_after_s)
         # The on-robot latch holds the last tau forever if this host loop stalls,
@@ -1293,6 +1327,8 @@ class DirectTorqueBackend:
         # the roll starvation is somewhere else.
         ang_eig = float(np.linalg.eigvalsh(0.5 * (lam[:3, :3] + lam[:3, :3].T))[0])
         self._last_lambda_ang_min = ang_eig
+        self._last_lambda_lin_min = float(
+            np.linalg.eigvalsh(0.5 * (lam[3:, 3:] + lam[3:, 3:].T))[0])
         if ang_eig < LAMBDA_MIN_ANG_KGM2:
             self._n_lambda_ang_floor += 1
         lam = _clamp_spd(lam[:3, :3], LAMBDA_MIN_ANG_KGM2, LAMBDA_MAX_ANG_KGM2,
@@ -1501,6 +1537,7 @@ class DirectTorqueBackend:
                 f"jacobian has {jacobian.shape[1]} columns, the control group "
                 f"drives {self._n}")
         self._last_wrench = wrench.copy()
+        self._last_leverage_m = _leverage_m(jacobian, wrench)
         tau_max = self._law.tau_max
         tau = jacobian.T @ wrench
         # Added *before* the clip, so the hold is bounded by the same tau_max as
@@ -1783,7 +1820,12 @@ class DirectTorqueBackend:
         # and a per-run counter in a console line is not evidence anyone can go
         # back to. Below the floor on a tick means the roll axis was running on
         # borrowed authority on that tick.
-        cols += ["lam_ang"]
+        # lam_lin is the same reading for the linear blade, and lev is the
+        # effective moment arm along the direction the wrench is pushing. The
+        # deadband is tau_friction / (lev * Lambda * K), so these are the two
+        # denominators -- without them a stuck run and a well-conditioned one
+        # look identical in every other column.
+        cols += ["lam_ang", "lam_lin", "lev"]
         self._log_fh.write(",".join(cols) + "\n")
         self._log_t0 = None
         print(f"dtc log: {self._log_path}", flush=True)
@@ -1927,8 +1969,10 @@ class DirectTorqueBackend:
         fields += [f"{v:.6f}" for v in err_ang]
         fields += [f"{v:.6f}" for v in err_lin]
         fields += ["" if not np.isfinite(n_deg) else f"{n_deg:.2f}", str(act)]
-        lam_ang = self._last_lambda_ang_min
-        fields += ["" if not np.isfinite(lam_ang) else f"{lam_ang:.6f}"]
+        for v, fmt in ((self._last_lambda_ang_min, "%.6f"),
+                       (self._last_lambda_lin_min, "%.4f"),
+                       (self._last_leverage_m, "%.4f")):
+            fields.append("" if not np.isfinite(v) else fmt % v)
         try:
             fh.write(",".join(fields) + "\n")
         except Exception as exc:

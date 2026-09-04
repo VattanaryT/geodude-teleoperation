@@ -6,6 +6,7 @@ staleness bound and the safety gate are exercised here without a robot.
 """
 from __future__ import annotations
 
+import math
 import pathlib
 import time
 import unittest
@@ -1062,10 +1063,12 @@ def test_the_log_records_the_tracking_error_and_field_conformity(tmp_path):
     lines = _csv_lines(path)
     header = lines[0].split(",")
     row = lines[1].split(",")
-    # lam_ang trails act: Lambda's pre-clamp smallest angular eigenvalue, so a
-    # stuck roll axis can be told from a floored one after the fact.
-    assert header[-9:] == ["erx", "ery", "erz", "ex", "ey", "ez", "n_deg",
-                           "act", "lam_ang"]
+    # The three denominator columns trail act: Lambda's pre-clamp smallest
+    # eigenvalue per blade, and the effective moment arm along the commanded
+    # linear direction. The deadband is tau_friction / (lev * Lambda * K), so a
+    # stuck run and a well-conditioned one are indistinguishable without them.
+    assert header[-11:] == ["erx", "ery", "erz", "ex", "ey", "ez", "n_deg",
+                            "act", "lam_ang", "lam_lin", "lev"]
     got = dict(zip(header, row))
     assert [float(got[k]) for k in ("erx", "ery", "erz")] == pytest.approx(
         [0.01, -0.02, 0.03])
@@ -1073,6 +1076,30 @@ def test_the_log_records_the_tracking_error_and_field_conformity(tmp_path):
         [0.004, -0.005, 0.006])
     assert float(got["n_deg"]) == pytest.approx(30.0, abs=0.01)
     assert got["act"] == "1"
+
+
+def test_leverage_is_the_moment_arm_along_the_commanded_direction():
+    """``lev`` is the only direction-dependent term in the deadband.
+
+    Lambda is symmetric by construction, so it treats ``+u`` and ``-u`` alike
+    and cannot produce a one-sided dead zone; ``J.T`` can and does. Measured on
+    dtc_20260904_105747.csv: 0.195 m along body x against 0.82 m along body z,
+    and the settled deadband tracked that ratio (13.85 mm at 40 N vs 3.25 mm at
+    8.4 N).
+    """
+    from geodude_teleoperation.torque_backend import _leverage_m
+    jac = np.zeros((6, 6))
+    jac[3, 0] = 0.2      # one N along blade x buys 0.2 N.m on joint 0
+    jac[4, 1] = 0.8      # one N along blade y buys 0.8 N.m on joint 1
+    assert _leverage_m(jac, [0, 0, 0, 1.0, 0, 0]) == pytest.approx(0.2)
+    assert _leverage_m(jac, [0, 0, 0, 0, 3.0, 0]) == pytest.approx(0.8)
+    # Sign-blind, which is what makes it an axis property rather than a bias.
+    assert _leverage_m(jac, [0, 0, 0, -5.0, 0, 0]) == pytest.approx(0.2)
+    # The angular blade is excluded: it is not what the linear deadband pays.
+    assert _leverage_m(jac, [9.0, 9.0, 9.0, 1.0, 0, 0]) == pytest.approx(0.2)
+    # No linear command means no direction, and a ratio built out of noise is
+    # worse than no number at all.
+    assert math.isnan(_leverage_m(jac, [1.0, 0, 0, 0, 0, 0]))
 
 
 def test_the_tracking_columns_survive_a_controller_that_has_none(tmp_path):
