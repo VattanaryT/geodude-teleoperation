@@ -16,6 +16,11 @@ import numpy as np
 # gafropy (and therefore without importing the package) on a log-only box.
 LAMBDA_MIN_ANG_KGM2 = 0.02
 LAMBDA_MAX_LIN_KG = 15.0
+# Measured on this rig, not assumed: WRENCH_TAU_MAX went 1.0 -> 6.0 on
+# j3/j4 because at 1.0 those joints clipped on 32.9% and 45.3% of ticks
+# and could not turn at all, and 6.0 cleared it. So breakaway sits inside
+# that band and anything under it is a joint that cannot move.
+WRIST_BREAKAWAY_NM = 6.0
 
 
 def newest():
@@ -377,14 +382,35 @@ def leverage_section(rows, live, W, n):
                     for i in range(n)], axis=1)
     stuck = m & (np.linalg.norm(qd, axis=1) < 0.002)
     if stuck.sum() > 50:
-        j = int(np.argmax(np.abs(tau[stuck]).mean(0)))
-        held = float(np.median(np.abs(tau[stuck][:, j])))
+        held = np.median(np.abs(tau[stuck]), axis=0)
         print(f"     stalled on {stuck.sum()} of them, carrying "
-              f"{np.median(wl[stuck]):.1f} N at lev {np.median(lev[stuck]):.3f} m"
-              f" -- worst joint j{j} holding {held:.2f} N.m")
-        print(f"     that is the number --dtc-stiction-max-nm has to exceed: "
-              f"its room is (max_nm - |tau_task|), so a cap under {held:.2f} "
-              f"delivers exactly zero on j{j}.")
+              f"{np.median(wl[stuck]):.1f} N at lev {np.median(lev[stuck]):.3f} m")
+        print("     |tau| while stalled, N.m:  " + "  ".join(
+            f"j{j} {held[j]:5.2f}" for j in range(n)))
+        # The largest |tau| is the WRONG reading and it cost this campaign four
+        # hardware runs. A stalled joint is one whose torque is small against
+        # ITS OWN breakaway, and the shoulder's breakaway is several times the
+        # wrist's -- so ranking by |tau| points at j0/j1/j2 every time while the
+        # joint that cannot move is j3/j4. Measured on this rig: 1.0 N.m on
+        # j3/j4 is below UR5e wrist breakaway and 6.0 clears it (WRENCH_TAU_MAX),
+        # against a Lambda-floor ceiling of LAMBDA_MIN_ANG_KGM2 * K_ang *
+        # err_clip_rot = 1.42 N.m. So the wrist is starved by construction and
+        # no amount of linear authority reaches it.
+        wrist = [j for j in range(3, min(n, 6)) if held[j] < WRIST_BREAKAWAY_NM]
+        if wrist:
+            print("     " + ", ".join(f"j{j}" for j in wrist) +
+                  f" are stalled UNDER {WRIST_BREAKAWAY_NM:g} N.m, which is under "
+                  f"this rig's measured wrist breakaway. Those are the starved "
+                  f"joints, not the ones with the biggest |tau|: the shoulder's "
+                  f"breakaway is several times the wrist's, so ranking by torque "
+                  f"points at j0/j1/j2 while the joint that cannot move is the "
+                  f"wrist. Arm --dtc-joint-hold-joints on THEM.")
+        big = [j for j in range(min(n, 3)) if held[j] > 1.0]
+        if big:
+            print("     " + ", ".join(f"j{j}" for j in big) +
+                  f" hold more; --dtc-stiction-max-nm must exceed "
+                  f"{max(held[j] for j in big):.2f} to deliver anything there, "
+                  f"since its room is (max_nm - |tau_task|).")
 
 
 # Rail-to-rail sign alternation, the one signature a limit cycle has and a
