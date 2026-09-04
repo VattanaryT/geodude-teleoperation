@@ -1933,6 +1933,17 @@ class DirectTorqueBackend:
             pass
         bits.append(f"stiction_nm={self._stiction_nm:g}")
         bits.append(f"stiction_max_nm={self._stiction_max_nm:g}")
+        # What actually bound, not what was asked for -- direct_torque's bool
+        # path falls back to the viscous/coulomb path without raising, and the
+        # two are not equivalent. Same rule as recording the resolved D rather
+        # than the requested zeta.
+        try:
+            from geodude_teleoperation import direct_torque as _dt
+            if _dt.DTC_BOUND_FRICTION_COMP is not None:
+                bits.append(f"fc={int(_dt.DTC_BOUND_FRICTION_COMP)}")
+                bits.append("bind=" + _dt.DTC_BOUND_SIGNATURE.split("(")[0])
+        except Exception:
+            pass
         if self._gain_note_extra:
             bits.append(self._gain_note_extra)
         return "  ".join(bits)

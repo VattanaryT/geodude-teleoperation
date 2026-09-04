@@ -275,6 +275,16 @@ def install_dtc_latch_control_script(
 
 
 _DTC_SIGNATURE_LOGGED = False
+# Which directTorque binding actually took, and whether friction compensation
+# actually reached the robot. Module-scope so the dtc log header can record it:
+# a startup line in scrollback is not evidence anyone can go back to, and the
+# fallback here is SILENT. The bool path sets input int register 1, which the
+# on-robot latch reads into dtc_friction_comp; the scale path does not. Joint
+# breakaway on a UR5e is several N.m -- comparable to the whole command at the
+# velocities this loop works at -- so which path bound decides whether the arm
+# moves at all.
+DTC_BOUND_SIGNATURE = ""
+DTC_BOUND_FRICTION_COMP = None
 
 
 def _log_dtc_signature(signature: str, friction_comp: bool) -> None:
@@ -286,7 +296,9 @@ def _log_dtc_signature(signature: str, friction_comp: bool) -> None:
     a UR5e is several N.m, comparable to the whole command at small commanded
     velocities, so "which path bound" decides whether the arm moves at all.
     """
-    global _DTC_SIGNATURE_LOGGED
+    global _DTC_SIGNATURE_LOGGED, DTC_BOUND_SIGNATURE, DTC_BOUND_FRICTION_COMP
+    DTC_BOUND_SIGNATURE = signature
+    DTC_BOUND_FRICTION_COMP = bool(friction_comp)
     if _DTC_SIGNATURE_LOGGED:
         return
     _DTC_SIGNATURE_LOGGED = True
