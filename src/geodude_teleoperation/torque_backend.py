@@ -1937,6 +1937,12 @@ class DirectTorqueBackend:
         # path falls back to the viscous/coulomb path without raising, and the
         # two are not equivalent. Same rule as recording the resolved D rather
         # than the requested zeta.
+        # fc_req is unconditional because the header is written at log-open,
+        # before the first directTorque call has bound anything -- so keying the
+        # whole record on the bound value emitted nothing at all, which is how
+        # dtc_20260904_124012.csv came back with neither field. bind= fills in
+        # on a re-open or a later run; the console still prints it once.
+        bits.append(f"fc_req={int(self._friction_comp)}")
         try:
             from geodude_teleoperation import direct_torque as _dt
             if _dt.DTC_BOUND_FRICTION_COMP is not None:
