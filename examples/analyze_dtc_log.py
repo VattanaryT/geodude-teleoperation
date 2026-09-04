@@ -15,6 +15,7 @@ import numpy as np
 # Kept in step with torque_backend by hand: this script must run without
 # gafropy (and therefore without importing the package) on a log-only box.
 LAMBDA_MIN_ANG_KGM2 = 0.02
+LAMBDA_MAX_LIN_KG = 15.0
 
 
 def newest():
@@ -335,23 +336,38 @@ def leverage_section(rows, live, W, n):
     if "lev" not in rows[0]:
         return
     lev = np.array([float(r["lev"]) if r["lev"] else np.nan for r in rows])
-    lam = np.array([float(r["lam_lin"]) if r.get("lam_lin") else np.nan
+    lam = np.array([float(r["lam_dir"]) if r.get("lam_dir") else np.nan
                     for r in rows])
+    hi = np.array([float(r["lam_hi"]) if r.get("lam_hi") else np.nan
+                   for r in rows])
     wl = np.linalg.norm(W[:, 3:], axis=1)
     # Only ticks with a real linear command: below that the direction is noise.
     m = live & np.isfinite(lev) & (wl > 5.0)
     if m.sum() < 50:
         return
-    lo, hi = q(lev[m], 5), q(lev[m], 95)
+    lev_lo, lev_hi = q(lev[m], 5), q(lev[m], 95)
     print(f"\n  effective moment arm |J_lin.T u| m   median {q(lev[m],50):.3f}"
-          f"  p5 {lo:.3f}  p95 {hi:.3f}   ({m.sum()} ticks over 5 N)")
+          f"  p5 {lev_lo:.3f}  p95 {lev_hi:.3f}   ({m.sum()} ticks over 5 N)")
     if np.isfinite(lam).any():
         lm = lam[m & np.isfinite(lam)]
         if lm.size:
-            print(f"  Lambda linear min eig kg           median "
-                  f"{np.median(lm):.2f}  p5 {q(lm,5):.2f}  p95 {q(lm,95):.2f}")
-    if lo > 1e-6 and hi / lo > 2.0:
-        print(f"     {hi/lo:.1f}x spread: the same joint friction costs that "
+            print(f"  Lambda along that direction kg     median "
+                  f"{np.median(lm):.2f}  p5 {q(lm,5):.2f}  p95 {q(lm,95):.2f}"
+                  f"   (effective stiffness = this * K_lin)")
+    if np.isfinite(hi).any():
+        hm = hi[m & np.isfinite(hi)]
+        if hm.size:
+            over = float((hm > LAMBDA_MAX_LIN_KG - 1e-6).mean())
+            print(f"  Lambda linear max eig kg (pre-clamp) median "
+                  f"{np.median(hm):.2f}  p95 {q(hm,95):.2f}   ceiling "
+                  f"{LAMBDA_MAX_LIN_KG:g} bound on {over:.1%}")
+            if over > 0.2:
+                print("     Lambda ~ m/sigma^2, so it is LARGE exactly along a "
+                      "low-leverage direction -- it is the term that would "
+                      "compensate a bad moment arm, and the ceiling is what "
+                      "stops it. Raising LAMBDA_MAX_LIN_KG is the direct test.")
+    if lev_lo > 1e-6 and lev_hi / lev_lo > 2.0:
+        print(f"     {lev_hi/lev_lo:.1f}x spread: the same joint friction costs that "
               f"many times more error in the p5 direction than the p95 one. "
               f"A dead zone in one direction only is this, not a gain.")
     # What was the arm actually holding where it stalled?

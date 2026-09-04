@@ -417,6 +417,27 @@ def _clamp_spd(ang, ang_lo, ang_hi, lin, lin_lo, lin_hi, full):
     return out
 
 
+def _lambda_along(lin_pre, wrench):
+    """Pre-clamp apparent mass ``u.T Lambda_lin u`` along the commanded direction.
+
+    The direction-resolved partner to ``_leverage_m``. Effective task stiffness
+    is ``lam_dir * K``, so this and ``lev`` are the two things that decide
+    whether a push breaks away, and both are properties of the pose rather than
+    of any gain.
+
+    Pre-clamp on purpose: the whole question is whether LAMBDA_MAX_LIN_KG is
+    binding, and a post-clamp reading cannot answer it.
+    """
+    if lin_pre is None:
+        return float("nan")
+    w = np.asarray(wrench, dtype=float).reshape(-1)[3:6]
+    n = float(np.linalg.norm(w))
+    if n < 1e-9:
+        return float("nan")
+    u = w / n
+    return float(u @ np.asarray(lin_pre, dtype=float) @ u)
+
+
 def _leverage_m(jacobian, wrench):
     """Effective moment arm, in metres, along the commanded linear direction.
 
@@ -626,6 +647,7 @@ class DirectTorqueBackend:
         hold_at_tick: bool = True,
         friction_comp: bool = True,
         use_lambda: bool = False,
+        lambda_max_lin_kg: float = LAMBDA_MAX_LIN_KG,
         safety_mode_fn: Callable[[], Any] | None = None,
         stale_after_s: float = DEFAULT_STALE_AFTER_S,
         stale_tau_s: float | None = None,
@@ -699,12 +721,32 @@ class DirectTorqueBackend:
         # Opt-in because it changes what K means (N/m -> 1/s^2) and nothing
         # here can detect a gain left over from the un-shaped law.
         self._use_lambda = bool(use_lambda)
+        # The linear ceiling is an instance value so it can be swept without a
+        # code edit. It is the term that would compensate a low-leverage
+        # direction (Lambda ~ m/sigma^2, so it is large exactly there), and at
+        # the pose of dtc_20260904_105747.csv the pre-clamp eigenvalues are
+        # 3.7 / 5.1 / 42.2 kg -- so 15.0 binds by ~3x in the stuck direction
+        # and is inert everywhere else. It is still a real bound: Lambda
+        # multiplies the commanded force, so raising it raises the force
+        # ceiling by the same factor. See LAMBDA_MAX_LIN_KG.
+        self._lambda_max_lin_kg = float(lambda_max_lin_kg)
         self._n_lambda_reject = 0
         self._lambda_logged = False
         self._last_lambda_alpha = 1.0
         self._n_lambda_ang_floor = 0
         self._last_lambda_ang_min = float("nan")
-        self._last_lambda_lin_min = float("nan")
+        # Lambda's linear block BEFORE the clamp, kept whole so the row writer
+        # can project it onto the direction actually being pushed. The largest
+        # eigenvalue is the one that matters here: Lambda ~ m/sigma^2, so it is
+        # LARGE exactly along a low-leverage direction -- which means Lambda is
+        # the thing that would compensate a bad moment arm, and
+        # LAMBDA_MAX_LIN_KG is what stops it. Computed from a UR5e DH model at
+        # the pose of dtc_20260904_105747.csv the pre-clamp eigenvalues are
+        # 3.7 / 5.1 / 42.2 kg against a 15 kg ceiling, so the clamp binds by
+        # ~3x in the stuck direction and nowhere else.
+        self._last_lambda_lin_pre = None
+        self._last_lambda_dir_kg = float("nan")
+        self._last_lambda_lin_hi = float("nan")
         # Effective moment arm |J_lin.T u| for the unit direction the linear
         # wrench is currently pointing: how many N.m of joint torque one N of
         # TCP force buys. Measured 0.195 m along body x and 0.82 m along z on
@@ -1327,12 +1369,14 @@ class DirectTorqueBackend:
         # the roll starvation is somewhere else.
         ang_eig = float(np.linalg.eigvalsh(0.5 * (lam[:3, :3] + lam[:3, :3].T))[0])
         self._last_lambda_ang_min = ang_eig
-        self._last_lambda_lin_min = float(
-            np.linalg.eigvalsh(0.5 * (lam[3:, 3:] + lam[3:, 3:].T))[0])
+        lin_pre = 0.5 * (lam[3:, 3:] + lam[3:, 3:].T)
+        self._last_lambda_lin_pre = lin_pre
+        self._last_lambda_lin_hi = float(np.linalg.eigvalsh(lin_pre)[-1])
         if ang_eig < LAMBDA_MIN_ANG_KGM2:
             self._n_lambda_ang_floor += 1
         lam = _clamp_spd(lam[:3, :3], LAMBDA_MIN_ANG_KGM2, LAMBDA_MAX_ANG_KGM2,
-                         lam[3:, 3:], LAMBDA_MIN_LIN_KG, LAMBDA_MAX_LIN_KG, lam)
+                         lam[3:, 3:], LAMBDA_MIN_LIN_KG,
+                         self._lambda_max_lin_kg, lam)
 
         # Fade to identity near a singularity. alpha=1 is fully shaped.
         span = LAMBDA_SIGMA_FULL - LAMBDA_SIGMA_NONE
@@ -1538,6 +1582,7 @@ class DirectTorqueBackend:
                 f"drives {self._n}")
         self._last_wrench = wrench.copy()
         self._last_leverage_m = _leverage_m(jacobian, wrench)
+        self._last_lambda_dir_kg = _lambda_along(self._last_lambda_lin_pre, wrench)
         tau_max = self._law.tau_max
         tau = jacobian.T @ wrench
         # Added *before* the clip, so the hold is bounded by the same tau_max as
@@ -1825,7 +1870,7 @@ class DirectTorqueBackend:
         # deadband is tau_friction / (lev * Lambda * K), so these are the two
         # denominators -- without them a stuck run and a well-conditioned one
         # look identical in every other column.
-        cols += ["lam_ang", "lam_lin", "lev"]
+        cols += ["lam_ang", "lam_dir", "lam_hi", "lev"]
         self._log_fh.write(",".join(cols) + "\n")
         self._log_t0 = None
         print(f"dtc log: {self._log_path}", flush=True)
@@ -1970,7 +2015,8 @@ class DirectTorqueBackend:
         fields += [f"{v:.6f}" for v in err_lin]
         fields += ["" if not np.isfinite(n_deg) else f"{n_deg:.2f}", str(act)]
         for v, fmt in ((self._last_lambda_ang_min, "%.6f"),
-                       (self._last_lambda_lin_min, "%.4f"),
+                       (self._last_lambda_dir_kg, "%.3f"),
+                       (self._last_lambda_lin_hi, "%.3f"),
                        (self._last_leverage_m, "%.4f")):
             fields.append("" if not np.isfinite(v) else fmt % v)
         try:

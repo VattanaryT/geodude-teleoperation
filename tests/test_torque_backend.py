@@ -1067,8 +1067,8 @@ def test_the_log_records_the_tracking_error_and_field_conformity(tmp_path):
     # eigenvalue per blade, and the effective moment arm along the commanded
     # linear direction. The deadband is tau_friction / (lev * Lambda * K), so a
     # stuck run and a well-conditioned one are indistinguishable without them.
-    assert header[-11:] == ["erx", "ery", "erz", "ex", "ey", "ez", "n_deg",
-                            "act", "lam_ang", "lam_lin", "lev"]
+    assert header[-12:] == ["erx", "ery", "erz", "ex", "ey", "ez", "n_deg",
+                            "act", "lam_ang", "lam_dir", "lam_hi", "lev"]
     got = dict(zip(header, row))
     assert [float(got[k]) for k in ("erx", "ery", "erz")] == pytest.approx(
         [0.01, -0.02, 0.03])

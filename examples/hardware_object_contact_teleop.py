@@ -164,6 +164,7 @@ from geodude_teleoperation.tcp_force import (
 )
 from geodude_teleoperation.direct_torque import print_dtc_rate_verification
 from geodude_teleoperation.torque_backend import (
+    LAMBDA_MAX_LIN_KG,
     DEFAULT_DTC_HZ,
     DEFAULT_I_MAX,
     DEFAULT_JOINT_HOLD_KD,
@@ -1138,14 +1139,31 @@ def build_arg_parser():
         "--dtc-damping-ratio-ang", type=float, default=None, metavar="ZETA",
         help="--dtc-law wrench: ANGULAR damping as D = 2*sqrt(K_ang)*zeta "
              f"(default {WRENCH_ZETA_ANG}, raised from 0.10 2026-08-31 -- it "
-             "cut the rig's ~15 Hz structural-mode ring from 19.4% to "
-             "2.5-3.3% of q-dot power with no regression, see WRENCH_ZETA_ANG). "
+             # argparse %-expands help strings, so a literal percent must be
+             # doubled or --help dies with "unsupported format character".
+             "cut the rig's ~15 Hz structural-mode ring from 19.4%% to "
+             "2.5-3.3%% of q-dot power with no regression, see WRENCH_ZETA_ANG). "
              "Kept separate from "
              "--dtc-damping-ratio even under --dtc-lambda, where Lambda does "
              "remove the apparent-M difference the split was for: the wrist is "
              "the joint that rails first when the damper turns negative at the "
-             "rig's 24.5 Hz mode (j4 on its cap for 18.9% of ticks at 0.7), so "
+             "rig's 24.5 Hz mode (j4 on its cap for 18.9%% of ticks at 0.7), so "
              "this half keeps its own, smaller, measured-stable number")
+    parser.add_argument(
+        "--dtc-lambda-max-lin", type=float, default=LAMBDA_MAX_LIN_KG,
+        metavar="KG",
+        help="--dtc-lambda only: ceiling on Lambda's linear eigenvalues, kg "
+             f"(default {LAMBDA_MAX_LIN_KG:g}). Lambda is roughly m/sigma^2, "
+             "so it is LARGE exactly along a direction the arm has poor "
+             "leverage in -- which makes it the term that compensates a bad "
+             "moment arm, and this ceiling the thing that stops it. At the "
+             "pose of dtc_20260904_105747.csv the pre-clamp eigenvalues are "
+             "3.7 / 5.1 / 42.2 kg, so 15 binds by ~3x in the direction that "
+             "dead-zoned and is inert in the other two. Raise it to test that. "
+             "It is still a real bound: Lambda multiplies the commanded force "
+             "directly, so the force ceiling rises with it -- the 200 kg "
+             "version of this clamp is what put the arm into an uncommanded "
+             "high-speed motion.")
     parser.add_argument(
         "--dtc-damping-max", type=float, default=None,
         metavar="PER_S",
@@ -1845,6 +1863,7 @@ def main():
             law_kind=args.dtc_law,
             friction_comp=args.dtc_friction_comp,
             use_lambda=args.dtc_lambda,
+            lambda_max_lin_kg=args.dtc_lambda_max_lin,
             hz=args.dtc_hz, hold_zero=args.dtc_hold_zero,
             hold_at_tick=args.dtc_hold_at_tick,
             joint_hold_kp=args.dtc_joint_hold_kp,
