@@ -1730,11 +1730,33 @@ def configure_dtc_compliance_hold(args) -> None:
         raise SystemExit(
             "--dtc-compliance-hold and --dtc-hold-zero are mutually exclusive")
     if not args.dtc_lambda:
-        raise SystemExit(
-            "--dtc-compliance-hold requires --dtc-lambda (inertia shaping). "
-            "Without Lambda the same task wrench maps unevenly across joints "
-            "(wrist moves, shoulder takes force); see analyze_dtc_mobility.py.")
-    args.dtc_lambda = True
+        # The bench push test is the one place --no-dtc-lambda has to be
+        # reachable, because the guard's premise is exactly what it exists to
+        # test. diffusion_policy's rtde_interpolation_controller.py runs this
+        # arm with a plain 1000 N/m / 50 N.m/rad task spring, NO Lambda, and
+        # shows no dead band -- while every gain this loop delivers is stiffer
+        # (1928 N/m and 138 N.m/rad measured at rest over 18 loaded rests). So
+        # "without Lambda the wrench maps unevenly" is a claim with a
+        # counterexample, and refusing the A/B leaves the dead band unbisected.
+        #
+        # Only under --dtc-push-test: no field, no align, no device, the target
+        # snapped to the live pose, and an operator standing at the arm. Under
+        # --dtc-compliance-hold on live teleop it stays a hard error, because
+        # there the field commands orientation continuously and an uneven map
+        # is a real hazard rather than a bench observation.
+        if not dtc_push_test_mode(args):
+            raise SystemExit(
+                "--dtc-compliance-hold requires --dtc-lambda (inertia shaping). "
+                "Without Lambda the same task wrench maps unevenly across joints "
+                "(wrist moves, shoulder takes force); see analyze_dtc_mobility.py."
+                "  --dtc-push-test allows it, for the reference-controller A/B.")
+        print("dtc: --no-dtc-lambda under --dtc-push-test -- inertia shaping OFF. "
+              "K and D are now N/m and N.s/m (and N.m/rad, N.m.s/rad), NOT 1/s^2 "
+              "and 1/s, so --dtc-fn-* do not apply and --dtc-damping-max does "
+              "not cap anything. Set --dtc-k-lin/--dtc-k-ang explicitly.",
+              flush=True)
+    else:
+        args.dtc_lambda = True
     # fn_ang defaults to fn_lin under Lambda via resolve_wrench_fn_ang when unset.
     # Joint-space hold adds extra stiffness on selected joints (default wrist 3)
     # on top of the task wrench -- it defeats an equal-compliance push test.

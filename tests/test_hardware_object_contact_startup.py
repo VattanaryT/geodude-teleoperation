@@ -765,6 +765,44 @@ class WrenchLawWiringTest(unittest.TestCase):
         self.assertAlmostEqual(args.dtc_damping_ratio_ang,
                                mod.COMPLIANCE_HOLD_ZETA_ANG)
 
+    def test_push_test_allows_no_lambda_for_the_reference_ab(self):
+        """The bench push test is the ONE place --no-dtc-lambda is reachable.
+
+        The guard's premise -- "without Lambda the wrench maps unevenly across
+        joints" -- has a counterexample: diffusion_policy's
+        rtde_interpolation_controller.py drives this arm with a plain
+        1000 N/m / 50 N.m/rad task spring and no Lambda and shows no dead band,
+        while this loop delivers 1928 N/m and 138 N.m/rad at rest and does.
+        Refusing the A/B leaves that unbisected.
+        """
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args(
+            ["--dtc-push-test", "--no-dtc-lambda",
+             "--dtc-k-lin", "1000", "--dtc-k-ang", "50",
+             "--dtc-damping-ratio", "1.0", "--dtc-damping-ratio-ang", "1.0"])
+        mod.configure_dtc_compliance_hold(args)
+        self.assertFalse(args.dtc_lambda)
+        kw = mod._wrench_law_kwargs(args)
+        self.assertFalse(kw["use_lambda"])
+        self.assertEqual(kw["k_lin"], 1000.0)
+        self.assertEqual(kw["k_ang"], 50.0)
+        # Without Lambda D is in physical units and --dtc-damping-max must not
+        # touch it, or the reproduction is not one. zeta 1.0 passes through.
+        self.assertAlmostEqual(kw["damping_ratio"], 1.0)
+        self.assertAlmostEqual(kw["damping_ratio_ang"], 1.0)
+
+    def test_compliance_hold_still_refuses_no_lambda_on_teleop(self):
+        """The exemption is bench-only and must not widen.
+
+        Under live teleop the field commands orientation continuously, so an
+        uneven joint map is a hazard rather than a bench observation.
+        """
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args(
+            ["--dtc-compliance-hold", "--no-dtc-lambda"])
+        with self.assertRaises(SystemExit):
+            mod.configure_dtc_compliance_hold(args)
+
     def test_compliance_hold_alone_keeps_startup_align(self):
         """Only the bench push test skips align; teleop compliance hold needs it."""
         mod = _load_example()
