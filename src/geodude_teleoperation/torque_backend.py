@@ -1943,6 +1943,18 @@ class DirectTorqueBackend:
         # dtc_20260904_124012.csv came back with neither field. bind= fills in
         # on a re-open or a later run; the console still prints it once.
         bits.append(f"fc_req={int(self._friction_comp)}")
+        # Whether the payload was overridden, or left to whatever the pendant
+        # installation happens to hold. Gravity is compensated on-controller
+        # from this number, so an error in it is a residual torque at every
+        # pose -- which the arm still HOLDS (friction absorbs it, so
+        # --dtc-hold-zero looks perfect) while every settle is biased by it.
+        # That biases the friction band off-centre: the spring returns to the
+        # target from one side and stops short by twice the bias from the
+        # other, which is a one-sided dead band and no gain can remove it.
+        # The reference OSC controller calls setPayload(0.98 kg, cog
+        # [0.017, -0.007, 0.058]) from code every session; every run in this
+        # repo so far has used "pendant installation (not overridden)".
+        bits.append("payload=" + self._payload_note.replace(" ", "_"))
         try:
             from geodude_teleoperation import direct_torque as _dt
             if _dt.DTC_BOUND_FRICTION_COMP is not None:
