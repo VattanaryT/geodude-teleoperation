@@ -835,6 +835,74 @@ def test_hold_at_tick_can_be_turned_off_to_reproduce_the_old_behavior():
     assert backend._maybe_hold(ctrl, np.zeros(7)) is False
 
 
+def test_the_release_snap_fires_once_and_then_leaves_the_spring_alone():
+    """The per-tick snap has the target chase the arm, so a push meets nothing.
+
+    ``hold_on_release`` is the whole idle stiffness: snap on the 1->0 edge, then
+    freeze, so a push on a released arm builds real pose error. Under the
+    per-tick policy the same push is erased at the control rate and the wrench
+    is identically zero -- which is what a hand push on a released arm was
+    actually measuring in every teleop-mode comparison against
+    rtde_interpolation_controller.py.
+    """
+    backend, _s, _h = _backend(
+        law_kind="wrench", hold_at_tick=False, hold_on_release=True)
+    ctrl = FakeHoldController(input_active=True)
+    # Driving: the command source owns the target.
+    assert backend._maybe_hold(ctrl, np.zeros(7)) is False
+    # Release: exactly one snap, onto the pose at the moment of release.
+    ctrl.input_active = False
+    q_rel = np.arange(7.0)
+    assert backend._maybe_hold(ctrl, q_rel) is True
+    # Now the operator pushes the arm somewhere else. The target must NOT move.
+    for _ in range(5):
+        assert backend._maybe_hold(ctrl, q_rel + 0.01) is False
+    assert len(ctrl.held) == 1
+    assert np.allclose(ctrl.held[0], q_rel)
+
+
+def test_the_release_snap_re_arms_on_the_next_drive():
+    backend, _s, _h = _backend(
+        law_kind="wrench", hold_at_tick=False, hold_on_release=True)
+    ctrl = FakeHoldController()
+    assert backend._maybe_hold(ctrl, np.zeros(7)) is True
+    ctrl.input_active = True
+    assert backend._maybe_hold(ctrl, np.zeros(7)) is False
+    ctrl.input_active = False
+    assert backend._maybe_hold(ctrl, np.ones(7)) is True
+    assert len(ctrl.held) == 2
+
+
+def test_a_reset_re_arms_the_release_snap():
+    """A pendant stop or a rail-osc float may leave the arm somewhere else.
+
+    Resuming into the pre-stop target would lunge back to it -- the same rule as
+    law.reset() and the joint hold.
+    """
+    backend, _s, _h = _backend(
+        law_kind="wrench", hold_at_tick=False, hold_on_release=True)
+    ctrl = FakeHoldController()
+    assert backend._maybe_hold(ctrl, np.zeros(7)) is True
+    assert backend._maybe_hold(ctrl, np.zeros(7)) is False
+    backend._hold_release_reset()
+    assert backend._maybe_hold(ctrl, np.ones(7)) is True
+    assert np.allclose(ctrl.held[-1], np.ones(7))
+
+
+def test_the_release_snap_is_wrench_law_only():
+    backend, _s, _h = _backend(
+        law_kind="velocity", hold_at_tick=False, hold_on_release=True)
+    ctrl = FakeHoldController()
+    assert backend._maybe_hold(ctrl, np.zeros(7)) is False
+
+
+def test_both_policies_off_freezes_the_target_for_the_push_test():
+    backend, _s, _h = _backend(
+        law_kind="wrench", hold_at_tick=False, hold_on_release=False)
+    ctrl = FakeHoldController()
+    assert backend._maybe_hold(ctrl, np.zeros(7)) is False
+
+
 def test_a_controller_without_the_hook_is_not_an_error():
     backend, _s, _h = _backend(law_kind="wrench")
     ctrl = FakeHoldController(has_hold=False)

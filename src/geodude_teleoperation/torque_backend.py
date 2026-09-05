@@ -645,6 +645,7 @@ class DirectTorqueBackend:
         hz: float = DEFAULT_DTC_HZ,
         hold_zero: bool = False,
         hold_at_tick: bool = True,
+        hold_on_release: bool = False,
         friction_comp: bool = True,
         use_lambda: bool = False,
         lambda_max_lin_kg: float = LAMBDA_MAX_LIN_KG,
@@ -697,6 +698,10 @@ class DirectTorqueBackend:
         # worth 75 N.s/m of delayed damping nobody had counted, on top of the
         # 109.5 the damping ratio asks for. False restores the old behavior.
         self._hold_at_tick = bool(hold_at_tick)
+        self._hold_on_release = bool(hold_on_release)
+        # Latched by _maybe_hold once the release snap has been taken; cleared
+        # by the next active tick and by _hold_release_reset().
+        self._held_after_release = False
         self._friction_comp = bool(friction_comp)
         # Wrench law only. Joint-space PD on the joints tau = J.T @ W cannot
         # reach -- see DEFAULT_JOINT_HOLD_KP. The joint list is resolved after
@@ -1136,6 +1141,7 @@ class DirectTorqueBackend:
         self._cmd_fail_logged = False
         self._law.reset()
         self._joint_hold_reset()
+        self._hold_release_reset()
         # Enter torque mode already holding zero, not whatever tau a previous
         # session left latched on the robot.
         streamer.set_tau(np.zeros(self._n))
@@ -1175,6 +1181,7 @@ class DirectTorqueBackend:
                 pass
         self._law.reset()
         self._joint_hold_reset()
+        self._hold_release_reset()
 
         control, self._control = self._control, None
         receive, self._receive = self._receive, None
@@ -1265,7 +1272,7 @@ class DirectTorqueBackend:
         return controller, robot_state, objective_state, tss
 
     def _maybe_hold(self, controller, q_ctrl) -> bool:
-        """Re-snap the idle pose target onto the live q, at the control rate.
+        """Re-snap the idle pose target onto the live q.
 
         Called from ``_control_states`` *before* the objective state is built,
         or the tick's error is still measured against the previous target.
@@ -1275,16 +1282,58 @@ class DirectTorqueBackend:
         the velocity law has its own idle hold latch inside
         ``JointVelocityTorqueLaw``, and two things holding one axis is the fight
         that produces drift.
+
+        **Two policies, and the difference is the whole idle stiffness.**
+
+        - ``hold_at_tick`` (the historical default) snaps *every* idle tick. It
+          makes "let go" mean "stop" -- the field-follow carrot can be up to
+          ``--max-lead-m`` ahead of the arm when the stick is released, and
+          leaving it there has the arm crawl on after the operator stopped
+          asking -- and it contributes ``K*T/2`` of delayed damping because the
+          target becomes ``pose(t - T)``. But it also means the target *chases
+          the arm*: push the released arm and the target follows the push, so
+          the pose error is 0, the wrench is 0, and the arm stays where it was
+          put. That is not a friction dead band, it is **zero stiffness**, and
+          it is why a push comparison against
+          ``rtde_interpolation_controller.py`` was never comparing two spring
+          laws. It does not reach ``--dtc-push-test`` (which sets
+          ``hold_at_tick`` False and freezes the target at handoff), which is
+          why the bench A/B measured a real 4.4 mm band while live teleop feels
+          like a far larger one.
+        - ``hold_on_release`` snaps **once**, on the ``input_active`` 1->0 edge,
+          and then freezes. Same "let go = stop" (the carrot is discarded at the
+          moment of release), but the spring survives, so a push builds real
+          error and returns. Gives up the delayed-damping term, so
+          ``--dtc-damping-ratio`` may want a second look.
+
+        The snap is re-armed by ``_hold_release_reset`` alongside every
+        ``law.reset()``: after a pendant stop or a rail-oscillation float the
+        arm may have been moved, and holding the pre-stop target would resume
+        with a lunge back to it -- the same rule as everything else here.
         """
-        if not (self._hold_at_tick and self._law_kind == "wrench"):
+        if self._law_kind != "wrench":
+            return False
+        if not (self._hold_at_tick or self._hold_on_release):
             return False
         if getattr(controller, "input_active", False):
+            self._held_after_release = False
+            return False
+        if self._hold_on_release and self._held_after_release:
             return False
         hold = getattr(controller, "hold_pose_at", None)
         if hold is None:
             return False
         hold(q_ctrl)
+        self._held_after_release = True
         return True
+
+    def _hold_release_reset(self) -> None:
+        """Re-arm the release snap. Paired with every ``law.reset()``.
+
+        Inert unless ``hold_on_release`` is set; under ``hold_at_tick`` the snap
+        runs every idle tick anyway.
+        """
+        self._held_after_release = False
 
     def set_command_trace(self, fn):
         """Optional ``callback(tau, measured=, spring=, stick=, wrench=)`` per tick.
@@ -1705,6 +1754,7 @@ class DirectTorqueBackend:
             # Zero *and* forget the latch -- see the class docstring.
             self._law.reset()
             self._joint_hold_reset()
+            self._hold_release_reset()
             self._rail_osc.reset()
             # Same rule for the wrench law's re-arm blend: it opens from the
             # last wrench, and a pre-stop wrench is exactly what must not be
@@ -1766,6 +1816,7 @@ class DirectTorqueBackend:
                     # does: resuming into a held wrench re-opens the cycle.
                     self._law.reset()
                     self._joint_hold_reset()
+                    self._hold_release_reset()
                     rearm_reset = getattr(
                         self._controller, "reset_wrench_rearm", None)
                     if callable(rearm_reset):
@@ -1931,6 +1982,11 @@ class DirectTorqueBackend:
                 str(int(j)) for j in self._joint_hold_idx))
         except Exception:
             pass
+        # Which idle-hold policy ran. These are the difference between "the
+        # target is frozen and a push meets the spring" and "the target chases
+        # the arm and a push meets nothing", which no other field records.
+        bits.append(f"hold_at_tick={int(self._hold_at_tick)}")
+        bits.append(f"hold_on_release={int(self._hold_on_release)}")
         bits.append(f"stiction_nm={self._stiction_nm:g}")
         bits.append(f"stiction_max_nm={self._stiction_max_nm:g}")
         # What actually bound, not what was asked for -- direct_torque's bool

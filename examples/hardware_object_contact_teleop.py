@@ -829,6 +829,11 @@ def follow_rebase_on_idle(args, *, on_dtc) -> bool:
     happened -- not "the run was launched with ``--contact-backend dtc``", which
     is still true throughout the speedJ startup align.
     """
+    if bool(getattr(args, "dtc_hold_on_release", False)) and bool(on_dtc):
+        # The release snap owns the idle target now, and it must be the *only*
+        # thing writing it: field-follow's quiet branch re-bases at the main
+        # loop's 50 Hz, which would re-introduce the chase this flag removes.
+        return False
     return bool(args.dtc_hold_at_tick) or not bool(on_dtc)
 
 
@@ -1210,6 +1215,16 @@ def build_arg_parser():
              "rather than at --follow-hz. The snap period is a control gain -- "
              "target = pose(t-T) adds K*T/2 of delayed damping, 75 N.s/m at "
              "20 Hz -- so this off restores the pre-fix behavior")
+    parser.add_argument(
+        "--dtc-hold-on-release", action="store_true",
+        help="--dtc-law wrench: snap the idle pose target ONCE on the stick's "
+             "1->0 edge instead of every idle tick. The per-tick snap makes the "
+             "target chase the arm, so a push on a released arm builds no pose "
+             "error and meets no spring at all -- zero idle stiffness, not a "
+             "friction dead band. This keeps 'let go = stop' (the carrot is "
+             "discarded at release) while leaving the spring live, and also "
+             "stops field-follow re-basing on idle. Gives up the K*T/2 of "
+             "delayed damping the per-tick snap contributed")
     parser.add_argument(
         "--dtc-err-clip-lin", type=float, default=0.05, metavar="M",
         help="--dtc-law wrench: pose error clip (m) before it becomes force. "
@@ -1773,6 +1788,7 @@ def configure_dtc_compliance_hold(args) -> None:
     # target must stay at the handoff pose instead, or releasing the arm leaves
     # error ~= 0 and |W| ~= 0 with no return motion.
     args.dtc_hold_at_tick = False
+    args.dtc_hold_on_release = False
     if dtc_push_test_mode(args):
         # Hold wherever the arm already is. Align would drive it somewhere
         # first, and its speedJ leg is not what this run is measuring.
@@ -1888,6 +1904,7 @@ def main():
             lambda_max_lin_kg=args.dtc_lambda_max_lin,
             hz=args.dtc_hz, hold_zero=args.dtc_hold_zero,
             hold_at_tick=args.dtc_hold_at_tick,
+            hold_on_release=args.dtc_hold_on_release,
             joint_hold_kp=args.dtc_joint_hold_kp,
             joint_hold_kd=args.dtc_joint_hold_kd,
             joint_hold_joints=args.dtc_joint_hold_joints,
