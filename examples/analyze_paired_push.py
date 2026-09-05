@@ -70,6 +70,34 @@ def load(path):
     return head, out
 
 
+# log_push_test.py (diffusion_policy) names its columns after the joints and
+# logs degrees; this file's own logs use q0..q5 in radians. Same experiment,
+# same table -- map one onto the other rather than growing a second analyzer.
+REF_JOINT_COLS = {f"q_{j}_deg": f"q{i}" for i, j in enumerate(JOINTS)}
+REF_JOINT_COLS.update({f"qd_{j}": f"qd{i}" for i, j in enumerate(JOINTS)})
+REF_JOINT_COLS.update({f"tau_{j}": f"tau{i}" for i, j in enumerate(JOINTS)})
+REF_POSE_COLS = {"des_x": "tgt_x", "des_y": "tgt_y", "des_z": "tgt_z",
+                 "cur_x": "ee_x", "cur_y": "ee_y", "cur_z": "ee_z"}
+
+
+def adapt_reference(d):
+    """Rename a ``log_push_test.py`` CSV into this file's column names.
+
+    Returns it unchanged when the log is already one of ours.
+    """
+    if "q_wrist_1_deg" not in d:
+        return d
+    out = dict(d)
+    for src, dst in REF_JOINT_COLS.items():
+        if src in d:
+            out[dst] = np.radians(d[src]) if src.startswith("q_") else d[src]
+    for src, dst in REF_POSE_COLS.items():
+        if src in d:
+            out[dst] = d[src]
+    print("(reference-controller log: columns mapped to the same table)")
+    return out
+
+
 def _stack(d, prefix, n=6):
     keys = [f"{prefix}{i}" for i in range(n)]
     if not all(k in d for k in keys):
@@ -108,6 +136,7 @@ def main() -> None:
 
     path = args.path or _newest()
     head, d = load(path)
+    d = adapt_reference(d)
     print(f"=== {os.path.basename(path)} ===")
     for h in head:
         print(h)
