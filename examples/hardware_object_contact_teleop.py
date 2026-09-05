@@ -1788,6 +1788,16 @@ def configure_dtc_compliance_hold(args) -> None:
     # target must stay at the handoff pose instead, or releasing the arm leaves
     # error ~= 0 and |W| ~= 0 with no return motion.
     args.dtc_hold_at_tick = False
+    # Compliance hold is the *stronger* policy: the target never moves after
+    # handoff, so a push always meets the spring. --dtc-hold-on-release would
+    # re-introduce a snap this mode exists to remove. Say so rather than
+    # silently overriding -- this repo has been bitten three times by a cap
+    # that quietly changed a gain and left only scrollback behind.
+    if args.dtc_hold_on_release:
+        print("\033[93mdtc: --dtc-hold-on-release ignored under "
+              "--dtc-compliance-hold -- that mode already freezes the target "
+              "at handoff and never re-snaps, which is strictly stronger.\033[0m",
+              flush=True)
     args.dtc_hold_on_release = False
     if dtc_push_test_mode(args):
         # Hold wherever the arm already is. Align would drive it somewhere
