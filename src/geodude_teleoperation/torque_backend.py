@@ -702,6 +702,14 @@ class DirectTorqueBackend:
         # Latched by _maybe_hold once the release snap has been taken; cleared
         # by the next active tick and by _hold_release_reset().
         self._held_after_release = False
+        # Absolute live/target EE position, base frame, for the log. err* alone
+        # already answers "did the target move" (it grows under a push if the
+        # target held still and stays ~0 if it chased), but only relative to a
+        # target nothing records -- and the reference controller's own log
+        # carries desired and current pose absolutely, so this is what makes the
+        # two CSVs the same experiment.
+        self._last_ee_xyz = np.full(3, np.nan)
+        self._last_tgt_xyz = np.full(3, np.nan)
         self._friction_comp = bool(friction_comp)
         # Wrench law only. Joint-space PD on the joints tau = J.T @ W cannot
         # reach -- see DEFAULT_JOINT_HOLD_KP. The joint list is resolved after
@@ -1267,6 +1275,7 @@ class DirectTorqueBackend:
         robot_state.set_velocity(qd_ctrl)
         task_space = controller.get_task_space()
         self._maybe_hold(controller, q_ctrl)
+        self._note_pose_for_log(controller, q_ctrl)
         tss = task_space.compute_state(q_ctrl, qd_ctrl)
         objective_state = controller.get_objective().compute_state(robot_state, tss)
         return controller, robot_state, objective_state, tss
@@ -1326,6 +1335,27 @@ class DirectTorqueBackend:
         hold(q_ctrl)
         self._held_after_release = True
         return True
+
+    def _note_pose_for_log(self, controller, q_ctrl) -> None:
+        """Live and target EE position for the log, base frame.
+
+        Read *after* ``_maybe_hold`` so the target is the one this tick's error
+        is measured against. Gated on the log being open: it costs an FK and a
+        motor->matrix, which is cheap but pointless when nothing records it.
+        """
+        if self._log_fh is None:
+            return
+        try:
+            ee = controller.get_task_space().compute_ee_motor(
+                np.asarray(q_ctrl, dtype=float))
+            self._last_ee_xyz = np.asarray(
+                ee.to_transformation_matrix(), dtype=float)[:3, 3].copy()
+            tgt = controller.get_objective().get_target()
+            self._last_tgt_xyz = np.asarray(
+                tgt.to_transformation_matrix(), dtype=float)[:3, 3].copy()
+        except Exception:
+            self._last_ee_xyz = np.full(3, np.nan)
+            self._last_tgt_xyz = np.full(3, np.nan)
 
     def _hold_release_reset(self) -> None:
         """Re-arm the release snap. Paired with every ``law.reset()``.
@@ -1922,6 +1952,11 @@ class DirectTorqueBackend:
         # denominators -- without them a stuck run and a well-conditioned one
         # look identical in every other column.
         cols += ["lam_ang", "lam_dir", "lam_hi", "lev"]
+        # Absolute pose, base frame. A push test asks one question -- did the
+        # target stay put while the arm was pushed -- and a relative error
+        # cannot distinguish "the target held and the arm stopped short" from
+        # "the target followed the arm". These two triples can.
+        cols += ["ee_x", "ee_y", "ee_z", "tgt_x", "tgt_y", "tgt_z"]
         self._log_fh.write(",".join(cols) + "\n")
         self._log_t0 = None
         print(f"dtc log: {self._log_path}", flush=True)
@@ -2104,6 +2139,8 @@ class DirectTorqueBackend:
                        (self._last_lambda_lin_hi, "%.3f"),
                        (self._last_leverage_m, "%.4f")):
             fields.append("" if not np.isfinite(v) else fmt % v)
+        for v in list(self._last_ee_xyz) + list(self._last_tgt_xyz):
+            fields.append("" if not np.isfinite(v) else f"{v:.6f}")
         try:
             fh.write(",".join(fields) + "\n")
         except Exception as exc:
