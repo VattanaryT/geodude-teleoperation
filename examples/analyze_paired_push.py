@@ -184,7 +184,53 @@ def main() -> None:
                   f"band' below that is the target chasing the arm, not "
                   f"friction. Check hold_at_tick= in the header.")
 
-    print("\n=== paired: midpoint is BIAS, half-separation is FRICTION ===")
+    # Every settle against the REST pose, which is the settle the target was
+    # snapped onto and therefore the only one with err ~ 0. Pairing consecutive
+    # settles (below) answers "did these two straddle", but the population of
+    # offsets from rest is what says centred-vs-one-sided, and it uses every
+    # push rather than throwing away all but one neighbour.
+    rest = min(range(len(S)), key=lambda i: S[i]["lin"] if np.isfinite(S[i]["lin"])
+               else np.inf)
+    q0 = S[rest]["q"]
+    print(f"\n=== every settle vs the REST pose (settle at t={S[rest]['t']:.1f}s, "
+          f"err {S[rest]['lin']:.2f} mm), deg ===")
+    print(f"{'t_end':>7}   " + " ".join(f"{j[:7]:>8}" for j in JOINTS))
+    D = []
+    for rec in S:
+        if rec is S[rest]:
+            continue
+        d = rec["q"] - q0
+        D.append(d)
+        print(f"{rec['t']:7.1f}   " + " ".join(f"{v:+8.3f}" for v in d))
+    if D:
+        D = np.array(D)
+        print(f"\n{'joint':>13} {'mean':>8} {'min':>8} {'max':>8} {'|max|':>8}"
+              f"   verdict")
+        for i, j in enumerate(JOINTS):
+            col = D[:, i]
+            lo, hi, mean = col.min(), col.max(), col.mean()
+            span = max(abs(lo), abs(hi))
+            if span < 0.15:
+                v = "returns"
+            elif len(D) < 3:
+                # One or two pushes are always "all on one side" -- there was
+                # no chance to be otherwise. Calling that one-sided is how a
+                # single sample becomes a hardware campaign.
+                v = ("only %d push%s: offset %.2f deg, direction unproven"
+                     % (len(D), "" if len(D) == 1 else "es", span))
+            elif lo > 0 or hi < 0:
+                # never crossed the rest pose: the band is offset, not centred
+                v = "ONE-SIDED (never returned past rest)"
+            elif abs(mean) > 0.5 * span:
+                v = "skewed (bias ~ %.2f deg)" % mean
+            else:
+                v = "centred band, half-width %.2f deg" % span
+            print(f"{j:>13} {mean:+8.3f} {lo:+8.3f} {hi:+8.3f} {span:8.3f}   {v}")
+        print("\n  ONE-SIDED means every push left that joint on the same side")
+        print("  of rest -- a bias the spring cannot cross. A centred band is")
+        print("  what every P-D law has: width = tau_friction / (lev*Lambda*K).")
+
+    print("\n=== consecutive pairs: midpoint is BIAS, half-separation is FRICTION ===")
     if len(S) < 2:
         print("  need at least two settles")
         return
