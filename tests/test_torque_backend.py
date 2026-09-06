@@ -1649,3 +1649,30 @@ def test_log_header_records_the_command_line_and_the_joint_space_gains(tmp_path)
     assert head[0].startswith("# argv: ")
     assert "jhold_kp=4" in head[1]
     assert "stiction_nm=" in head[1]
+
+
+def test_float_now_latches_zero_tau_without_tearing_down():
+    """The safe state under direct torque is float; teardown must reach it first.
+
+    Observed on hardware: the wrist swung after Ctrl+C, because the control
+    loop keeps driving at full authority through the whole teardown -- the
+    device, the follow helper, the contact thread and the force socket all
+    close before interface.shutdown() zeroes tau -- toward a carrot the main
+    loop stopped updating the instant it exited.
+    """
+    backend, streamer, _h = _backend(law_kind="wrench")
+    assert backend.hold_zero is False
+    backend._streamer = streamer          # as if start() had opened it
+    backend.float_now()
+    assert backend.hold_zero is True
+    assert streamer.taus and np.allclose(streamer.taus[-1], 0.0)
+
+
+def test_float_now_forgets_the_latches_a_restart_would_reopen_with():
+    backend, _s, _h = _backend(
+        law_kind="wrench", hold_at_tick=False, hold_on_release=True)
+    ctrl = FakeHoldController()
+    assert backend._maybe_hold(ctrl, np.zeros(7)) is True
+    assert backend._maybe_hold(ctrl, np.zeros(7)) is False
+    backend.float_now()
+    assert backend._maybe_hold(ctrl, np.ones(7)) is True

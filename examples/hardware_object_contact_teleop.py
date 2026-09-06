@@ -2583,7 +2583,7 @@ def main():
                 approach_controller=approach_controller,
                 interface=interface,
             )
-            how = (f"press = force, Fd + {args.press_kp:g}*(Fd-Fs) N "
+            how = (f"press = force, Fd + {resolve_press_kp(args):g}*(Fd-Fs) N "
                    f"capped at {contact_controller._press_max_n:.1f}N"
                    if wrench_press
                    else f"PID holds Fd \u22642mm/s")
@@ -2976,6 +2976,19 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        # FIRST, before anything else: tau = 0 is float (gravity is compensated
+        # on-controller), and the control loop keeps driving at full authority
+        # through the whole teardown -- toward a carrot the main loop stopped
+        # updating the instant it exited. Observed on hardware as the wrist
+        # swinging after Ctrl+C.
+        for _b in (interface, dtc_backend):
+            _float = getattr(_b, "float_now", None)
+            if callable(_float):
+                try:
+                    _float()
+                except Exception:
+                    pass
+                break
         if device is not None:
             device.stop()
         if speedj_trace is not None:

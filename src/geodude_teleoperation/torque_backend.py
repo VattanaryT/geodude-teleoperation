@@ -964,6 +964,37 @@ class DirectTorqueBackend:
     def hold_zero(self) -> bool:
         return self._hold_zero
 
+    def float_now(self) -> None:
+        """Latch tau = 0 from the next control tick, without tearing anything down.
+
+        The safe state under direct torque is **float**: gravity is compensated
+        on-controller, so tau = 0 is a passive arm, and every other state is us
+        pushing. Teardown takes a while -- the device, the follow helper
+        process, the contact thread and the force socket all close before
+        ``interface.shutdown()`` finally zeroes tau -- and the control loop goes
+        on driving at full authority through all of it, toward a carrot the
+        main loop stopped updating the moment it exited. Observed on hardware
+        as the wrist swinging after Ctrl+C.
+
+        Called first in the teardown so the arm is passive for the rest of it.
+        ``law.reset()`` goes with it for the same reason a pendant stop resets:
+        the idle latch, the joint hold and the re-arm blend must not be holding
+        a pre-teardown value that a later ``start()`` would open with.
+        """
+        self._hold_zero = True
+        try:
+            self._law.reset()
+            self._joint_hold_reset()
+            self._hold_release_reset()
+        except Exception:
+            pass
+        streamer = self._streamer
+        if streamer is not None:
+            try:
+                streamer.set_tau(np.zeros(self._n))
+            except Exception:
+                pass
+
     @property
     def active(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
