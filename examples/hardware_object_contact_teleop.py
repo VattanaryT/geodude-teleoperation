@@ -1545,6 +1545,27 @@ def build_arg_parser():
              "Deliberately no integral term: an I on a stiction nonlinearity is "
              "a stick-slip amplifier.")
     parser.add_argument(
+        "--press-engage-frac", type=float, default=0.5, metavar="FRAC",
+        help="fraction of --target-force that Fs must reach before contact "
+             "mode hands the surface normal from the pose spring to the force "
+             "loop. Until then the press commands --press-approach-n (0 by "
+             "default) and the spring still owns the normal, so pressing "
+             "button 0 while hovering does NOT start a press -- the operator "
+             "drives the tool into the surface with the spring and the "
+             "hand-off happens on measured force. 0.5 (the default) hands over "
+             "as soon as the tool is touching; 1.0 waits until the target "
+             "force is actually reached, which is what you want if a "
+             "half-seated tool must not switch to tangential-only. Clamped to "
+             "[0, 1] (default %(default)s)")
+    parser.add_argument(
+        "--press-release-frac", type=float, default=0.15, metavar="FRAC",
+        help="fraction of --target-force below which contact mode hands the "
+             "normal back to the pose spring. The gap to --press-engage-frac "
+             "is deliberate hysteresis: Fs noise is ~0.3 N and chattering "
+             "between the two regimes at 200 Hz would be a square wave into "
+             "the surface. Clamped to [0, --press-engage-frac] "
+             "(default %(default)s)")
+    parser.add_argument(
         "--press-kp-hold", type=float, default=DEFAULT_PRESS_KP,
         metavar="N_PER_N",
         help="proportional trim once the tool is actually touching (Fs above "
@@ -2123,6 +2144,8 @@ def main():
             force_tare=args.force_tare,
             press_kp_n_per_n=resolve_press_kp(args),
             press_kp_hold=args.press_kp_hold,
+            press_engage_frac=args.press_engage_frac,
+            press_release_frac=args.press_release_frac,
             press_approach_n=args.press_approach_n,
             press_max_n=resolve_press_max_n(args),
             press_slew_n_s=args.press_slew,

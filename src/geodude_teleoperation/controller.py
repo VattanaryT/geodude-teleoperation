@@ -1067,6 +1067,8 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                  safety_mode_fn=None,
                  press_kp_n_per_n=0.5, press_max_n=None,
                  press_slew_n_s=200.0, press_kp_hold=0.5,
+                 press_engage_frac=PRESS_ENGAGE_FRAC,
+                 press_release_frac=PRESS_RELEASE_FRAC,
                  press_approach_n=0.0):
         super().__init__(config)
         self.vf = vf
@@ -1104,6 +1106,16 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         # one gain for both: F_press median 20.6 N got the tool moving and then
         # drove Fs to a p95 of 19.6 and a max of 33.2 against Fd = 5.
         self._press_kp_hold = abs(float(press_kp_hold))
+        # Where the hand-off from "the spring approaches" to "the force loop
+        # holds" happens, as a fraction of Fd. The default 0.5 hands over as
+        # soon as the tool is *touching*; 1.0 waits until the operator has
+        # driven the tool fully to the target force with the spring, which is
+        # what "do not switch to tangential-only while I am still hovering"
+        # asks for. Above 1.0 is refused: the spring would have to overshoot Fd
+        # to engage, and there is nothing above it to aim at.
+        self._press_engage_frac = float(np.clip(press_engage_frac, 0.0, 1.0))
+        self._press_release_frac = float(
+            np.clip(press_release_frac, 0.0, self._press_engage_frac))
         # What the press commands before the tool has arrived. 0 = the spring
         # does the whole approach, which is the point of the hand-off.
         self._press_approach_n = abs(float(press_approach_n))
@@ -1420,9 +1432,9 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
             return self._slew_press(0.0, dt)
         # Latch with hysteresis so a noisy Fs near the threshold cannot chatter
         # between a 23 N command and a 5 N one at 200 Hz.
-        if fs >= PRESS_ENGAGE_FRAC * fd:
+        if fs >= self._press_engage_frac * fd:
             self._press_engaged = True
-        elif fs < PRESS_RELEASE_FRAC * fd:
+        elif fs < self._press_release_frac * fd:
             self._press_engaged = False
         if not self._press_engaged:
             # **The spring approaches; the press does not.** Commanding

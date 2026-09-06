@@ -323,3 +323,71 @@ class OverloadEscapeTest(unittest.TestCase):
             with self.subTest(fz=fz):
                 pid = _make()
                 self.assertLess(_settle(pid, fz)["v_along_m_s"], 0.0)
+
+
+# --- press hand-off threshold -------------------------------------------
+# The operator's requirement: pressing button 0 while the tool is still in free
+# space must NOT switch to tangential-only. The spring keeps the normal and the
+# operator drives into the surface; the force loop takes over on measured Fs.
+# --press-engage-frac is where that hand-off sits, as a fraction of Fd.
+
+
+def _press_ctrl(**kw):
+    import geodude_teleoperation.controller as C
+    ctrl = C.ContactTeleoperationController.__new__(
+        C.ContactTeleoperationController)
+    import numpy as _np
+    ctrl._target_force = kw.get("fd", 10.0)
+    ctrl._press_kp_hold = 0.5
+    ctrl._press_approach_n = 0.0
+    ctrl._press_max_n = 60.0
+    ctrl._press_engaged = False
+    ctrl._press_slew_n_s = 0.0        # 0 disables the rate limit
+    ctrl._press_cmd_n = 0.0
+    ctrl._wrong_sign_fs_n = -2.0
+    ctrl._wrong_sign_fd_frac = 0.5
+    ctrl._press_engage_frac = kw.get("engage", 0.5)
+    ctrl._press_release_frac = kw.get("release", 0.15)
+    return ctrl
+
+
+def _press(ctrl, fs):
+    return ctrl._press_force_n(fs, 0.005, 0.0)
+
+
+def test_hovering_after_the_button_press_commands_no_press():
+    ctrl = _press_ctrl(engage=1.0)
+    assert _press(ctrl, 0.0) == 0.0
+    assert ctrl._press_engaged is False
+
+
+def test_engage_frac_1_waits_for_the_full_target_force():
+    """0.5 hands over while merely touching; 1.0 waits until Fd is reached."""
+    half = _press_ctrl(engage=0.5)
+    _press(half, 6.0)
+    assert half._press_engaged is True
+
+    full = _press_ctrl(engage=1.0)
+    _press(full, 6.0)
+    assert full._press_engaged is False, "half-seated must stay on the spring"
+    _press(full, 10.0)
+    assert full._press_engaged is True
+
+
+def test_the_latch_keeps_its_hysteresis_at_any_engage_frac():
+    ctrl = _press_ctrl(engage=1.0, release=0.15)
+    _press(ctrl, 10.0)
+    assert ctrl._press_engaged is True
+    _press(ctrl, 5.0)                      # under engage, over release
+    assert ctrl._press_engaged is True
+    _press(ctrl, 1.0)                      # under release
+    assert ctrl._press_engaged is False
+
+
+def test_release_frac_cannot_exceed_engage_frac():
+    import geodude_teleoperation.controller as C
+    import numpy as np
+    eng, rel = 0.4, 0.9
+    e = float(np.clip(eng, 0.0, 1.0))
+    r = float(np.clip(rel, 0.0, e))
+    assert r == e, "a release above engage would latch on and never let go"
