@@ -1660,9 +1660,10 @@ def test_float_now_latches_zero_tau_without_tearing_down():
     close before interface.shutdown() zeroes tau -- toward a carrot the main
     loop stopped updating the instant it exited.
     """
-    backend, streamer, _h = _backend(law_kind="wrench")
+    backend, _state, _h = _backend(law_kind="wrench")
     assert backend.hold_zero is False
-    backend._streamer = streamer          # as if start() had opened it
+    streamer = FakeStreamer(object())     # as if start() had opened one
+    backend._streamer = streamer
     backend.float_now()
     assert backend.hold_zero is True
     assert streamer.taus and np.allclose(streamer.taus[-1], 0.0)
