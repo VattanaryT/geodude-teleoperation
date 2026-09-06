@@ -389,6 +389,19 @@ def _cap_zeta(zeta, fn, damping_max, blade, warn):
     omega_n = 2.0 * math.pi * float(fn)
     d = 2.0 * float(zeta) * omega_n
     if d <= float(damping_max):
+        # --dtc-damping-max is a CEILING, not a damping setter. Raising it past
+        # the D the ratio already asks for changes nothing at all, and a run
+        # launched to "raise damping" that way is a no-op that reads as a
+        # successful experiment: dtc_20260905_170736 (dmax 12) and _171033
+        # (dmax 16) have byte-identical D_lin=11.99 and zeta_lin=0.318. Say so,
+        # so the header is not the only place it shows.
+        if warn is not None and float(damping_max) > d * 1.05:
+            warn(f"\033[93mdtc: --dtc-damping-max {float(damping_max):.1f} is above "
+                 f"the {blade} D this run actually uses ({d:.2f} 1/s at "
+                 f"zeta={float(zeta):.3f}, fn={float(fn):g} Hz), so it clamps "
+                 f"NOTHING. To raise damping use --dtc-damping-ratio"
+                 f"{'-ang' if blade == 'angular' else ''}; the cap only bites "
+                 f"once 2*zeta*omega_n exceeds it.\033[0m")
         return float(zeta)
     capped = float(damping_max) / (2.0 * omega_n)
     if warn is not None:
