@@ -439,3 +439,31 @@ def test_auto_approach_still_obeys_the_wrong_sign_guard_and_the_ceiling():
     on2 = _press_ctrl(engage=1.0, auto=True, kp=20.0, fd=10.0)
     on2._press_max_n = 25.0
     assert _press(on2, 0.0) == pytest.approx(25.0)   # clipped, not 210 N
+
+
+def test_auto_approach_logs_what_was_emitted_not_only_what_was_computed():
+    """F_press is the law's answer; F_emit is what reached the wrench law.
+
+    They diverge silently whenever _press_wrench_body refuses (no pose yet, or
+    the normal near-perpendicular to tool Z), and "the log says 15 N while 0 N
+    reaches the arm" is the failure this repo keeps rediscovering.
+    """
+    import numpy as np
+    import geodude_teleoperation.controller as C
+    ctrl = C.ContactTeleoperationController.__new__(
+        C.ContactTeleoperationController)
+    ctrl._on_press_engaged = None
+    ctrl._press_engaged = False
+    ctrl._last_press_emit_n = 0.0
+    ctrl._press_refuse_logged = False
+    got = []
+    ctrl._on_press_wrench = got.append
+
+    ctrl._press_wrench_body = lambda f: None          # refused
+    ctrl._emit_press_wrench(15.0)
+    assert ctrl._last_press_emit_n == 0.0
+    assert np.allclose(got[-1], 0.0)
+
+    ctrl._press_wrench_body = lambda f: np.array([0.0, 0.0, f])
+    ctrl._emit_press_wrench(15.0)
+    assert ctrl._last_press_emit_n == pytest.approx(15.0)

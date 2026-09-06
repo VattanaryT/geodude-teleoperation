@@ -943,6 +943,21 @@ def resolve_press_kp(args):
     # Breakaway sizing is retired: the pose spring does the approach now, so
     # the press never has to start the arm moving. Kept as a flag because a rig
     # without spring authority on the normal would still need it.
+    #
+    # ...and --press-auto-approach IS that rig. Measured: with the spring given
+    # the approach, contact_20260905_195152.csv drove the carrot to the lead
+    # clamp (err_z -33 mm, ~70 N commanded) and the arm did not follow it in --
+    # |qdot| 0.004 rad/s, Fs never past 4.5 N. So under auto-approach the press
+    # is again the thing that has to start the arm moving, and the sizing that
+    # was retired with the hand-off comes back with it: the free-space command
+    # is Fd*(1 + kp), so kp >= breakaway/Fd is what makes it clear breakaway at
+    # all. At kp 0.5 and Fd 10 that command is 15 N -- and 15 N is measured
+    # under breakaway in this direction (dtc_20260903_150932.csv held 23.0 N
+    # along the normal for 43 s with |qdot| 0.0000 and Fs under 0.73 N).
+    if getattr(args, "press_auto_approach", False):
+        fd = abs(float(args.target_force))
+        if fd > 0.0:
+            return max(DEFAULT_PRESS_KP, BREAKAWAY_LIN_NOMINAL_N / fd)
     return DEFAULT_PRESS_KP
 
 

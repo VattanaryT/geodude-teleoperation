@@ -1136,6 +1136,8 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         # instead of waiting for the operator to drive the tool in with the
         # pose spring. See the note in _press_force_n.
         self._press_auto_approach = bool(press_auto_approach)
+        self._last_press_emit_n = 0.0
+        self._press_refuse_logged = False
         self._press_engaged = False
         self._linear_scale = linear_scale
         self._force_sign = float(force_sign)
@@ -1297,7 +1299,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         "t", "elapsed", "dt", "mode", "press_loop", "fz_raw", "bias_x",
         "bias_y", "bias_z", "Fs", "Fd", "v_press", "v_z", "aborted",
         "Fs_n", "Fs_n_raw", "Fe_n", "dFs_dt", "gain", "v_along", "spike",
-        "osc", "wrong_sign", "fault_fs", "F_press", "engaged",
+        "osc", "wrong_sign", "fault_fs", "F_press", "F_emit", "engaged",
         "sigma_min", "clamp_scale", "qdot_max",
         "err_x", "err_y", "err_z", "vtask_lin",
         "err_rx", "err_ry", "err_rz", "k_xy", "k_ang",
@@ -1572,6 +1574,18 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         if self._on_press_wrench is None:
             return
         w = np.zeros(3) if f_n == 0.0 else self._press_wrench_body(f_n)
+        # F_press is what the law *computed*; F_emit is what was actually
+        # handed to the wrench law. They differ silently whenever
+        # _press_wrench_body refuses -- no pose yet, or the normal
+        # near-perpendicular to tool Z -- and a press that reads 15 N in the
+        # log while 0 N reaches the arm is exactly the failure this repo keeps
+        # rediscovering. Log both.
+        self._last_press_emit_n = 0.0 if w is None else float(np.linalg.norm(w))
+        if w is None and f_n != 0.0 and not self._press_refuse_logged:
+            self._press_refuse_logged = True
+            print("\033[93mpress refused: no trustworthy contact axis "
+                  "(no pose yet, or the field normal is near-perpendicular to "
+                  "tool Z). Commanding 0 N.\033[0m", flush=True)
         try:
             self._on_press_wrench(np.zeros(3) if w is None else w)
         except Exception as exc:
@@ -1863,6 +1877,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                     "bias_z": f"{bias_tool[2]:.4f}",
                     "Fs": f"{fs:.4f}", "Fd": f"{self._target_force:.3f}",
                     "v_press": "0.0", "v_z": "0.0", "F_press": "0.0",
+                    "F_emit": "0.0",
                     "engaged": int(self._press_engaged),
                     "aborted": int(self._force_aborted),
                 })
@@ -1945,6 +1960,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                 "Fs": f"{fs:.4f}", "Fd": f"{self._target_force:.3f}",
                 "v_press": f"{v_press:.6f}", "v_z": f"{v_z:.6f}",
                 "F_press": f"{f_press:.4f}",
+                "F_emit": f"{self._last_press_emit_n:.4f}",
                 # The latch itself. Recomputing it from Fs afterwards is
                 # guesswork about hysteresis state; this is what the loop did.
                 "engaged": int(self._press_engaged),
