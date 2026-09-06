@@ -136,6 +136,7 @@ from geodude_teleoperation.field_follow import (
     field_tcp_to_ee,
     format_follow_lag,
 )
+from geodude_teleoperation.path_session import PathSession
 from geodude_teleoperation.force_mode_contact import (
     ForceModeContactSession,
     reopen_gafropy,
@@ -1814,7 +1815,99 @@ def build_arg_parser():
         help="live speedJ plot window size in inches (default %(default)s); it "
              "shares the screen with viser")
     parser.set_defaults(speedj_plot=False)
+
+    # --- deterministic path experiment (no SpaceMouse) ---
+    parser.add_argument(
+        "--path-mode", action="store_true",
+        help="deterministic path experiment: no input device at all. Pick a "
+             "start and an end point on the object in viser, preview the plan "
+             "with the orange ghost, then press Enter (or the EXECUTE button) "
+             "and the arm walks approach -> plunge -> traverse -> retract. The "
+             "field-follow carrot, the projection and the DTC wrench law are "
+             "the same code the SpaceMouse drives; only the source of the steps "
+             "changes, which is what isolates controller latency from input "
+             "latency. Implies --press-feedforward and a geometric press latch")
+    parser.add_argument(
+        "--path-speed", type=float, default=0.02, metavar="M_S",
+        help="free-space carrot speed along the plan (default %(default)s m/s)")
+    parser.add_argument(
+        "--path-contact-speed", type=float, default=0.01, metavar="M_S",
+        help="carrot speed during plunge and traverse (default %(default)s m/s)")
+    parser.add_argument(
+        "--path-standoff", type=float, default=0.03, metavar="M",
+        help="height above the surface the approach and retract waypoints sit "
+             "at, along the surface normal (default %(default)s m)")
+    parser.add_argument(
+        "--path-ds", type=float, default=0.005, metavar="M",
+        help="traverse waypoint spacing along the surface (default %(default)s m)")
+    parser.add_argument(
+        "--path-engage-gap", type=float, default=0.002, metavar="M",
+        help="press latch ON at this signed distance from the planned surface "
+             "point, measured along its normal (default %(default)s m). This "
+             "replaces the Fs latch: both terms come from FK and the plan, so "
+             "it does not chatter on a noisy F/T reading near the target")
+    parser.add_argument(
+        "--path-release-gap", type=float, default=0.005, metavar="M",
+        help="press latch OFF above this distance. Must exceed "
+             "--path-engage-gap; the gap is the hysteresis (default %(default)s m)")
+    parser.add_argument(
+        "--press-feedforward", dest="press_feedforward", action="store_true",
+        help="command a flat --target-force along the contact normal while the "
+             "latch says the tool is on the part, instead of the "
+             "Fd + kp*(Fd-Fs) trim. The trim is only worth having if the "
+             "measurement is better than the bias it removes; getActualTCPForce "
+             "on this rig carries several N of spread at a 15 N target, so the "
+             "trim injects that noise as torque. Fs is still logged and is "
+             "still the overload guard (--press-overload-n)")
+    parser.add_argument(
+        "--no-press-feedforward", dest="press_feedforward",
+        action="store_false",
+        help="keep the closed-loop trim even under --path-mode")
+    parser.add_argument(
+        "--press-overload-n", type=float, default=None, metavar="N",
+        help="|Fs| at or above this commands 0 N and stays there until |Fs| "
+             "falls under half of it. Magnitude, not signed, so an inverted "
+             "--force-sign still trips it. Default 2x --target-force")
+    parser.set_defaults(press_feedforward=None)
     return parser
+
+
+def path_mode_on(args) -> bool:
+    return bool(getattr(args, "path_mode", False))
+
+
+def resolve_press_feedforward(args) -> bool:
+    """Feed-forward press: explicit flag wins, otherwise on under --path-mode."""
+    ff = getattr(args, "press_feedforward", None)
+    if ff is None:
+        return path_mode_on(args)
+    return bool(ff)
+
+
+def configure_path_mode(args) -> None:
+    """Validate --path-mode and apply its side effects."""
+    if not path_mode_on(args):
+        return
+    if args.contact_backend != "dtc" or args.dtc_law != "wrench":
+        raise SystemExit(
+            "--path-mode requires --contact-backend dtc --dtc-law wrench "
+            "(the defaults): the press is a force, not a velocity seek")
+    if dtc_push_test_mode(args):
+        raise SystemExit("--path-mode and --dtc-push-test are both input "
+                         "sources; pick one")
+    if args.path_release_gap < args.path_engage_gap:
+        raise SystemExit("--path-release-gap must be >= --path-engage-gap "
+                         "(the gap is the latch hysteresis)")
+    print(
+        f"path mode: no input device. Fd={args.target_force:.1f}N "
+        f"{'feedforward' if resolve_press_feedforward(args) else 'closed loop'}, "
+        f"latch = plan phase AND distance "
+        f"(on <= {args.path_engage_gap * 1000:.0f}mm, "
+        f"off > {args.path_release_gap * 1000:.0f}mm), "
+        f"speeds {args.path_speed * 1000:.0f}/{args.path_contact_speed * 1000:.0f} mm/s "
+        f"free/contact.",
+        flush=True,
+    )
 
 
 def configure_dtc_compliance_hold(args) -> None:
@@ -1940,6 +2033,7 @@ def main():
     args = build_arg_parser().parse_args()
     install_termination_guards()
     configure_dtc_compliance_hold(args)
+    configure_path_mode(args)
     if args.check_spacemouse:
         paths = list_spacemouse_paths()
         if not paths:
@@ -2190,6 +2284,8 @@ def main():
             press_approach_n=args.press_approach_n,
             press_max_n=resolve_press_max_n(args),
             press_slew_n_s=args.press_slew,
+            press_feedforward=resolve_press_feedforward(args),
+            press_overload_n=args.press_overload_n,
             measured_fz_fn=measured_fz_fn,
             measured_force_fn=measured_force_fn)
         contact_controller.set_contact_log(_contact_log_path(args.contact_log))
@@ -2261,6 +2357,12 @@ def main():
         lin_now = follow_linear(
             stick["lin"], ignore_z=mode["active"] == "contact")
         quiet = float(np.linalg.norm(lin_now)) <= 1e-12
+        if path_mode_on(args):
+            # There is no stick, so the stick is always "quiet" -- and the quiet
+            # branch of drive_field_follow calls set_idle(clear_pending=True),
+            # which would throw away the very steps the plan just queued. The
+            # plan running IS the input being active.
+            quiet = path_session is None or not path_session.running
         tick = drive_field_follow(
             follow, approach_controller, now, motor_from_matrix(T_prop),
             live_xyz=live_tcp_xyz_from_flange(T_flange_viz),
@@ -2680,6 +2782,126 @@ def main():
             return
         toggle_contact_mode()
 
+    # ------------------------------------------------------------------
+    # Deterministic path (--path-mode). Same carrot, same wrench law; the
+    # steps come from a plan instead of a stick, which is the whole point:
+    # anything left over is the controller's own latency.
+    # ------------------------------------------------------------------
+    path_session = None
+    path_t = {"last": None}
+
+    def _path_enter_contact():
+        # Entered from FREE SPACE, deliberately: start() tares the F/T sensor
+        # and a tare taken while touching absorbs the contact force into the
+        # bias. The press still commands 0 N until the distance latch engages.
+        if contact_controller is not None:
+            contact_controller.set_press_external(False)
+        if mode["active"] == "approach":
+            toggle_contact_mode()
+        if mode["active"] != "contact":
+            # toggle_contact_mode refuses without a force reader, and a run
+            # with no press is not the experiment -- do not walk the plan into
+            # the part on the pose spring alone.
+            print("\033[91mpath: contact mode refused; aborting the run\033[0m",
+                  flush=True)
+            if path_session is not None:
+                path_session.request_abort()
+
+    def _path_exit_contact():
+        if contact_controller is not None:
+            contact_controller.set_press_external(False)
+        if mode["active"] == "contact":
+            toggle_contact_mode()
+
+    if path_mode_on(args):
+        path_session = PathSession(
+            vf=vf,
+            mesh=object_surface,
+            free_speed_m_s=args.path_speed,
+            contact_speed_m_s=args.path_contact_speed,
+            standoff_m=args.path_standoff,
+            ds_m=args.path_ds,
+            engage_gap_m=args.path_engage_gap,
+            release_gap_m=args.path_release_gap,
+            on_execute_start=_path_enter_contact,
+            on_execute_end=_path_exit_contact,
+        )
+
+    def tick_path(T_flange_viz):
+        """Drive the follow carrot from the plan. Called before run_field_follow."""
+        if path_session is None or follow is None:
+            return
+        now = time.monotonic()
+        last = path_t["last"]
+        path_t["last"] = now
+        dt = 0.0 if last is None else min(0.1, now - last)
+        tcp = live_tcp_xyz_from_flange(T_flange_viz)
+        carrot = follow.xyz
+        if carrot is None:
+            carrot = tcp
+        step = path_session.tick(dt, carrot, tcp_xyz=tcp)
+        if contact_controller is not None:
+            contact_controller.set_press_latch_debug(
+                distance_m=path_session.latch_distance_m,
+                phase=path_session.phase)
+            if mode["active"] == "contact":
+                # One bool decides the press command, free_along_normal and
+                # field-follow's tangent gate -- exactly as the Fs latch used
+                # to, only now it is geometry.
+                contact_controller.set_press_external(path_session.press_engaged)
+        if step is None or not path_session.running:
+            return
+        d = np.asarray(step.delta_world, dtype=float).reshape(3)
+        if float(np.linalg.norm(d)) <= 1e-12:
+            return
+        # add_body_linear takes a *body* step: FieldFollow.tick rotates it by
+        # the field basis at the carrot before adding it, so undo exactly that
+        # rotation here rather than assuming the two frames agree.
+        R_field = np.asarray(vf.approach_basis_at(carrot), dtype=float).reshape(3, 3)
+        follow.add_body_linear(R_field.T @ d)
+
+    def on_path_key(key):
+        if path_session is None:
+            return False
+        if key in ("\r", "\n"):
+            path_session.request_execute()
+        elif key == "p":
+            path_session.request_preview()
+        elif key == "a":
+            path_session.request_abort()
+        elif key == "r":
+            path_session.request("reset")
+        else:
+            return False
+        return True
+
+    def start_path_keys():
+        """Enter=execute, p=preview, a=abort, r=reset. Survives align finishing."""
+
+        def _run():
+            fd = sys.stdin.fileno()
+            old = termios.tcgetattr(fd)
+            try:
+                tty.setcbreak(fd)
+                while True:
+                    ready, _, _ = select.select([sys.stdin], [], [], 0.1)
+                    if not ready:
+                        continue
+                    key = sys.stdin.read(1)
+                    if align is not None and not align.finished:
+                        on_align_key(key)
+                        continue
+                    on_path_key(key)
+            except Exception:
+                pass
+            finally:
+                try:
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_run, daemon=True, name="path-keys").start()
+
     def enter_direct_torque():
         """speedJ (gafropy) → ur_rtde directTorque. One-shot; stays on DTC.
 
@@ -2794,6 +3016,14 @@ def main():
             interface.control(approach_controller, blocking=False)
         else:
             enter_direct_torque()
+        if path_mode_on(args):
+            print(
+                "path mode: no input device opened. Click a start and an end "
+                "point on the object in viser, 'p' previews with the ghost, "
+                "Enter executes, 'a' aborts, 'r' clears the picks.",
+                flush=True,
+            )
+            return
         device = KeyboardTeleop(
             step=0.0025) if args.device == "keyboard" else SpaceMouseTeleop(
                 # Slow enough that the 20 Hz field carrot stays inside the 2 cm
@@ -2848,7 +3078,9 @@ def main():
             print(f"Teleoperating '{args.task_space}' on real geodude (headless) "
                   f"-- {backend_note}; button {args.mode_button} toggles. Ctrl+C to quit.")
             start_control_and_device()
-            if align is not None and args.align_delay is None:
+            if path_mode_on(args):
+                start_path_keys()
+            elif align is not None and args.align_delay is None:
                 print(
                     "startup align: Press Enter to slerp UR onto the field. "
                     "Press t for viser-only stick (headless has no ghost).",
@@ -2872,6 +3104,7 @@ def main():
                 if align is not None and not align.finished:
                     run_startup_align(T_flange, T_ee)
                 elif field_follow_in_mode(mode["active"], args.contact_backend):
+                    tick_path(T_flange)
                     run_field_follow(T_flange, T_ee)
                 time.sleep(loop_dt)
         else:
@@ -2984,6 +3217,12 @@ def main():
                     fk.get_link_pose("right_ur5e/wrist_3_link").to_transformation_matrix())
                 T_live_flange = chamfer_world_from_wrist3(T_wrist)
                 T_ee = np.asarray(live_ee_motor().to_transformation_matrix())
+                if path_session is not None:
+                    # Outside the field-follow branch too, so picking and the
+                    # status readout work while startup align is still running.
+                    path_session.set_live_tcp(
+                        live_tcp_xyz_from_flange(T_live_flange))
+                    path_session.refresh_gui()
                 if align is not None and not align.finished:
                     run_startup_align(T_live_flange, T_ee)
                     probe = sim_probe["p"]
@@ -3005,7 +3244,18 @@ def main():
                             T_live_flange, R_field, p_tcp, 1.0))
                     return
                 if field_follow_in_mode(mode["active"], args.contact_backend):
+                    tick_path(T_live_flange)
                     run_field_follow(T_live_flange, T_ee)
+                    if path_session is not None:
+                        p_preview = path_session.preview_xyz()
+                        if p_preview is not None:
+                            # Preview only moves the ghost; the arm is still
+                            # following its own (unchanged) carrot.
+                            update_ghost(ghost_flange_world(
+                                T_live_flange,
+                                vf.approach_basis_at(p_preview),
+                                p_preview, 1.0))
+                            return
                     if follow.last_target is not None:
                         T_tcp = matrix_from_motor(follow.last_target)
                         update_ghost(ghost_flange_world(
@@ -3020,8 +3270,19 @@ def main():
 
             viz.add_ticker(lambda: update())
 
+            if path_session is not None:
+                path_session.attach(viz.server)
+                print(
+                    "path mode: click a START point then an END point on the "
+                    "object in viser (a third click starts over). 'p' or the "
+                    "preview button walks the orange ghost along the plan; "
+                    "Enter or EXECUTE runs it on the arm; 'a' aborts.",
+                    flush=True,
+                )
             start_control_and_device()
-            if align is not None and args.align_delay is None:
+            if path_mode_on(args):
+                start_path_keys()
+            elif align is not None and args.align_delay is None:
                 print(
                     "startup align: orange ghost is the live-TCP snap. Press t to "
                     "teleop it in viser; t again resets to live TCP. Enter slerps UR.",

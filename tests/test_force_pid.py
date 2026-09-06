@@ -343,6 +343,12 @@ def _press_ctrl(**kw):
     ctrl._press_approach_n = 0.0
     ctrl._press_max_n = 60.0
     ctrl._press_engaged = False
+    # None = the internal Fs latch owns engagement, which is what these cases
+    # are about; the geometric latch has its own file.
+    ctrl._press_external = None
+    ctrl._press_feedforward = False
+    ctrl._press_overloaded = False
+    ctrl._press_overload_n = 2.0 * ctrl._target_force
     ctrl._press_slew_n_s = 0.0        # 0 disables the rate limit
     ctrl._press_cmd_n = 0.0
     ctrl._wrong_sign_fs_n = -2.0

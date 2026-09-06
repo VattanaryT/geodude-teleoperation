@@ -1258,3 +1258,69 @@ class PressApproachIsTheSpringsJobTest(unittest.TestCase):
     def test_it_reaches_the_contact_controller(self):
         src = _EXAMPLE.read_text(encoding="utf-8")
         self.assertIn("press_approach_n=args.press_approach_n", src)
+
+
+class PathModeWiringTest(unittest.TestCase):
+    """--path-mode: the deterministic-path experiment's CLI contract.
+
+    The point of the mode is that *only* the source of the carrot steps
+    changes, so these assert the wiring rather than any control behaviour --
+    the plan and the latch have their own files.
+    """
+
+    def test_off_by_default(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args([])
+        self.assertFalse(mod.path_mode_on(args))
+        self.assertFalse(mod.resolve_press_feedforward(args))
+
+    def test_path_mode_implies_feedforward_press(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args(["--path-mode"])
+        self.assertTrue(mod.resolve_press_feedforward(args))
+
+    def test_explicit_flag_wins_over_the_implication(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args(
+            ["--path-mode", "--no-press-feedforward"])
+        self.assertFalse(mod.resolve_press_feedforward(args))
+
+    def test_target_force_default_is_fifteen_newtons(self):
+        mod = _load_example()
+        self.assertEqual(
+            mod.build_arg_parser().parse_args([]).target_force, 15.0)
+
+    def test_release_gap_below_engage_gap_is_refused(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args(
+            ["--path-mode", "--path-engage-gap", "0.005",
+             "--path-release-gap", "0.001"])
+        with self.assertRaises(SystemExit):
+            mod.configure_path_mode(args)
+
+    def test_path_mode_refuses_the_velocity_seek_backends(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args(
+            ["--path-mode", "--contact-backend", "speedj"])
+        with self.assertRaises(SystemExit):
+            mod.configure_path_mode(args)
+
+    def test_path_mode_and_push_test_are_both_input_sources(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args(
+            ["--path-mode", "--dtc-push-test"])
+        mod.configure_dtc_compliance_hold(args)
+        with self.assertRaises(SystemExit):
+            mod.configure_path_mode(args)
+
+    def test_the_press_flags_reach_the_contact_controller(self):
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("press_feedforward=resolve_press_feedforward(args)", src)
+        self.assertIn("press_overload_n=args.press_overload_n", src)
+
+    def test_the_plan_drives_the_same_carrot_the_stick_does(self):
+        # add_body_linear is the SpaceMouse's own entry point: if this ever
+        # becomes a second path into the controller, the experiment stops
+        # isolating input latency and starts measuring a different loop.
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("follow.add_body_linear(R_field.T @ d)", src)

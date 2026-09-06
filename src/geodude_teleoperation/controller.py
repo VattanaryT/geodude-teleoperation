@@ -1082,7 +1082,8 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                  press_slew_n_s=200.0, press_kp_hold=0.5,
                  press_engage_frac=PRESS_ENGAGE_FRAC,
                  press_release_frac=PRESS_RELEASE_FRAC,
-                 press_approach_n=0.0, press_auto_approach=False):
+                 press_approach_n=0.0, press_auto_approach=False,
+                 press_feedforward=False, press_overload_n=None):
         super().__init__(config)
         self.vf = vf
         self._target_force = abs(float(target_force))
@@ -1136,6 +1137,30 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         # instead of waiting for the operator to drive the tool in with the
         # pose spring. See the note in _press_force_n.
         self._press_auto_approach = bool(press_auto_approach)
+        # --- feed-forward press (--press-feedforward) ---
+        # Command a flat Fd and do not read Fs for the command at all. The trim
+        # is only worth having if the measurement it trims on is better than the
+        # bias it removes, and on this rig getActualTCPForce carries a few N of
+        # spread at the 15 N scale -- so a P trim on it is noise injected as
+        # torque. Fs stays logged, and stays the overload guard below.
+        self._press_feedforward = bool(press_feedforward)
+        # The one thing the feed-forward press still reads Fs for. Magnitude,
+        # not signed: an inverted --force-sign would otherwise make a real
+        # overload read as a large *negative* Fs and never trip.
+        self._press_overload_n = (2.0 * self._target_force
+                                  if press_overload_n is None
+                                  else abs(float(press_overload_n)))
+        self._press_overloaded = False
+        # External latch source (path phase + distance to the planned surface).
+        # None = the Fs hysteresis in _press_force_n owns the latch, which is
+        # what SpaceMouse teleop keeps using.
+        self._press_external = None
+        # Diagnostics for whoever owns that latch: the signed distance the
+        # decision was made on, and the plan phase. Logged per tick because
+        # reconstructing a hysteresis decision from the CSV afterwards is
+        # guesswork -- the same reason `engaged` is logged rather than derived.
+        self._latch_d_m = float("nan")
+        self._latch_phase = ""
         self._last_press_emit_n = 0.0
         self._press_refuse_logged = False
         self._press_engaged = False
@@ -1300,6 +1325,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         "bias_y", "bias_z", "Fs", "Fd", "v_press", "v_z", "aborted",
         "Fs_n", "Fs_n_raw", "Fe_n", "dFs_dt", "gain", "v_along", "spike",
         "osc", "wrong_sign", "fault_fs", "F_press", "F_emit", "engaged",
+        "d_surf", "phase",
         "sigma_min", "clamp_scale", "qdot_max",
         "err_x", "err_y", "err_z", "vtask_lin",
         "err_rx", "err_ry", "err_rz", "k_xy", "k_ang",
@@ -1445,6 +1471,8 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
           that a runaway trim would be delivered in full.
         """
         del now
+        if self._press_external is not None:
+            return self._press_force_n_external(fs, dt)
         fd = float(self._target_force)
         if fs <= min(self._wrong_sign_fs_n, self._wrong_sign_fd_frac * -fd):
             self._press_engaged = False
@@ -1502,6 +1530,59 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         f = fd + self._press_kp_hold * (fd - fs)
         f = float(np.clip(f, 0.0, self._press_max_n))
         return self._slew_press(f, dt)
+
+    def set_press_external(self, engaged):
+        """Latch the press from outside, e.g. a deterministic plan's phase.
+
+        ``None`` restores the internal ``Fs`` hysteresis. Anything else replaces
+        it: the caller now owns the single bool that decides all three of the
+        press command, ``free_along_normal`` and field-follow's ``tangent=``,
+        which is the invariant that keeps them from disagreeing.
+
+        Why a geometric source is worth having: the Fs latch has to distinguish
+        "touching" from "not touching" at a few newtons, which is inside this
+        sensor's own spread, and a latch that chatters at 200 Hz square-waves
+        the normal between the spring and the press. Distance to the planned
+        surface has no such floor. See ``press_latch.DistanceLatch``.
+        """
+        self._press_external = None if engaged is None else bool(engaged)
+
+    def set_press_latch_debug(self, distance_m=None, phase=None):
+        """Record what the external latch decided on, for the contact CSV."""
+        if distance_m is not None:
+            self._latch_d_m = float(distance_m)
+        if phase is not None:
+            self._latch_phase = str(phase)
+
+    def _press_force_n_external(self, fs, dt):
+        """Press command while an external latch owns engagement.
+
+        Feed-forward: ``F = Fd`` whenever the latch says the tool is on the
+        part, 0 otherwise. No trim, no integrator, no wrong-sign rule -- all
+        three are statements about a measurement this path deliberately does not
+        use. What survives is a *level* check on the magnitude of Fs, because an
+        overload is the one thing worth believing a noisy sensor about.
+        """
+        fd = float(self._target_force)
+        if np.isfinite(fs) and abs(fs) >= self._press_overload_n:
+            if not self._press_overloaded:
+                print(
+                    f"\033[91mpress overload: |Fs|={abs(fs):.1f}N >= "
+                    f"{self._press_overload_n:.1f}N -- press to 0 N until it "
+                    f"falls below {0.5 * self._press_overload_n:.1f}N\033[0m",
+                    flush=True,
+                )
+            self._press_overloaded = True
+        elif np.isfinite(fs) and abs(fs) < 0.5 * self._press_overload_n:
+            self._press_overloaded = False
+        engaged = bool(self._press_external) and not self._press_overloaded
+        self._press_engaged = engaged
+        if not engaged:
+            return self._slew_press(0.0, dt)
+        if self._press_feedforward:
+            return self._slew_press(float(np.clip(fd, 0.0, self._press_max_n)), dt)
+        f = fd + self._press_kp_hold * (fd - fs)
+        return self._slew_press(float(np.clip(f, 0.0, self._press_max_n)), dt)
 
     def _slew_press(self, f_n, dt):
         """Rate-limit the commanded press. **Rising only** -- falling is instant.
@@ -1880,6 +1961,8 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                     "F_emit": "0.0",
                     "engaged": int(self._press_engaged),
                     "aborted": int(self._force_aborted),
+                    "d_surf": f"{self._latch_d_m:.5f}",
+                    "phase": self._latch_phase,
                 })
             return np.zeros(6)
         if self._force_aborted:
@@ -1965,6 +2048,8 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                 # guesswork about hysteresis state; this is what the loop did.
                 "engaged": int(self._press_engaged),
                 "aborted": int(self._force_aborted),
+                "d_surf": f"{self._latch_d_m:.5f}",
+                "phase": self._latch_phase,
                 "Fs_n": f"{d.get('Fs_N', float('nan')):.4f}",
                 "Fs_n_raw": f"{d.get('Fs_raw_N', float('nan')):.4f}",
                 "Fe_n": f"{d.get('Fe_N', float('nan')):.4f}",
@@ -2016,6 +2101,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._prev_v_z = None
         self._prev_press_n = None
         self._press_engaged = False
+        self._press_overloaded = False
         self._external_wrench = np.zeros(6)
         self._last_diag = {}
         self._t_last_log = None
