@@ -85,6 +85,7 @@ from __future__ import annotations
 import argparse
 import math
 import pathlib
+import subprocess
 import signal
 import select
 import socket
@@ -1868,7 +1869,15 @@ def build_arg_parser():
         help="|Fs| at or above this commands 0 N and stays there until |Fs| "
              "falls under half of it. Magnitude, not signed, so an inverted "
              "--force-sign still trips it. Default 2x --target-force")
-    parser.set_defaults(press_feedforward=None)
+    parser.add_argument(
+        "--path-plot", dest="path_plot", action="store_true",
+        help="after every executed path, render commanded vs actual joints and "
+             "tool pose to a PNG next to the dtc log (examples/plot_path_run.py "
+             "in a subprocess). On by default under --path-mode")
+    parser.add_argument(
+        "--no-path-plot", dest="path_plot", action="store_false",
+        help="skip the post-run plot")
+    parser.set_defaults(press_feedforward=None, path_plot=True)
     return parser
 
 
@@ -2231,6 +2240,7 @@ def main():
     measured_fz_fn = None
     safety_mode_fn = None
     measured_force_fn = None
+    measured_wrench_fn = None
     close_tcp_force = None
     if args.contact_backend in ("speedj", "dtc"):
         contact_stiffness = np.diag([400.0] * 5 + [0.0])
@@ -2248,6 +2258,11 @@ def main():
             # The dtc loop resolves force along the field normal, not tool Z, so
             # it needs all three linear components.
             measured_force_fn = lambda: force_from_tcp_force(read_tcp_force())
+            # All six axes, raw, for the log only. The press only ever needed
+            # the linear part, so the torques were never recorded -- and "was
+            # the tool being twisted while it slid" is exactly what a traverse
+            # raises. plot_path_run.py draws them.
+            measured_wrench_fn = lambda: list(read_tcp_force())
             safety_mode_fn = getattr(read_tcp_force, "safety_mode", None)
             if dtc_backend is not None:
                 # Losing speedJ loses the UR's path supervisor, so this gate is
@@ -2287,7 +2302,8 @@ def main():
             press_feedforward=resolve_press_feedforward(args),
             press_overload_n=args.press_overload_n,
             measured_fz_fn=measured_fz_fn,
-            measured_force_fn=measured_force_fn)
+            measured_force_fn=measured_force_fn,
+            measured_wrench_fn=measured_wrench_fn)
         contact_controller.set_contact_log(_contact_log_path(args.contact_log))
         contact_controller.set_conditioning_fn(approach_controller.conditioning)
         contact_controller.set_task_space(task_space)
@@ -2812,6 +2828,32 @@ def main():
             contact_controller.set_press_external(False)
         if mode["active"] == "contact":
             toggle_contact_mode()
+        _spawn_path_plot()
+
+    def _spawn_path_plot():
+        """Render commanded-vs-actual for the run that just finished.
+
+        A subprocess, deliberately: this is called from the loop that holds the
+        robot, and matplotlib in-process is the one thing in this file that has
+        no business sharing a thread with the arm. Delayed a second so the
+        contact CSV -- closed by contact_controller.stop() in the toggle above
+        -- and the line-buffered dtc log are both on disk first.
+        """
+        if not path_mode_on(args) or not args.path_plot:
+            return
+        script = pathlib.Path(__file__).resolve().parent / "plot_path_run.py"
+
+        def _run():
+            time.sleep(1.0)
+            try:
+                subprocess.run([sys.executable, str(script), "--no-show"],
+                               check=False, timeout=180)
+            except Exception as exc:
+                print(f"\033[93mpath plot failed ({exc}); run "
+                      f"'python examples/plot_path_run.py' by hand\033[0m",
+                      flush=True)
+
+        threading.Thread(target=_run, daemon=True, name="path-plot").start()
 
     if path_mode_on(args):
         path_session = PathSession(

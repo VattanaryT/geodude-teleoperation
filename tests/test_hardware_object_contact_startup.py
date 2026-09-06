@@ -1324,3 +1324,25 @@ class PathModeWiringTest(unittest.TestCase):
         # isolating input latency and starts measuring a different loop.
         src = _EXAMPLE.read_text(encoding="utf-8")
         self.assertIn("follow.add_body_linear(R_field.T @ d)", src)
+
+
+class PathLoggingWiringTest(unittest.TestCase):
+    """What a deterministic run records, beyond what teleop already did."""
+
+    def test_the_raw_six_axis_ft_reaches_the_contact_controller(self):
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("measured_wrench_fn=measured_wrench_fn", src)
+        self.assertIn("measured_wrench_fn = lambda: list(read_tcp_force())", src)
+
+    def test_the_post_run_plot_is_on_by_default(self):
+        mod = _load_example()
+        self.assertTrue(mod.build_arg_parser().parse_args([]).path_plot)
+        self.assertFalse(
+            mod.build_arg_parser().parse_args(["--no-path-plot"]).path_plot)
+
+    def test_the_plot_runs_out_of_process(self):
+        # matplotlib on the thread that holds the arm is the one import in this
+        # file with no business being there.
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("subprocess.run([sys.executable, str(script)", src)
+        self.assertNotIn("import matplotlib", src)

@@ -438,6 +438,42 @@ def _lambda_along(lin_pre, wrench):
     return float(u @ np.asarray(lin_pre, dtype=float) @ u)
 
 
+# Damping for the log-only resolved-rate estimate of "commanded joints".
+# Same value as the DLS regularizer everywhere else here (--dls-damping): at
+# sigma = 0.2 the inverse gain goes 5.00 -> 4.71, and near a singular pose it is
+# what keeps millimetres of error from reading as radians of commanded joint.
+Q_CMD_DLS_DAMPING = 0.05
+
+
+def _quat_wxyz(R):
+    """Base-frame quaternion (w, x, y, z) from a rotation matrix.
+
+    Shepperd's method: pick the largest diagonal branch so the divisor is never
+    small. A trace-only formula loses precision at 180 deg, which a tool that
+    rolls through the field is entitled to reach.
+    """
+    R = np.asarray(R, dtype=float).reshape(3, 3)
+    t = float(np.trace(R))
+    if t > 0.0:
+        s = np.sqrt(t + 1.0) * 2.0
+        return np.array([0.25 * s,
+                         (R[2, 1] - R[1, 2]) / s,
+                         (R[0, 2] - R[2, 0]) / s,
+                         (R[1, 0] - R[0, 1]) / s])
+    i = int(np.argmax(np.diag(R)))
+    if i == 0:
+        s = np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2.0
+        return np.array([(R[2, 1] - R[1, 2]) / s, 0.25 * s,
+                         (R[0, 1] + R[1, 0]) / s, (R[0, 2] + R[2, 0]) / s])
+    if i == 1:
+        s = np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2]) * 2.0
+        return np.array([(R[0, 2] - R[2, 0]) / s, (R[0, 1] + R[1, 0]) / s,
+                         0.25 * s, (R[1, 2] + R[2, 1]) / s])
+    s = np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1]) * 2.0
+    return np.array([(R[1, 0] - R[0, 1]) / s, (R[0, 2] + R[2, 0]) / s,
+                     (R[1, 2] + R[2, 1]) / s, 0.25 * s])
+
+
 def _leverage_m(jacobian, wrench):
     """Effective moment arm, in metres, along the commanded linear direction.
 
@@ -710,6 +746,15 @@ class DirectTorqueBackend:
         # two CSVs the same experiment.
         self._last_ee_xyz = np.full(3, np.nan)
         self._last_tgt_xyz = np.full(3, np.nan)
+        # Orientation of the same two frames, base quaternion (w, x, y, z), and
+        # a first-order estimate of the joint angles that would zero the pose
+        # error. A torque law has no joint setpoint, so "commanded joints" only
+        # exists as this estimate -- see _note_q_cmd_for_log. None until a tick
+        # fills it in: the joint count is resolved from the model further down
+        # this constructor and is not known here.
+        self._last_ee_quat = np.full(4, np.nan)
+        self._last_tgt_quat = np.full(4, np.nan)
+        self._last_q_cmd = None
         self._friction_comp = bool(friction_comp)
         # Wrench law only. Joint-space PD on the joints tau = J.T @ W cannot
         # reach -- see DEFAULT_JOINT_HOLD_KP. The joint list is resolved after
@@ -1379,14 +1424,53 @@ class DirectTorqueBackend:
         try:
             ee = controller.get_task_space().compute_ee_motor(
                 np.asarray(q_ctrl, dtype=float))
-            self._last_ee_xyz = np.asarray(
-                ee.to_transformation_matrix(), dtype=float)[:3, 3].copy()
+            T_ee = np.asarray(ee.to_transformation_matrix(), dtype=float)
+            self._last_ee_xyz = T_ee[:3, 3].copy()
+            self._last_ee_quat = _quat_wxyz(T_ee[:3, :3])
             tgt = controller.get_objective().get_target()
-            self._last_tgt_xyz = np.asarray(
-                tgt.to_transformation_matrix(), dtype=float)[:3, 3].copy()
+            T_tgt = np.asarray(tgt.to_transformation_matrix(), dtype=float)
+            self._last_tgt_xyz = T_tgt[:3, 3].copy()
+            self._last_tgt_quat = _quat_wxyz(T_tgt[:3, :3])
         except Exception:
             self._last_ee_xyz = np.full(3, np.nan)
             self._last_tgt_xyz = np.full(3, np.nan)
+            self._last_ee_quat = np.full(4, np.nan)
+            self._last_tgt_quat = np.full(4, np.nan)
+
+    def _note_q_cmd_for_log(self, jacobian, objective_state, robot_state) -> None:
+        """First-order joint angles that would zero this tick's pose error.
+
+        There is no commanded joint position under a torque law -- that is the
+        whole point of the seam -- so the only honest "commanded q" is the one
+        a resolved-rate controller would ask for from the same error:
+        ``q_cmd = q + J^T (J J^T + lambda^2 I)^-1 (-e)``. It is what the pose
+        spring is pulling toward, expressed per joint, which is what makes an
+        actual-vs-commanded joint plot readable at all.
+
+        Damped rather than a plain pinv for the reason the DLS regularizer
+        exists everywhere else here: near a singular pose an undamped inverse
+        turns millimetres of error into radians. Log-only and fully guarded --
+        a failure here must never disturb the loop holding the arm.
+        """
+        if self._log_fh is None:
+            return
+        try:
+            q_ctrl = robot_state.get_position()
+            e = np.asarray(objective_state.get_error(), dtype=float).reshape(-1)
+            if e.size != jacobian.shape[0]:
+                return
+            lam2 = Q_CMD_DLS_DAMPING ** 2
+            dq = jacobian.T @ np.linalg.solve(
+                jacobian @ jacobian.T + lam2 * np.eye(jacobian.shape[0]), -e)
+            # q_ctrl is the whole control group (rail + driven), and the
+            # jacobian's columns are the driven joints only -- the same split
+            # that produced the "index 15 on size 7" crash. Take the UR slots.
+            q_ur = np.asarray(q_ctrl, dtype=float).reshape(-1)[
+                np.asarray(self._ur_slots, dtype=int)]
+            self._last_q_cmd = q_ur + np.asarray(
+                dq, dtype=float).reshape(-1)[:self._n]
+        except Exception:
+            self._last_q_cmd = None
 
     def _hold_release_reset(self) -> None:
         """Re-arm the release snap. Paired with every ``law.reset()``.
@@ -1691,6 +1775,7 @@ class DirectTorqueBackend:
                 f"jacobian has {jacobian.shape[1]} columns, the control group "
                 f"drives {self._n}")
         self._last_wrench = wrench.copy()
+        self._note_q_cmd_for_log(jacobian, objective_state, robot_state)
         self._last_leverage_m = _leverage_m(jacobian, wrench)
         self._last_lambda_dir_kg = _lambda_along(self._last_lambda_lin_pre, wrench)
         tau_max = self._law.tau_max
@@ -1988,6 +2073,14 @@ class DirectTorqueBackend:
         # cannot distinguish "the target held and the arm stopped short" from
         # "the target followed the arm". These two triples can.
         cols += ["ee_x", "ee_y", "ee_z", "tgt_x", "tgt_y", "tgt_z"]
+        # Orientation of the same two frames, so "commanded vs actual tool
+        # pose" is answerable without reconstructing it from error blades, and
+        # the joint-space counterpart (see _note_q_cmd_for_log). Both are
+        # appended at the END of the row: every analyzer here reads by header
+        # name, so trailing columns are additive.
+        cols += ["ee_qw", "ee_qx", "ee_qy", "ee_qz"]
+        cols += ["tgt_qw", "tgt_qx", "tgt_qy", "tgt_qz"]
+        cols += [f"qc{i}" for i in range(n)]
         self._log_fh.write(",".join(cols) + "\n")
         self._log_t0 = None
         print(f"dtc log: {self._log_path}", flush=True)
@@ -2172,6 +2265,14 @@ class DirectTorqueBackend:
             fields.append("" if not np.isfinite(v) else fmt % v)
         for v in list(self._last_ee_xyz) + list(self._last_tgt_xyz):
             fields.append("" if not np.isfinite(v) else f"{v:.6f}")
+        for v in list(self._last_ee_quat) + list(self._last_tgt_quat):
+            fields.append("" if not np.isfinite(v) else f"{v:.6f}")
+        q_cmd = (np.full(n, np.nan) if self._last_q_cmd is None
+                 else np.asarray(self._last_q_cmd, dtype=float).reshape(-1))
+        q_cmd = np.pad(q_cmd, (0, max(0, n - q_cmd.size)),
+                       constant_values=np.nan)[:n]
+        for v in list(q_cmd):
+            fields.append("" if not np.isfinite(v) else f"{v:.5f}")
         try:
             fh.write(",".join(fields) + "\n")
         except Exception as exc:

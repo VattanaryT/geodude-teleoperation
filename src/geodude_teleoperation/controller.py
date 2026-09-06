@@ -1083,7 +1083,8 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                  press_engage_frac=PRESS_ENGAGE_FRAC,
                  press_release_frac=PRESS_RELEASE_FRAC,
                  press_approach_n=0.0, press_auto_approach=False,
-                 press_feedforward=False, press_overload_n=None):
+                 press_feedforward=False, press_overload_n=None,
+                 measured_wrench_fn=None):
         super().__init__(config)
         self.vf = vf
         self._target_force = abs(float(target_force))
@@ -1196,6 +1197,13 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         self._log_period_s = max(0.0, float(log_period_s))
         self._measured_fz_fn = measured_fz_fn
         self._measured_force_fn = measured_force_fn
+        # Optional () -> [Fx, Fy, Fz, Tx, Ty, Tz], UR tool frame, UNTARED and
+        # unfiltered. Logged only -- no loop reads it. The press resolves force
+        # along the contact normal from the linear part, so the torques were
+        # never recorded anywhere, and "was the tool being twisted while it
+        # slid" is exactly the question a traverse raises.
+        self._measured_wrench_fn = measured_wrench_fn
+        self._last_ft = np.full(6, np.nan)
         self._dead_wrench_abort_s = max(0.0, float(dead_wrench_abort_s))
         self._dead_wrench_eps_n = max(0.0, float(dead_wrench_eps_n))
 
@@ -1291,6 +1299,26 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         """Callable () -> (fx, fy, fz) tool-frame force in N, for the dtc loop."""
         self._measured_force_fn = measured_force_fn
 
+    def set_measured_wrench_fn(self, measured_wrench_fn):
+        """Callable () -> 6 raw tool-frame F/T values, for the log only."""
+        self._measured_wrench_fn = measured_wrench_fn
+
+    def _ft_log_fields(self):
+        keys = ("ft_fx", "ft_fy", "ft_fz", "ft_tx", "ft_ty", "ft_tz")
+        return {k: ("" if not np.isfinite(v) else f"{v:.4f}")
+                for k, v in zip(keys, np.asarray(self._last_ft).reshape(-1))}
+
+    def _read_ft_for_log(self):
+        """Snapshot the raw 6-axis F/T. Never raises into the force loop."""
+        if self._measured_wrench_fn is None:
+            return
+        try:
+            w = np.asarray(self._measured_wrench_fn(), dtype=float).reshape(-1)
+            self._last_ft = np.pad(w, (0, max(0, 6 - w.size)),
+                                   constant_values=np.nan)[:6]
+        except Exception:
+            self._last_ft = np.full(6, np.nan)
+
     def set_contact_normal(self, n_base, R_tool_to_base=None):
         """Surface normal in base frame (and tool->base R) for the dtc press loop.
 
@@ -1326,6 +1354,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         "Fs_n", "Fs_n_raw", "Fe_n", "dFs_dt", "gain", "v_along", "spike",
         "osc", "wrong_sign", "fault_fs", "F_press", "F_emit", "engaged",
         "d_surf", "phase",
+        "ft_fx", "ft_fy", "ft_fz", "ft_tx", "ft_ty", "ft_tz",
         "sigma_min", "clamp_scale", "qdot_max",
         "err_x", "err_y", "err_z", "vtask_lin",
         "err_rx", "err_ry", "err_rz", "k_xy", "k_ang",
@@ -1891,6 +1920,9 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
 
     def _compute_force_command(self):
         fz_raw = self._read_fz_raw()
+        # One extra cached RTDE read per tick, log-only. Taken here so the row
+        # written below and the force the loop acted on come from the same tick.
+        self._read_ft_for_log()
         # Legacy seek regulates the tared reading; the abort below still looks
         # at fz_raw, since a live sensor sitting on a constant offset must not
         # read as dead feedback.
@@ -1963,6 +1995,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                     "aborted": int(self._force_aborted),
                     "d_surf": f"{self._latch_d_m:.5f}",
                     "phase": self._latch_phase,
+                    **self._ft_log_fields(),
                 })
             return np.zeros(6)
         if self._force_aborted:
@@ -2050,6 +2083,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                 "aborted": int(self._force_aborted),
                 "d_surf": f"{self._latch_d_m:.5f}",
                 "phase": self._latch_phase,
+                **self._ft_log_fields(),
                 "Fs_n": f"{d.get('Fs_N', float('nan')):.4f}",
                 "Fs_n_raw": f"{d.get('Fs_raw_N', float('nan')):.4f}",
                 "Fe_n": f"{d.get('Fe_N', float('nan')):.4f}",

@@ -1135,9 +1135,17 @@ def test_the_log_records_the_tracking_error_and_field_conformity(tmp_path):
     # eigenvalue per blade, and the effective moment arm along the commanded
     # linear direction. The deadband is tau_friction / (lev * Lambda * K), so a
     # stuck run and a well-conditioned one are indistinguishable without them.
-    assert header[-18:] == ["erx", "ery", "erz", "ex", "ey", "ez", "n_deg",
+    # The pose block trails those, and the commanded-vs-actual block trails
+    # it: absolute orientation of both frames, then the resolved-rate estimate
+    # of the joints the pose error is asking for (there is no joint setpoint
+    # under a torque law). All appended at the end, because every analyzer here
+    # reads by header name and trailing columns are additive.
+    assert header[-32:] == ["erx", "ery", "erz", "ex", "ey", "ez", "n_deg",
                             "act", "lam_ang", "lam_dir", "lam_hi", "lev",
-                            "ee_x", "ee_y", "ee_z", "tgt_x", "tgt_y", "tgt_z"]
+                            "ee_x", "ee_y", "ee_z", "tgt_x", "tgt_y", "tgt_z",
+                            "ee_qw", "ee_qx", "ee_qy", "ee_qz",
+                            "tgt_qw", "tgt_qx", "tgt_qy", "tgt_qz",
+                            "qc0", "qc1", "qc2", "qc3", "qc4", "qc5"]
     got = dict(zip(header, row))
     assert [float(got[k]) for k in ("erx", "ery", "erz")] == pytest.approx(
         [0.01, -0.02, 0.03])
