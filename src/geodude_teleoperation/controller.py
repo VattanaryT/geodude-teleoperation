@@ -1082,7 +1082,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
                  press_slew_n_s=200.0, press_kp_hold=0.5,
                  press_engage_frac=PRESS_ENGAGE_FRAC,
                  press_release_frac=PRESS_RELEASE_FRAC,
-                 press_approach_n=0.0):
+                 press_approach_n=0.0, press_auto_approach=False):
         super().__init__(config)
         self.vf = vf
         self._target_force = abs(float(target_force))
@@ -1132,6 +1132,10 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         # What the press commands before the tool has arrived. 0 = the spring
         # does the whole approach, which is the point of the hand-off.
         self._press_approach_n = abs(float(press_approach_n))
+        # Close the Fd - Fs gap from the moment contact mode is entered,
+        # instead of waiting for the operator to drive the tool in with the
+        # pose spring. See the note in _press_force_n.
+        self._press_auto_approach = bool(press_auto_approach)
         self._press_engaged = False
         self._linear_scale = linear_scale
         self._force_sign = float(force_sign)
@@ -1462,6 +1466,36 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
             # not have this problem because it commands a *pose*: its angular
             # block resists exactly the rotation the linear block would
             # otherwise cause.
+            if self._press_auto_approach:
+                # **Auto-approach: run the full press law before engagement.**
+                # The hand-off design assumed the operator drives the tool in
+                # with the pose spring and the press only takes over at the
+                # target. On this rig that stalled: field-follow's carrot sits
+                # at the lead clamp (err_z -33 mm, ~70 N commanded) and the arm
+                # does not follow it into the surface, so Fs never rises and
+                # nothing ever engages. Commanding the force directly closes
+                # Fd - Fs itself.
+                #
+                # kp here is --press-kp, the *approach* gain, deliberately
+                # separate from --press-kp-hold: with the tool clear of the
+                # part the most this can command is Fd*(1 + kp), so kp is what
+                # sets whether the command clears breakaway at all.
+                #
+                # **The known risk, and why it is survivable now.** A pure
+                # force at the TCP torques the wrist rather than translating
+                # the arm -- dtc_20260903_151838.csv put 23.2 N along the
+                # normal and moved j3 through 16.7 deg while j0/j4/j5 moved
+                # 0.0 -- which is why press_approach_n was set to 0 and the
+                # spring given the approach. What has changed is the angular
+                # blade: that run was fn_ang 2.0 (K_ang 157.9) and the
+                # operating point is now fn_ang 3.0 with zeta_ang 0.25
+                # (K_ang 355.3), which is the term that resists exactly the
+                # rotation the linear force causes. Watch n_deg in the contact
+                # log: if the tool tips out of orthogonality on approach, this
+                # is why, and press_max_n is the bound on how hard it can.
+                f = fd + self._press_kp_n_per_n * (fd - fs)
+                f = float(np.clip(f, 0.0, self._press_max_n))
+                return self._slew_press(f, dt)
             return self._slew_press(self._press_approach_n, dt)
         f = fd + self._press_kp_hold * (fd - fs)
         f = float(np.clip(f, 0.0, self._press_max_n))

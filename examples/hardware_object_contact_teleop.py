@@ -1545,6 +1545,23 @@ def build_arg_parser():
              "Deliberately no integral term: an I on a stiction nonlinearity is "
              "a stick-slip amplifier.")
     parser.add_argument(
+        "--press-auto-approach", action="store_true",
+        help="--dtc-law wrench contact: close the Fd-Fs gap from the moment "
+             "button 0 is pressed, instead of waiting for the operator to "
+             "drive the tool into the surface with the pose spring. The press "
+             "commands Fd + --press-kp*(Fd-Fs) immediately, so with the tool "
+             "clear of the part it pushes Fd*(1+kp) N along the contact normal "
+             "until the surface reacts. Off (the default) commands "
+             "--press-approach-n (0) until Fs reaches --press-engage-frac*Fd. "
+             "KNOWN RISK: a pure force at the TCP torques the wrist rather "
+             "than translating the arm -- dtc_20260903_151838.csv put 23.2 N "
+             "along the normal and moved j3 through 16.7 deg while j0/j4/j5 "
+             "moved 0.0 -- so watch n_deg in the contact log and keep "
+             "--press-max-n sane. The angular blade that resists exactly that "
+             "rotation is much stiffer now (fn_ang 3.0 / zeta_ang 0.25 against "
+             "the 2.0 / 0.15 of that run), which is what makes this worth "
+             "re-testing")
+    parser.add_argument(
         "--press-engage-frac", type=float, default=0.5, metavar="FRAC",
         help="fraction of --target-force that Fs must reach before contact "
              "mode hands the surface normal from the pose spring to the force "
@@ -2152,6 +2169,7 @@ def main():
             force_tare=args.force_tare,
             press_kp_n_per_n=resolve_press_kp(args),
             press_kp_hold=args.press_kp_hold,
+            press_auto_approach=args.press_auto_approach,
             press_engage_frac=args.press_engage_frac,
             press_release_frac=args.press_release_frac,
             press_approach_n=args.press_approach_n,

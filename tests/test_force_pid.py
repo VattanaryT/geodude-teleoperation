@@ -8,6 +8,7 @@ Sign convention here matches how ``ContactTeleoperationController`` drives it:
 ``n_base`` is the press axis, ``force_base`` is the UR ``ActualTCPForce``
 reaction in the tool frame, and ``force_sign=-1`` so compression reads ``Fs>0``.
 """
+import pytest
 import unittest
 
 import numpy as np
@@ -348,6 +349,8 @@ def _press_ctrl(**kw):
     ctrl._wrong_sign_fd_frac = 0.5
     ctrl._press_engage_frac = kw.get("engage", 0.5)
     ctrl._press_release_frac = kw.get("release", 0.15)
+    ctrl._press_auto_approach = kw.get("auto", False)
+    ctrl._press_kp_n_per_n = kw.get("kp", 0.5)
     return ctrl
 
 
@@ -411,3 +414,28 @@ def test_press_engaged_is_readable_so_tangent_can_follow_the_same_latch():
     assert ctrl.press_engaged is True
     ctrl.set_press_engaged(False)
     assert ctrl.press_engaged is False
+
+
+def test_auto_approach_commands_the_press_law_before_engagement():
+    """The operator could not drive the tool in; let the press do it.
+
+    Off (default) the un-engaged press commands press_approach_n, which is 0,
+    so nothing moves until Fs rises on its own. On, it runs Fd + kp*(Fd - Fs)
+    from the moment contact mode is entered.
+    """
+    off = _press_ctrl(engage=1.0, auto=False)
+    assert _press(off, 0.0) == 0.0
+
+    on = _press_ctrl(engage=1.0, auto=True, kp=0.5, fd=10.0)
+    assert _press(on, 0.0) == pytest.approx(15.0)   # Fd*(1+kp)
+    assert on._press_engaged is False                # still approaching
+    assert _press(on, 10.0) == pytest.approx(10.0)   # engaged, holds Fd
+    assert on._press_engaged is True
+
+
+def test_auto_approach_still_obeys_the_wrong_sign_guard_and_the_ceiling():
+    on = _press_ctrl(engage=1.0, auto=True, kp=0.5, fd=10.0)
+    assert _press(on, -6.0) == 0.0            # <= min(-2, -0.5*Fd) = -5
+    on2 = _press_ctrl(engage=1.0, auto=True, kp=20.0, fd=10.0)
+    on2._press_max_n = 25.0
+    assert _press(on2, 0.0) == pytest.approx(25.0)   # clipped, not 210 N
