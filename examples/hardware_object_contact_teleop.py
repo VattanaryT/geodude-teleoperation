@@ -1766,14 +1766,22 @@ def build_arg_parser():
         "--right-vention-height", type=float, default=None,
         help="override --vention-height for the right rail only")
     parser.add_argument(
+        "--speedj-plot", dest="speedj_plot", action="store_true",
+        help="open the live speedJ qdot / qddot / dt / spectrum plot. OFF by "
+             "default: it traces from inside the control loop and renders in "
+             "another process, and the main teleop loop now runs at --loop-hz "
+             "(200), so it is real compute on the thread that feeds the "
+             "carrot. analyze_dtc_log.py reads the same data off the CSV "
+             "afterwards, with more of it")
+    parser.add_argument(
         "--no-speedj-plot", dest="speedj_plot", action="store_false",
-        help="do not open the live speedJ qdot / qddot / Δt plot")
+        help="explicitly disable the live plot (already the default)")
     parser.add_argument(
         "--plot-size", type=float, nargs=2, metavar=("W", "H"),
         default=list(LIVE_FIGSIZE),
         help="live speedJ plot window size in inches (default %(default)s); it "
              "shares the screen with viser")
-    parser.set_defaults(speedj_plot=True)
+    parser.set_defaults(speedj_plot=False)
     return parser
 
 
