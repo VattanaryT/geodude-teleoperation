@@ -1615,6 +1615,18 @@ def build_arg_parser():
              "later. Not a fix for ringing -- the damping term never sees this "
              "queue.")
     parser.add_argument(
+        "--loop-hz", type=float, default=50.0, metavar="HZ",
+        help="rate of the main teleop loop that drives field-follow and the "
+             "idle hold. Was hard-coded at 50. It matters because "
+             "--follow-linear-approach can only charge its constant-velocity "
+             "ramp on calls that do NOT earn a new commit: at --follow-hz 50 "
+             "against a 50 Hz caller every call commits, the ramp branch never "
+             "runs, and the flag is inert. Raise this above --follow-hz to get "
+             "(loop_hz / follow_hz) ramp slices per commit, turning the "
+             "carrot's staircase into a ramp. Costs CPU on the main thread "
+             "only -- the control loop is a separate thread at --dtc-hz "
+             "(default %(default)s)")
+    parser.add_argument(
         "--follow-hz", type=float, default=20.0,
         help="after align, project() rate for stick field-follow (15–50 Hz). "
              "Not the RTDE/speedJ rate.")
@@ -2752,6 +2764,7 @@ def main():
                 )
                 start_align_keys()
             hold_log_t = {"t": float("-inf")}
+            loop_dt = 1.0 / max(1.0, float(args.loop_hz))
             while True:
                 if dtc_push_test_mode(args):
                     now = time.monotonic()
@@ -2759,7 +2772,7 @@ def main():
                         hold_log_t["t"] = now
                         print(push_test_line(approach_controller,
                                              dtc_backend.stats()), flush=True)
-                    time.sleep(0.02)
+                    time.sleep(loop_dt)
                     continue
                 q = q_with_vention()
                 T_flange = chamfer_flange_from_q(q)
@@ -2768,7 +2781,7 @@ def main():
                     run_startup_align(T_flange, T_ee)
                 elif field_follow_in_mode(mode["active"], args.contact_backend):
                     run_field_follow(T_flange, T_ee)
-                time.sleep(0.02)
+                time.sleep(loop_dt)
         else:
             viz = gafropy_viz.Visualizer()
             print(f"viser running at http://localhost:{viz.port} -- "
