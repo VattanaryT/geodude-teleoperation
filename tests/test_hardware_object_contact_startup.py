@@ -272,11 +272,15 @@ class HardwareObjectContactStartupTest(unittest.TestCase):
             ["--contact-backend", "speedj"])
         self.assertEqual(args.contact_backend, "speedj")
 
-    def test_default_speedj_plot_is_on(self):
+    def test_default_speedj_plot_is_off(self):
+        """The live plot is opt-in: it is compute on the carrot's own thread."""
         mod = _load_example()
         args = mod.build_arg_parser().parse_args([])
+        self.assertFalse(args.speedj_plot)
+        args = mod.build_arg_parser().parse_args(["--speedj-plot"])
         self.assertTrue(args.speedj_plot)
-        args = mod.build_arg_parser().parse_args(["--no-speedj-plot"])
+        args = mod.build_arg_parser().parse_args(
+            ["--speedj-plot", "--no-speedj-plot"])
         self.assertFalse(args.speedj_plot)
 
     def test_contact_pid_force_limit_covers_target(self):
