@@ -2235,7 +2235,16 @@ def main():
             live_ee_xyz=T_ee_m[:3, 3],
             map_target=map_target,
             stick_quiet=quiet,
-            tangent=mode["active"] == "contact",
+            # Tangent-only follows the *press latch*, not the mode. Gating it
+            # on the mode was a deadlock: entering contact stripped the normal
+            # out of every stick step, so the operator could not drive into the
+            # surface, so Fs never rose, so the press (which commands
+            # --press-approach-n = 0 until Fs >= engage_frac*Fd) never engaged.
+            # The tool hovered and pushing the stick down did nothing.
+            # Same hand-off as free_along_normal: the spring and the stick own
+            # the normal on the way in, the force loop owns it once there.
+            tangent=(mode["active"] == "contact"
+                     and approach_controller.press_engaged),
             rebase_on_idle=follow_rebase_on_idle(args, on_dtc=on_dtc_now()),
             resend_target=args.follow_target_resend)
         if not approach_controller._input_active and follow_rebase_on_idle(
@@ -2558,6 +2567,18 @@ def main():
         route_spacemouse_twist(
             twist, sim_probe=None, on_hardware=_hardware_twist)
 
+    def _snap_follow_to_live():
+        """Put field-follow's carrot on the live TCP, discarding any lead."""
+        if follow is None:
+            return
+        try:
+            T_flange = chamfer_flange_from_q(q_with_vention())
+            follow.set_idle(live_tcp_xyz_from_flange(T_flange),
+                            clear_pending=True)
+        except Exception as exc:
+            print(f"\033[93mcould not re-base the follow carrot on exit: "
+                  f"{exc}\033[0m", flush=True)
+
     def toggle_contact_mode():
         if handoff_busy["busy"]:
             return
@@ -2595,6 +2616,13 @@ def main():
                 flush=True,
             )
             return
+        # exit_*_contact snaps the objective onto the live pose, but under
+        # --dtc-compliance-hold nothing re-bases *field-follow's* carrot, and
+        # drive_field_follow re-sends `follow.last_target` on the very next
+        # call -- the carrot from before the press, which the arm has since
+        # moved away from. That overwrites the snap within one main-loop tick
+        # and the arm jumps to it. Re-base the carrot first so the two agree.
+        _snap_follow_to_live()
         (exit_wrench_contact if use_wrench_press(args)
          else exit_speedj_contact)(
             mode=mode,

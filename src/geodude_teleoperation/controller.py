@@ -456,6 +456,19 @@ class AdmittanceTeleoperationController(gafropy.control.VelocityController):
         """
         self._press_engaged = bool(engaged)
 
+    @property
+    def press_engaged(self) -> bool:
+        """Whether the force loop owns the contact normal yet.
+
+        The same latch decides three things and they must not disagree: whether
+        the spring keeps the normal (``compute_control_wrench``), whether the
+        press commands anything (``ContactTeleoperationController.
+        _press_force_n``), and whether field-follow strips the normal out of the
+        stick step (``tangent=`` at the call site). Before engagement the
+        operator is still *driving to* the surface and needs all three axes.
+        """
+        return bool(self._press_engaged)
+
 
     def set_press_wrench(self, w_body):
         """Press force (N) in the *body* frame, for the wrench law.

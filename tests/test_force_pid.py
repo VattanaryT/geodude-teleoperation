@@ -391,3 +391,23 @@ def test_release_frac_cannot_exceed_engage_frac():
     e = float(np.clip(eng, 0.0, 1.0))
     r = float(np.clip(rel, 0.0, e))
     assert r == e, "a release above engage would latch on and never let go"
+
+
+def test_press_engaged_is_readable_so_tangent_can_follow_the_same_latch():
+    """Three things must agree on one latch, or contact deadlocks.
+
+    Gating field-follow's tangent projection on the *mode* stripped the normal
+    out of every stick step the instant the button was pressed, so the operator
+    could not drive into the surface, so Fs never rose, so the press -- which
+    commands press_approach_n (0) until Fs >= engage_frac*Fd -- never engaged.
+    The tool hovered and pushing the stick down did nothing.
+    """
+    from geodude_teleoperation.controller import (
+        AdmittanceTeleoperationController as A)
+    ctrl = A.__new__(A)
+    ctrl._press_engaged = False
+    assert ctrl.press_engaged is False
+    ctrl.set_press_engaged(True)
+    assert ctrl.press_engaged is True
+    ctrl.set_press_engaged(False)
+    assert ctrl.press_engaged is False
