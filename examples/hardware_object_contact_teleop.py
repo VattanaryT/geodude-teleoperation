@@ -1905,6 +1905,25 @@ def build_arg_parser():
              "surface normal and every distance the press latch measures are "
              "identical in A and B -- only the roll changes")
     parser.add_argument(
+        "--path-contact-at", choices=("plunge", "execute"), default="plunge",
+        help="when contact mode is entered. 'plunge' (default) keeps the whole "
+             "approach to the start point in plain approach mode and switches "
+             "at the standoff point, where the tool is still --path-standoff "
+             "clear of the surface so the force tare is still taken in free "
+             "space. 'execute' switches the moment the run starts, which is "
+             "what the first version did -- the press commands 0 N either way, "
+             "but the 200 Hz force thread shares the RTDE socket for the whole "
+             "approach")
+    parser.add_argument(
+        "--path-hold-frac", type=float, default=PATH_LAG_HOLD_FRAC,
+        metavar="FRAC",
+        help="fraction of --max-lead-m at which the plan waits for the arm "
+             "(default %(default)s). Read it as a FORCE cap, because that is "
+             "what it is: the pose spring makes force out of lead, so holding "
+             "at 0.6 of a 30 mm clamp delivered 13 N where 0.8 delivered 30 N "
+             "on the same task. 0 disables the hold entirely and lets the lead "
+             "clamp be the only bound")
+    parser.add_argument(
         "--path-stall-abort-s", type=float, default=2.0, metavar="S",
         help="window over which a stall is judged (0 disables). A stalled pose "
              "spring is not harmless: it keeps commanding Lambda*K*err, so a "
@@ -1933,7 +1952,13 @@ def build_arg_parser():
 # Fraction of --max-lead-m at which the plan stops advancing and waits for the
 # arm. Below 1.0 on purpose: the clamp itself is the hard stop, and a plan that
 # only notices at the stop has already wound the command up against it.
-PATH_LAG_HOLD_FRAC = 0.6
+#
+# **This is a force cap, not just a pacing knob, and lowering it cost a working
+# approach.** The lead IS the force: dtc_20260906_192810.csv approached the
+# surface with |e| 22.3 mm and |W_lin| 30.1 N, and after this went 0.8 -> 0.6
+# the same task ran at 18 mm and 13 N and could only creep. Default is back at
+# the value that worked; --path-hold-frac overrides it.
+PATH_LAG_HOLD_FRAC = 0.8
 
 
 def path_mode_on(args) -> bool:
@@ -2874,12 +2899,8 @@ def main():
     path_t = {"last": None, "held": False, "held_since": None, "hist": []}
     stop_keys = threading.Event()
 
-    def _path_enter_contact():
-        # Entered from FREE SPACE, deliberately: start() tares the F/T sensor
-        # and a tare taken while touching absorbs the contact force into the
-        # bias. The press still commands 0 N until the distance latch engages.
-        #
-        # Re-base the carrot on the live TCP FIRST. Between align finishing and
+    def _path_execute_start():
+        # Re-base the carrot on the live TCP. Between align finishing and
         # EXECUTE the carrot sits wherever the seed left it while the arm sags
         # or is nudged, and the first commit would then command that stale pose
         # -- a step of up to --max-lead-m in one tick. Snapping makes the first
@@ -2887,10 +2908,24 @@ def main():
         # rule as leaving contact, in the other direction: whoever snaps the
         # objective must re-base the carrot, or the carrot wins on the next tick.
         _snap_follow_to_live()
+        if args.path_contact_at == "execute":
+            _path_enter_contact()
+
+    def _path_enter_contact():
+        # Entered from FREE SPACE, deliberately: start() tares the F/T sensor
+        # and a tare taken while touching absorbs the contact force into the
+        # bias. At --path-contact-at plunge (the default) that free space is
+        # the standoff point, --path-standoff above the surface, which is where
+        # the approach ends and the descent begins -- so the tare is still
+        # taken clear of the part, and the whole traverse to the start point
+        # runs in plain approach mode. The press commands 0 N either way until
+        # the latch engages; what entering early actually cost was the 200 Hz
+        # force thread sharing the RTDE socket for the length of the approach.
+        if mode["active"] != "approach":
+            return
         if contact_controller is not None:
             contact_controller.set_press_external(False)
-        if mode["active"] == "approach":
-            toggle_contact_mode()
+        toggle_contact_mode()
         if mode["active"] != "contact":
             # toggle_contact_mode refuses without a force reader, and a run
             # with no press is not the experiment -- do not walk the plan into
@@ -2947,7 +2982,7 @@ def main():
             depth_m=args.path_depth,
             touch_n=args.path_touch_n,
             max_seek_m=args.path_max_seek,
-            on_execute_start=_path_enter_contact,
+            on_execute_start=_path_execute_start,
             on_execute_end=_path_exit_contact,
         )
 
@@ -2985,7 +3020,7 @@ def main():
         # nothing wrong with the arm at all. Holding instead makes the path
         # self-pacing: it advances exactly as fast as the arm can follow.
         lag = float(np.linalg.norm(np.asarray(carrot) - np.asarray(tcp)))
-        hold = lag >= PATH_LAG_HOLD_FRAC * float(args.max_lead_m)
+        hold = lag >= float(args.path_hold_frac) * float(args.max_lead_m)
         if hold != path_t["held"]:
             path_t["held"] = hold
             path_t["held_since"] = now if hold else None
@@ -3047,6 +3082,12 @@ def main():
                 contact_controller.set_press_external(path_session.press_engaged)
         if step is None or not path_session.running:
             return
+        if (args.path_contact_at == "plunge" and step.press_phase
+                and mode["active"] == "approach"):
+            # The plan has finished the approach and is about to descend. Still
+            # --path-standoff above the surface, so the tare is clear of the
+            # part.
+            _path_enter_contact()
         d = np.asarray(step.delta_world, dtype=float).reshape(3)
         if float(np.linalg.norm(d)) <= 1e-12:
             return

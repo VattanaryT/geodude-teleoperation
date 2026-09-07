@@ -1414,8 +1414,8 @@ class PathSelfPacingTest(unittest.TestCase):
         mod = _load_example()
         self.assertLess(mod.PATH_LAG_HOLD_FRAC, 1.0)
         src = _EXAMPLE.read_text(encoding="utf-8")
-        self.assertIn("hold = lag >= PATH_LAG_HOLD_FRAC * float(args.max_lead_m)",
-                      src)
+        self.assertIn("hold = lag >= float(args.path_hold_frac) "
+                      "* float(args.max_lead_m)", src)
         self.assertIn("block_reason=blocked, hold=hold)", src)
 
 
@@ -1423,13 +1423,14 @@ class PathHandoffTest(unittest.TestCase):
     """No step between align finishing and the first commanded pose."""
 
     def test_execute_rebases_the_carrot_before_entering_contact(self):
+        # The snap moved to _path_execute_start when contact entry moved to the
+        # plunge; it must still happen first, or the toggle's own
+        # hold_live_pose is overwritten by the stale carrot on the next tick.
         src = _EXAMPLE.read_text(encoding="utf-8")
-        enter = src.split("def _path_enter_contact():")[1].split("def ")[0]
-        self.assertIn("_snap_follow_to_live()", enter)
-        # ...and before the toggle, or the toggle's own hold_live_pose is
-        # overwritten by the stale carrot on the next tick.
-        self.assertLess(enter.index("_snap_follow_to_live()"),
-                        enter.index("toggle_contact_mode()"))
+        start = src.split("def _path_execute_start():")[1].split("\n    def ")[0]
+        self.assertIn("_snap_follow_to_live()", start)
+        self.assertLess(start.index("_snap_follow_to_live()"),
+                        start.index("_path_enter_contact()"))
 
     def test_the_wrench_rearm_ramp_is_armed_by_default(self):
         # The 0->1 input_active edge at EXECUTE is exactly the edge this ramp
@@ -1447,12 +1448,17 @@ class PathStallAbortTest(unittest.TestCase):
         self.assertAlmostEqual(
             mod.build_arg_parser().parse_args([]).path_stall_abort_s, 2.0)
 
-    def test_the_hold_engages_well_before_the_clamp(self):
-        # dtc_20260906_192810.csv stalled at 22.3 mm against a 30 mm clamp
-        # (0.74 of it) and ground 30 N into the part for 14 s. A threshold at
-        # 0.8 would have watched it happen.
+    def test_the_hold_is_tunable_and_defaults_to_the_value_that_worked(self):
+        # The hold is a force cap: the spring makes force out of lead. 0.6 of a
+        # 30 mm clamp delivered 13 N and could only creep; 0.8 delivered 30 N
+        # and reached the surface (dtc_20260906_192810 vs _20260907_134616).
         mod = _load_example()
-        self.assertLessEqual(mod.PATH_LAG_HOLD_FRAC * 0.030, 0.0223)
+        self.assertAlmostEqual(mod.PATH_LAG_HOLD_FRAC, 0.8)
+        self.assertAlmostEqual(
+            mod.build_arg_parser().parse_args([]).path_hold_frac, 0.8)
+        self.assertAlmostEqual(
+            mod.build_arg_parser().parse_args(
+                ["--path-hold-frac", "0"]).path_hold_frac, 0.0)
 
     def test_it_aborts_rather_than_pushing_harder(self):
         src = _EXAMPLE.read_text(encoding="utf-8")
@@ -1505,3 +1511,37 @@ class ToolOrientationWiringTest(unittest.TestCase):
         self.assertIn('add_label(\n                        "/tool_orientation"', src)
         self.assertIn("tool orientation:", src)
         self.assertIn("f=flip tool 180 deg", src)
+
+
+class PathContactEntryTest(unittest.TestCase):
+    """Contact mode belongs at the plunge, not at EXECUTE.
+
+    The press commands 0 N either way -- the latch decides that -- but entering
+    at EXECUTE runs the whole free-space approach with the 200 Hz force thread
+    sharing the one RTDE socket, and it reads to the operator as "it switched
+    to contact before it had approached anything", which is exactly what it did.
+    """
+
+    def test_it_defaults_to_the_plunge(self):
+        mod = _load_example()
+        self.assertEqual(
+            mod.build_arg_parser().parse_args([]).path_contact_at, "plunge")
+
+    def test_execute_still_available_for_the_old_behaviour(self):
+        mod = _load_example()
+        self.assertEqual(
+            mod.build_arg_parser().parse_args(
+                ["--path-contact-at", "execute"]).path_contact_at, "execute")
+
+    def test_the_tare_is_still_taken_clear_of_the_part(self):
+        # The plunge waypoint is entered at the standoff point, so the tool is
+        # --path-standoff above the surface when start() tares.
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn('args.path_contact_at == "plunge" and step.press_phase',
+                      src)
+        self.assertIn('if mode["active"] != "approach":', src)
+
+    def test_execute_still_rebases_the_carrot(self):
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        start = src.split("def _path_execute_start():")[1].split("\n    def ")[0]
+        self.assertIn("_snap_follow_to_live()", start)
