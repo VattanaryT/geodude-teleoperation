@@ -351,3 +351,54 @@ class DepthAndTouchTest(unittest.TestCase):
                 break
             p = p + step.delta_world
         self.assertEqual(s.runner.depth_bias, 0.0)
+
+
+class HoldWhenTheArmFallsBehindTest(unittest.TestCase):
+    """A plan must not walk into the lead clamp.
+
+    The carrot is clamped to --max-lead-m from the live TCP. A plan that keeps
+    advancing while the arm is stalled pushes against that clamp: the clamp
+    pulls the command back, the plan pushes it out, and the commanded pose
+    oscillates with nothing wrong with the arm. Holding makes the path
+    self-pacing.
+    """
+
+    def _session(self, **kw):
+        from geodude_teleoperation.path_session import PathSession
+        s = PathSession(vf=None, mesh=_plate(), use_field_normal=False,
+                        standoff_m=0.02, ds_m=0.02, **kw)
+        s.pick([0.0, 0.0, 0.0])
+        s.pick([0.04, 0.0, 0.0])
+        s.request_execute()
+        s.tick(0.01, [0.0, 0.0, 0.02], tcp_xyz=[0.0, 0.0, 0.02])
+        return s
+
+    def test_hold_commands_nothing(self):
+        s = self._session()
+        step = s.tick(0.01, [0.0, 0.0, 0.02], tcp_xyz=[0.0, 0.0, 0.02],
+                      hold=True)
+        np.testing.assert_allclose(step.delta_world, np.zeros(3), atol=1e-12)
+
+    def test_hold_still_updates_the_phase_and_the_latch(self):
+        s = self._session()
+        step = s.tick(0.01, [0.0, 0.0, 0.0], tcp_xyz=[0.0, 0.0, 0.0], hold=True)
+        self.assertEqual(step.phase, s.phase)
+        self.assertTrue(s.press_engaged)   # on the surface, in a press phase
+
+    def test_hold_does_not_deepen_the_touch_seek(self):
+        s = self._session(touch_n=3.0, max_seek_m=0.01)
+        held_at = s.runner.depth_bias
+        for _ in range(20):
+            s.tick(0.01, [0.0, 0.0, 0.0], tcp_xyz=[0.0, 0.0, 0.0], fs=0.0,
+                   hold=True)
+        self.assertEqual(s.runner.depth_bias, held_at)
+        for _ in range(20):
+            s.tick(0.01, [0.0, 0.0, 0.0], tcp_xyz=[0.0, 0.0, 0.0], fs=0.0)
+        self.assertGreater(s.runner.depth_bias, 0.0)
+
+    def test_releasing_the_hold_resumes_the_run(self):
+        s = self._session()
+        s.tick(0.01, [0.0, 0.0, 0.02], tcp_xyz=[0.0, 0.0, 0.02], hold=True)
+        step = s.tick(0.01, [0.0, 0.0, 0.02], tcp_xyz=[0.0, 0.0, 0.02])
+        self.assertGreater(float(np.linalg.norm(step.delta_world)), 0.0)
+        self.assertTrue(s.running)

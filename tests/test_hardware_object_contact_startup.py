@@ -1407,3 +1407,13 @@ class PathDepthAndTouchWiringTest(unittest.TestCase):
         self.assertIn("tcp_xyz=tcp, fs=fs", src)
         self.assertIn("depth_m=args.path_depth", src)
         self.assertIn("touch_n=args.path_touch_n", src)
+
+
+class PathSelfPacingTest(unittest.TestCase):
+    def test_the_plan_holds_before_it_reaches_the_lead_clamp(self):
+        mod = _load_example()
+        self.assertLess(mod.PATH_LAG_HOLD_FRAC, 1.0)
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("hold = lag >= PATH_LAG_HOLD_FRAC * float(args.max_lead_m)",
+                      src)
+        self.assertIn("block_reason=blocked, hold=hold)", src)

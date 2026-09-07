@@ -1906,6 +1906,12 @@ def build_arg_parser():
     return parser
 
 
+# Fraction of --max-lead-m at which the plan stops advancing and waits for the
+# arm. Below 1.0 on purpose: the clamp itself is the hard stop, and a plan that
+# only notices at the stop has already wound the command up against it.
+PATH_LAG_HOLD_FRAC = 0.8
+
+
 def path_mode_on(args) -> bool:
     return bool(getattr(args, "path_mode", False))
 
@@ -2838,7 +2844,7 @@ def main():
     # anything left over is the controller's own latency.
     # ------------------------------------------------------------------
     path_session = None
-    path_t = {"last": None}
+    path_t = {"last": None, "held": False}
     stop_keys = threading.Event()
 
     def _path_enter_contact():
@@ -2934,9 +2940,23 @@ def main():
                        "Re-run without it to execute")
         fs = (None if contact_controller is None
               else contact_controller.last_fs)
+        # Never outrun the arm. The carrot is clamped to --max-lead-m from the
+        # live TCP, so a plan that keeps advancing into a stalled arm is
+        # pushing against a stop: the clamp pulls the carrot back, the plan
+        # pushes it out, and the commanded pose oscillates at the clamp -- with
+        # nothing wrong with the arm at all. Holding instead makes the path
+        # self-pacing: it advances exactly as fast as the arm can follow.
+        lag = float(np.linalg.norm(np.asarray(carrot) - np.asarray(tcp)))
+        hold = lag >= PATH_LAG_HOLD_FRAC * float(args.max_lead_m)
+        if hold != path_t["held"]:
+            path_t["held"] = hold
+            if hold and path_session.running:
+                print(f"path: holding, the arm is {1e3 * lag:.1f} mm behind the "
+                      f"command (clamp {1e3 * args.max_lead_m:.0f} mm)",
+                      flush=True)
         step = path_session.tick(dt, carrot, tcp_xyz=tcp, fs=fs,
                                  allow_execute=not blocked,
-                                 block_reason=blocked)
+                                 block_reason=blocked, hold=hold)
         if contact_controller is not None:
             contact_controller.set_press_latch_debug(
                 distance_m=path_session.latch_distance_m,

@@ -124,3 +124,34 @@ class LatchDebugTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExternalLatchReachesTheSpringTest(unittest.TestCase):
+    """The external latch must drive the SAME bool the Fs latch used to.
+
+    Three things have to agree or contact deadlocks: whether the pose spring
+    keeps the contact normal (free_along_normal), whether the press commands
+    anything, and whether field-follow strips the normal out of a step. They
+    all read one bool, and under --path-mode that bool comes from the plan.
+    """
+
+    def test_engagement_is_published_to_the_spring(self):
+        seen = []
+        c = _make()
+        c.set_on_press_engaged(seen.append)
+        c.set_on_press_wrench(lambda w: None)
+        c.set_press_external(False)
+        c._emit_press_wrench(c._press_force_n(0.0, 0.0, 0.005))
+        c.set_press_external(True)
+        c._emit_press_wrench(c._press_force_n(0.0, 0.0, 0.005))
+        self.assertEqual(seen, [False, True])
+
+    def test_an_overload_hands_the_normal_back_to_the_spring(self):
+        seen = []
+        c = _make(press_overload_n=30.0)
+        c.set_on_press_engaged(seen.append)
+        c.set_on_press_wrench(lambda w: None)
+        c.set_press_external(True)
+        c._emit_press_wrench(c._press_force_n(5.0, 0.0, 0.005))
+        c._emit_press_wrench(c._press_force_n(40.0, 0.0, 0.005))
+        self.assertEqual(seen, [True, False])

@@ -243,7 +243,7 @@ class PathSession:
     # ------------------------------------------------------------------ tick
 
     def tick(self, dt, carrot_xyz, tcp_xyz=None, fs=None, allow_execute=True,
-             block_reason=""):
+             block_reason="", hold=False):
         """Advance the state machine. Returns a ``PathStep`` or ``None``.
 
         ``carrot_xyz`` is what the caller is driving (field-follow's own
@@ -256,6 +256,13 @@ class PathSession:
         skipped is a button that does nothing: previewing, resetting and
         aborting must keep working while startup align is still holding the
         arm, and only EXECUTE has to wait for it.
+
+        ``hold`` freezes the *plan* for a tick without stopping the run: the
+        phase and the latch still update, but nothing advances and the touch
+        seek does not deepen. The caller sets it when the arm has fallen behind
+        the carrot -- a plan that keeps walking into the lead clamp winds the
+        command up against a stop, and the clamp pushing back against the plan
+        pushing forward is an oscillation nobody asked for.
         """
         self.set_live_tcp(tcp_xyz)
         if fs is not None:
@@ -280,9 +287,10 @@ class PathSession:
         if self.state != STATE_RUN or self.runner is None:
             return None
 
-        step = self.runner.step(dt, carrot_xyz)
+        step = self.runner.step(0.0 if hold else dt, carrot_xyz)
         self._phase = step.phase
-        step = self._seek_for_touch(dt, step)
+        if not hold:
+            step = self._seek_for_touch(dt, step)
         tcp = self._live_tcp if tcp_xyz is None else np.asarray(
             tcp_xyz, dtype=float).reshape(3)
         self._engaged = bool(self.latch.update(LatchState(
