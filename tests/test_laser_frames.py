@@ -85,3 +85,39 @@ class LaserPlacementTest(unittest.TestCase):
             np.linalg.norm(raw.mean(axis=0) - placed.points_vention.mean(axis=0)),
             0.5,
         )
+
+
+class MissingCalibrationIsLoudTest(unittest.TestCase):
+    """A silently-zeroed calibration is the failure this repo keeps repeating.
+
+    The two offset sidecars are tracked on some branches and not others, so a
+    branch switch deletes them -- and load_t_vention's zero fallback made the
+    scan sit 31 mm out with every control number still looking healthy.
+    """
+
+    def test_the_calibrated_offsets_are_present_on_this_branch(self):
+        from geodude_teleoperation.laser_frames import (
+            DEFAULT_CROP_META, DEFAULT_LASER_OFFSET, DEFAULT_T_LEFT,
+            DEFAULT_T_RIGHT, DEFAULT_TAG0_OFFSET)
+        for p in (DEFAULT_CROP_META, DEFAULT_LASER_OFFSET, DEFAULT_TAG0_OFFSET,
+                  DEFAULT_T_LEFT, DEFAULT_T_RIGHT):
+            self.assertTrue(Path(p).is_file(), f"missing: {p}")
+
+    def test_the_offsets_are_the_calibrated_values_not_zero(self):
+        from geodude_teleoperation.laser_frames import (
+            load_t_vention, DEFAULT_LASER_OFFSET, DEFAULT_TAG0_OFFSET)
+        np.testing.assert_allclose(load_t_vention(DEFAULT_LASER_OFFSET),
+                                   [0.0, 0.0, -0.010], atol=1e-6)
+        np.testing.assert_allclose(load_t_vention(DEFAULT_TAG0_OFFSET),
+                                   [0.0, 0.031, -0.014], atol=1e-5)
+
+    def test_a_missing_offset_warns_before_returning_zero(self):
+        import io
+        import contextlib
+        from geodude_teleoperation import laser_frames as lf
+        lf._MISSING_OFFSETS_WARNED.discard("does_not_exist.json")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            out = lf.load_t_vention("does_not_exist.json")
+        np.testing.assert_allclose(out, np.zeros(3))
+        self.assertIn("CALIBRATION MISSING", buf.getvalue())

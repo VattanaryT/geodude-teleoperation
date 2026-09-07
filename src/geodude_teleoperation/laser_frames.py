@@ -35,6 +35,9 @@ DEFAULT_LASER_OFFSET = (
     _DATA / "laser_profilometer" / "merged.laser_offset.json")
 
 
+_MISSING_OFFSETS_WARNED: set = set()
+
+
 def is_laser_left_base_object(path) -> bool:
     """True for the Keyence merge (points already in left UR RTDE base)."""
     if path is None:
@@ -70,7 +73,26 @@ def load_SE3(path: Path | str) -> np.ndarray:
 
 
 def load_t_vention(path: Path | str | None) -> np.ndarray:
-    if path is None or not Path(path).is_file():
+    """Calibrated vention-frame offset from a sidecar JSON, metres.
+
+    A missing file still returns zeros -- callers pass optional paths -- but it
+    SAYS SO, loudly and once per path. Silently substituting zeros for a
+    calibration is the failure this repo keeps rediscovering: the two offset
+    sidecars are tracked on some branches and not others, so a branch switch
+    deletes them, and the only symptom is the scan sitting 31 mm out with every
+    control number looking healthy.
+    """
+    if path is None:
+        return np.zeros(3, dtype=float)
+    if not Path(path).is_file():
+        if str(path) not in _MISSING_OFFSETS_WARNED:
+            _MISSING_OFFSETS_WARNED.add(str(path))
+            print(
+                f"\033[93mCALIBRATION MISSING: {path} -- using a ZERO offset. "
+                f"The scan will be placed wrong by however much that file "
+                f"held.\033[0m",
+                flush=True,
+            )
         return np.zeros(3, dtype=float)
     with Path(path).open() as f:
         meta = json.load(f)

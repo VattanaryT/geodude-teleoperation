@@ -144,7 +144,10 @@ from geodude_teleoperation.force_mode_contact import (
     shutdown_gafropy_for_handoff,
 )
 from geodude_teleoperation.laser_frames import (
+    DEFAULT_LASER_OFFSET,
+    DEFAULT_TAG0_OFFSET,
     is_laser_left_base_object,
+    load_t_vention,
     place_laser_object,
 )
 from geodude_teleoperation.speedj_plot import LIVE_FIGSIZE
@@ -2238,7 +2241,10 @@ def main():
             f"→ tag_0; T_tag0_rtde.t={placement.T_tag0_rtde[:3, 3].round(3).tolist()} "
             "(right_base). Cloud is not copied into the right arm. "
             f"scan surface {len(object_surface.vertices)}/{n_poisson} verts "
-            "(Poisson underside dropped, normals toward +Z).",
+            "(Poisson underside dropped, normals toward +Z). "
+            f"calibrated offsets applied: laser="
+            f"{(1e3 * load_t_vention(DEFAULT_LASER_OFFSET)).round(1).tolist()}mm "
+            f"object={(1e3 * load_t_vention(DEFAULT_TAG0_OFFSET)).round(1).tolist()}mm.",
             flush=True,
         )
     else:
@@ -3000,18 +3006,31 @@ def main():
             hist.append((now, np.asarray(tcp, dtype=float).copy()))
         else:
             hist.clear()
-        window = max(float(args.path_stall_abort_s), 0.5)
-        while len(hist) > 2 and (now - hist[0][0]) > window:
+        # Keep exactly one sample OLDER than the window. Trimming to "no older
+        # than the window" and then asking for "at least the window" is a race
+        # the test always loses -- that bug made the abort silent on
+        # dtc_20260907_134616.csv, which then sat at 13.2 N for 5 s having
+        # moved 0.16 mm.
+        span = float(args.path_stall_abort_s)
+        while len(hist) > 2 and (now - hist[1][0]) > span:
             hist.pop(0)
         moved = None
-        if hist and (now - hist[0][0]) >= float(args.path_stall_abort_s) > 0.0:
+        if hist and span > 0.0 and (now - hist[0][0]) >= span:
             moved = float(np.linalg.norm(np.asarray(tcp) - hist[0][1]))
         if (hold and path_session.running and moved is not None
                 and moved < 1e-3 * args.path_stall_mm):
+            st = dtc_backend.stats() if dtc_backend is not None else {}
             print(f"\033[91mpath: the arm moved {1e3 * moved:.2f} mm in "
-                  f"{args.path_stall_abort_s:.1f}s while {1e3 * lag:.1f} mm "
-                  f"behind the command -- stalled against something. Aborting "
-                  f"rather than pushing harder.\033[0m", flush=True)
+                  f"{span:.1f}s while {1e3 * lag:.1f} mm behind the command "
+                  f"-- stalled against something. Aborting rather than pushing "
+                  f"harder.\033[0m", flush=True)
+            # What it was stalled AGAINST, in the two numbers that separate
+            # "the spring is not asking for enough" from "the joint cannot
+            # break away": the commanded force, and the worst joint torque.
+            print(f"  at the stall: |W_lin|={st.get('w_lin', float('nan')):.1f}N  "
+                  f"tau_peak={st.get('tau_peak', float('nan')):.2f}Nm  "
+                  f"clip_worst=j{st.get('clip_joint_worst', -1)}",
+                  flush=True)
             path_session.request_abort()
             hist.clear()
         step = path_session.tick(dt, carrot, tcp_xyz=tcp, fs=fs,
