@@ -1345,6 +1345,10 @@ class PathLoggingWiringTest(unittest.TestCase):
         # file with no business being there.
         src = _EXAMPLE.read_text(encoding="utf-8")
         self.assertIn("subprocess.run([sys.executable, str(script)", src)
+        # Its own session, or the Ctrl+C that ended the run also kills the
+        # plotter through the shared process group -- which is how the
+        # 2026-09-07 14:48 run ended, inside the plotter's own imports.
+        self.assertIn("start_new_session=True", src)
         self.assertNotIn("import matplotlib", src)
 
 

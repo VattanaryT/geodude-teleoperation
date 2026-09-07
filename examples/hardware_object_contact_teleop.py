@@ -2950,8 +2950,13 @@ def main():
         if delay_s > 0.0:
             time.sleep(delay_s)
         try:
+            # Its own session, so the Ctrl+C that ended the run does not also
+            # land on the plotter. Without this the terminal's SIGINT reaches
+            # the child through the shared process group and kills it mid
+            # matplotlib's own import -- which is exactly the traceback the
+            # 2026-09-07 14:48 run ended with.
             subprocess.run([sys.executable, str(script), "--no-show"],
-                           check=False, timeout=180)
+                           check=False, timeout=180, start_new_session=True)
         except Exception as exc:
             print(f"\033[93mpath plot failed ({exc}); run "
                   f"'python examples/plot_path_run.py' by hand\033[0m",

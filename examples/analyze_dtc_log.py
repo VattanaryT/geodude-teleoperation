@@ -9,7 +9,7 @@ to the object field or just being shoved at it.
     python examples/analyze_dtc_log.py            # newest speedj_logs/dtc_*.csv
     python examples/analyze_dtc_log.py path.csv
 """
-import csv, glob, pathlib, sys
+import csv, glob, pathlib, re, sys
 import numpy as np
 
 # Kept in step with torque_backend by hand: this script must run without
@@ -42,10 +42,74 @@ DELAY_FLOOR_S = 8.0e-3
 # 65 N.m on j1.
 LEVERAGE_TUNED_MAX_M = 0.60
 
+# How far the commanded force may point off -e_lin before it is worth saying
+# so. Without Lambda they are antiparallel by construction; with it, mixing is
+# expected but costs cos(angle) of the restoring force.
+SPRING_ANGLE_WARN_DEG = 20.0
+
 
 def f_90(dt):
     """Frequency where a damper fed back through the loop delay flips sign."""
     return 1.0 / (4.0 * max(1.5 * float(dt), DELAY_FLOOR_S))
+
+
+def spring_direction_section(rows, live):
+    """Does the commanded force actually point back along the pose error?
+
+    Every other metric in this file is a magnitude -- |W|/|e|, settled |e|,
+    newtons -- and a magnitude cannot see a wrench that is pointing the wrong
+    way. Measured on dtc_20260907_144815.csv with the arm LOADED AND STILL:
+    23.7 mm of error, 20.0 N commanded, and the force **49.7 degrees off**
+    `-e_lin` -- with only 6.4 N on the Z axis that carried 22 mm of the error.
+    That is why the arm stopped 22 mm short of the surface with a healthy
+    looking force in the console.
+
+    Without Lambda the two must be exactly antiparallel (`W = -K e`, K
+    diagonal), so anything past a couple of degrees there is a frame or sign
+    bug. With Lambda on, the 6x6 apparent-inertia mixes the blades on purpose
+    and some rotation is expected -- but it costs `cos(angle)` of the restoring
+    force, and it is the only thing that explains a spring that will not close
+    the last 20 mm.
+    """
+    def col(name):
+        return np.array([float(r[name]) if r.get(name) else np.nan
+                         for r in rows])
+
+    if "ex" not in rows[0] or "w3" not in rows[0]:
+        return
+    n_j = sum(1 for k in rows[0] if re.fullmatch(r"qd\d+", k))
+    e = np.stack([col(k) for k in ("ex", "ey", "ez")], axis=1)
+    w = np.stack([col(k) for k in ("w3", "w4", "w5")], axis=1)
+    qd = np.stack([col(f"qd{i}") for i in range(n_j)], axis=1)
+    ne = np.linalg.norm(e, axis=1)
+    nw = np.linalg.norm(w, axis=1)
+    still = (live & np.isfinite(ne) & np.isfinite(nw)
+             & (ne > 5e-3) & (nw > 1e-3)
+             & (np.linalg.norm(qd, axis=1) < 0.005))
+    if still.sum() < 50:
+        return
+    cos = np.sum((w[still] / nw[still, None]) * (-e[still] / ne[still, None]),
+                 axis=1)
+    ang = np.degrees(np.arccos(np.clip(cos, -1.0, 1.0)))
+    k_eff = nw[still] / ne[still]
+    print(f"\n  spring direction, arm loaded and STILL ({int(still.sum())} ticks)")
+    print(f"     |e_lin| {1e3 * np.median(ne[still]):.1f} mm   "
+          f"|W_lin| {np.median(nw[still]):.1f} N   "
+          f"k_eff {np.median(k_eff):.0f} N/m")
+    print(f"     angle(W_lin, -e_lin)  median {np.median(ang):.1f} deg  "
+          f"p95 {np.percentile(ang, 95):.1f} deg")
+    per_e = 1e3 * np.median(e[still], axis=0)
+    per_w = np.median(w[still], axis=0)
+    print("     per axis  e = ["
+          + ", ".join(f"{v:+.1f}" for v in per_e) + "] mm   W = ["
+          + ", ".join(f"{v:+.1f}" for v in per_w) + "] N")
+    if np.median(ang) > SPRING_ANGLE_WARN_DEG:
+        print(f"\033[93m     the restoring force is pointing {np.median(ang):.0f} deg "
+              f"off the error, so only cos = {np.cos(np.radians(np.median(ang))):.2f} "
+              f"of it closes the gap. With Lambda on that is the 6x6 mixing "
+              f"the blades; bisect it with --no-dtc-lambda --dtc-k-lin (N/m "
+              f"there, not 1/s^2), where W = -K e is antiparallel by "
+              f"construction.\033[0m")
 
 
 def newest():
@@ -1306,6 +1370,7 @@ def burst_oscillation(rows, live, n, tau_max, w_lin=None):
                     f"chosen at -- expect the 30 Hz mode, and lower "
                     f"--dtc-fn-lin (or move the task to a pose with a shorter "
                     f"moment arm) rather than touching D.\033[0m")
+    spring_direction_section(rows, live)
     print(f"\n  burst oscillation ({BURST_WIN_S:g} s windows, "
           f">{BURST_FLOOR_HZ:g} Hz share, rail-independent)")
     # The margin, not just the verdict. A binary "none" hides how close a run

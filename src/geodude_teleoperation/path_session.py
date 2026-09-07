@@ -42,7 +42,8 @@ class PathSession:
     def __init__(self, *, vf, mesh, free_speed_m_s=0.02, contact_speed_m_s=0.01,
                  standoff_m=0.03, ds_m=0.005, engage_gap_m=0.002,
                  release_gap_m=0.005, arrive_m=0.002, depth_m=0.0,
-                 touch_n=0.0, max_seek_m=0.01,
+                 touch_n=0.0, max_seek_m=0.01, axial_approach=True,
+                 log_path=None,
                  on_execute_start=None, on_execute_end=None,
                  use_field_normal=True):
         self.vf = vf
@@ -68,6 +69,13 @@ class PathSession:
         self._seeking = False
         self._touched = False
         self.last_fs = float("nan")
+        # Rise to the standoff plane along the normal, then cross it
+        # tangentially -- the two moves the field frame is made of, instead of
+        # one diagonal that mixes all three.
+        self.axial_approach = bool(axial_approach)
+        self._log_path = None if log_path is None else str(log_path)
+        self._log_fh = None
+        self._t0 = None
         self._on_execute_start = on_execute_start
         self._on_execute_end = on_execute_end
         self._use_field_normal = bool(use_field_normal)
@@ -191,7 +199,8 @@ class PathSession:
         plan = plan_surface_path(
             self.mesh, self.p_start, self.p_end,
             standoff_m=self.standoff_m, ds_m=self.ds_m,
-            depth_m=self.depth_m, normal_fn=self.normal_at)
+            depth_m=self.depth_m, normal_fn=self.normal_at,
+            live_tcp=self._live_tcp, axial_approach=self.axial_approach)
         with self._lock:
             self.plan = plan
             self.runner = PathRunner(

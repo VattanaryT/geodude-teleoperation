@@ -115,7 +115,8 @@ def project_to_surface(mesh, p):
 
 
 def plan_surface_path(mesh, p_start, p_end, *, standoff_m=0.03, ds_m=0.005,
-                      depth_m=0.0, normal_fn=None) -> PathPlan:
+                      depth_m=0.0, normal_fn=None, live_tcp=None,
+                      axial_approach=True) -> PathPlan:
     """Plan approach -> plunge -> traverse -> retract between two picked points.
 
     ``p_start`` / ``p_end`` are anywhere near the surface (viser click rays land
@@ -131,8 +132,15 @@ def plan_surface_path(mesh, p_start, p_end, *, standoff_m=0.03, ds_m=0.005,
     the latch still measures distance to the *surface* and ``d_surf`` still
     reads 0 there and goes negative when the tool is commanded into the part.
 
-    The plan starts at the standoff point, not at the arm: the runner walks from
-    wherever the carrot actually is, so nothing here needs the live pose.
+    ``live_tcp`` with ``axial_approach`` (the default) splits the travel to the
+    start point into the two moves the field frame is made of, instead of one
+    diagonal: first **along the normal** from wherever the tool is up to the
+    standoff plane, then **purely tangential** across that plane to sit above
+    the start point. Only then does the plunge run, and it is pure ``-n``. A
+    diagonal lead-in mixes all three axes and can carry the tool toward the
+    part while it is still travelling sideways; this cannot. Without
+    ``live_tcp`` the plan starts at the standoff point and the runner walks to
+    it however it likes.
     """
     p0, n0 = project_to_surface(mesh, p_start)
     p1, n1 = project_to_surface(mesh, p_end)
@@ -145,6 +153,13 @@ def plan_surface_path(mesh, p_start, p_end, *, standoff_m=0.03, ds_m=0.005,
     depth_m = float(depth_m)
 
     wps: List[Waypoint] = []
+    if axial_approach and live_tcp is not None:
+        live = np.asarray(live_tcp, dtype=float).reshape(3)
+        # 1. Rise (or fall) along the normal to the standoff plane, staying
+        #    over wherever the tool already is.
+        d_live = float(np.dot(n0, live - p0))
+        lift = live + (standoff_m - d_live) * n0
+        wps.append(Waypoint(lift, p0, n0, PHASE_APPROACH))
     wps.append(Waypoint(p0 + standoff_m * n0, p0, n0, PHASE_APPROACH))
     wps.append(Waypoint(p0 - depth_m * n0, p0, n0, PHASE_PLUNGE))
 
