@@ -1905,6 +1905,22 @@ def build_arg_parser():
              "surface normal and every distance the press latch measures are "
              "identical in A and B -- only the roll changes")
     parser.add_argument(
+        "--path-dither-mm", type=float, default=0.0, metavar="MM",
+        help="wobble the carrot this far across its direction of travel while "
+             "the arm is being dragged (0 = off). This is the one measured "
+             "difference between the stick and the plan: teleop commands "
+             "|dW/dt| 1539 N/s p95 with the force direction wandering 25.6 deg "
+             "per half second and the arm moves on 87%% of driven ticks; the "
+             "plan commands 75 N/s and 0.1 deg at a HIGHER force and the arm "
+             "moves on 4.8%%. Static friction holds against a steady force and "
+             "breaks under a varying one. Try 1.0-2.0; it is an offset, so the "
+             "excursion is bounded and it never adds progress along the plan")
+    parser.add_argument(
+        "--path-dither-hz", type=float, default=3.0, metavar="HZ",
+        help="frequency of --path-dither-mm (default %(default)s). Well under "
+             "the ~15 Hz structural mode and the ~31 Hz f_90, so it excites "
+             "neither")
+    parser.add_argument(
         "--path-contact-at", choices=("plunge", "execute"), default="plunge",
         help="when contact mode is entered. 'plunge' (default) keeps the whole "
              "approach to the start point in plain approach mode and switches "
@@ -2987,6 +3003,8 @@ def main():
             depth_m=args.path_depth,
             touch_n=args.path_touch_n,
             max_seek_m=args.path_max_seek,
+            dither_m=1e-3 * args.path_dither_mm,
+            dither_hz=args.path_dither_hz,
             on_execute_start=_path_execute_start,
             on_execute_end=_path_exit_contact,
         )

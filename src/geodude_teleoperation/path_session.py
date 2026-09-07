@@ -15,6 +15,7 @@ whole concurrency design.
 
 import threading
 import time
+from dataclasses import replace
 
 import numpy as np
 
@@ -43,7 +44,7 @@ class PathSession:
                  standoff_m=0.03, ds_m=0.005, engage_gap_m=0.002,
                  release_gap_m=0.005, arrive_m=0.002, depth_m=0.0,
                  touch_n=0.0, max_seek_m=0.01, axial_approach=True,
-                 log_path=None,
+                 dither_m=0.0, dither_hz=3.0, log_path=None,
                  on_execute_start=None, on_execute_end=None,
                  use_field_normal=True):
         self.vf = vf
@@ -73,6 +74,13 @@ class PathSession:
         # tangentially -- the two moves the field frame is made of, instead of
         # one diagonal that mixes all three.
         self.axial_approach = bool(axial_approach)
+        # Transverse wobble on the carrot while the arm is being dragged. See
+        # _dither: a plan's command is perfectly steady and static friction
+        # holds against a steady force, which is measurably why the stick moves
+        # this arm and the plan does not.
+        self.dither_m = float(max(0.0, dither_m))
+        self.dither_hz = float(max(0.0, dither_hz))
+        self._dither_off = np.zeros(3)
         self._log_path = None if log_path is None else str(log_path)
         self._log_fh = None
         self._t0 = None
@@ -322,7 +330,49 @@ class PathSession:
         )))
         if step.done:
             self._finish()
-        return step
+        return self._with_dither(step)
+
+    def _with_dither(self, step):
+        """Wobble the carrot across its direction of travel.
+
+        Measured, and it is the whole difference between the stick and the
+        plan. Same arm, same gains, same pose error: teleop
+        (dtc_20260905_183436) commands `|dW/dt|` **1539 N/s p95** with the force
+        direction wandering **25.6 deg per half second**, and the arm is moving
+        on **87%** of driven ticks at 29.7 N. The plan
+        (dtc_20260907_150828) commands **75 N/s** and **0.1 deg**, at a *higher*
+        39.3 N, and the arm moves on **4.8%**. Static friction holds against a
+        steady force and breaks under a varying one -- a human dithers without
+        meaning to, and a plan does not. That is why the deterministic path is
+        harder for the arm to follow, not easier.
+
+        Implemented as an *offset* on the carrot, differenced tick to tick, so
+        the wobble is bounded by ``dither_m`` and cannot integrate into a
+        drift. Perpendicular to the travel, so it never adds or removes
+        progress along the plan, and suppressed once the press is engaged --
+        scrubbing a tool that is loaded against the part is a different thing
+        entirely.
+        """
+        if (self.dither_m <= 0.0 or self.dither_hz <= 0.0 or self._engaged
+                or not self.running):
+            self._dither_off = np.zeros(3)
+            return step
+        d = np.asarray(step.delta_world, dtype=float).reshape(3)
+        n = float(np.linalg.norm(d))
+        if n < 1e-12:
+            return step
+        u = d / n
+        # A stable perpendicular: cross with whichever world axis u is least
+        # aligned to, so it never degenerates.
+        axis = np.zeros(3)
+        axis[int(np.argmin(np.abs(u)))] = 1.0
+        p = np.cross(u, axis)
+        p = p / max(float(np.linalg.norm(p)), 1e-12)
+        off = self.dither_m * np.sin(
+            2.0 * np.pi * self.dither_hz * time.monotonic()) * p
+        delta = d + (off - self._dither_off)
+        self._dither_off = off
+        return replace(step, delta_world=delta)
 
     def _seek_for_touch(self, dt, step):
         """Keep the plunge descending until the force says the tool is there.
@@ -392,6 +442,7 @@ class PathSession:
             self._engaged = False
             self._touched = False
             self._seeking = False
+            self._dither_off = np.zeros(3)
             self.state = STATE_RUN
             self._preview_pts = None
         print("path EXECUTE: driving the field-follow carrot along the plan.",

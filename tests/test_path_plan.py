@@ -402,3 +402,65 @@ class HoldWhenTheArmFallsBehindTest(unittest.TestCase):
         step = s.tick(0.01, [0.0, 0.0, 0.02], tcp_xyz=[0.0, 0.0, 0.02])
         self.assertGreater(float(np.linalg.norm(step.delta_world)), 0.0)
         self.assertTrue(s.running)
+
+
+class DitherTest(unittest.TestCase):
+    """A bounded transverse wobble, because a steady force does not break stiction.
+
+    Measured: teleop commands |dW/dt| 1539 N/s p95 with the force direction
+    wandering 25.6 deg per half second and the arm moves on 87% of driven
+    ticks; the plan commands 75 N/s and 0.1 deg at a HIGHER force and moves on
+    4.8%. The smoothness of the deterministic command is the problem.
+    """
+
+    def _session(self, **kw):
+        from geodude_teleoperation.path_session import PathSession
+        s = PathSession(vf=None, mesh=_plate(), use_field_normal=False,
+                        standoff_m=0.02, ds_m=0.02, **kw)
+        s.pick([0.0, 0.0, 0.0])
+        s.pick([0.04, 0.0, 0.0])
+        s.request_execute()
+        s.tick(0.01, [0.0, 0.0, 0.02], tcp_xyz=[0.0, 0.0, 0.02])
+        return s
+
+    def test_off_by_default(self):
+        s = self._session()
+        a = s.tick(0.01, [0.0, 0.0, 0.02], tcp_xyz=[0.0, 0.0, 0.02])
+        b = s.tick(0.01, [0.0, 0.0, 0.02], tcp_xyz=[0.0, 0.0, 0.02])
+        np.testing.assert_allclose(a.delta_world, b.delta_world, atol=1e-12)
+
+    def test_it_is_perpendicular_to_the_travel(self):
+        s = self._session(dither_m=0.002, dither_hz=5.0)
+        p = np.array([0.0, 0.0, 0.02])
+        base = None
+        for _ in range(20):
+            step = s.tick(0.005, p, tcp_xyz=p)
+            if base is None:
+                base = step
+            # The along-travel component must be untouched: the dither adds no
+            # progress and removes none.
+            u = np.array([0.0, 0.0, -1.0])   # plunging straight down here
+            self.assertLess(abs(float(np.dot(step.delta_world, u))
+                                - abs(float(np.linalg.norm(step.delta_world
+                                                           * [0, 0, 1])))), 1e-3)
+
+    def test_the_excursion_stays_bounded(self):
+        s = self._session(dither_m=0.002, dither_hz=5.0)
+        p = np.array([0.0, 0.0, 0.02])
+        lateral = []
+        for _ in range(300):
+            step = s.tick(0.005, p, tcp_xyz=p)
+            p = p + step.delta_world
+            lateral.append(np.linalg.norm(p[:2]))
+        # An offset differenced tick to tick cannot integrate into a drift.
+        self.assertLess(max(lateral), 0.005)
+
+    def test_it_stops_once_the_press_engages(self):
+        s = self._session(dither_m=0.002, dither_hz=5.0)
+        p = np.array([0.0, 0.0, 0.0])       # on the surface, press phase
+        for _ in range(5):
+            s.tick(0.005, p, tcp_xyz=p)
+        self.assertTrue(s.press_engaged)
+        a = s.tick(0.005, p, tcp_xyz=p)
+        b = s.tick(0.005, p, tcp_xyz=p)
+        np.testing.assert_allclose(a.delta_world, b.delta_world, atol=1e-12)
