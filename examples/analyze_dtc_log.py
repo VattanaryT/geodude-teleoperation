@@ -23,6 +23,31 @@ LAMBDA_MAX_LIN_KG = 15.0
 WRIST_BREAKAWAY_NM = 6.0
 
 
+# The loop delay does NOT keep shrinking with --dtc-hz, and pretending it does
+# is how this file gave the wrong advice on every 500 Hz run. Measured on this
+# rig by where the arm actually rings: 125 Hz host -> 24.5 Hz burst, 200 Hz ->
+# 30-32 Hz, 500 Hz -> 30-36 Hz. It moved once and then stopped, so there is a
+# fixed floor -- RTDE round trip plus the on-robot latch plus the UR's own
+# filtering -- of about 8 ms that the host rate cannot touch, and f_90 sits at
+# ~31 Hz permanently. Computing it from the host tick alone reports 79 Hz on a
+# 500 Hz run while the arm rings at 28, which reads as "well under f_90, this
+# is a bandwidth problem" for a burst that is sitting exactly ON f_90.
+DELAY_FLOOR_S = 8.0e-3
+
+# Every gain in this repo was chosen against runs whose shoulder leverage p95
+# sat between 0.21 and 0.56 m, with the 2026-09-05 operating point measured at
+# 0.47. Leverage is `|J_lin.T u|` -- pure geometry -- and loop gain is
+# leverage x K, so a pose past this band is running gains that were never
+# tested there. dtc_20260907_141037.csv reached p95 1.14 and rang at 28 Hz with
+# 65 N.m on j1.
+LEVERAGE_TUNED_MAX_M = 0.60
+
+
+def f_90(dt):
+    """Frequency where a damper fed back through the loop delay flips sign."""
+    return 1.0 / (4.0 * max(1.5 * float(dt), DELAY_FLOOR_S))
+
+
 def newest():
     hits = sorted(glob.glob("speedj_logs/dtc_*.csv"), key=lambda p: pathlib.Path(p).stat().st_mtime)
     if not hits:
@@ -690,7 +715,7 @@ def release_response(rows, live, tau, n):
         # 32.7 Hz against an f_90 of 33 Hz, at D_lin 19.1. Below it the damper
         # is still damping and the loop is simply asking for a bandwidth its
         # delay cannot deliver, which is an fn problem.
-        f90 = 1.0 / (4.0 * 1.5 * dt)
+        f90 = f_90(dt)
         hot = [f for f in grew_f if np.isfinite(f)]
         if hot and max(hot) > 0.7 * f90:
             print(f"     It ran away at {max(hot):.1f} Hz against "
@@ -894,7 +919,7 @@ def oscillation(rows, live, W, n, railed=0, grew=0):
     if ringing:
         print("     \033[93mRINGING: most of the joint motion is at a frequency "
               "nobody commanded.\033[0m")
-        phase = 360.0 * pk * 1.5 * dt
+        phase = 360.0 * pk * max(1.5 * dt, DELAY_FLOOR_S)
         print(f"     At {pk:.2f} Hz one loop delay T_d is {phase:.0f} deg of "
               f"phase (1.5 ticks of {1e3*dt:.1f} ms plus the republish "
               f"thread).")
@@ -1233,7 +1258,7 @@ def burst_oscillation(rows, live, n, tau_max, w_lin=None):
     if not hi.any():
         return
     win = np.hanning(w)
-    f90 = 1.0 / (4.0 * 1.5 * dt)
+    f90 = f_90(dt)
     hits = []
     shares = []
     for s0 in range(0, t.size - w, max(1, w // 2)):
@@ -1271,6 +1296,16 @@ def burst_oscillation(rows, live, n, tau_max, w_lin=None):
             print(f"     the loop gain the 30 Hz mode scales with. Measured on "
                   f"this rig: 0.21/0.31 clean, 0.38/0.44 burst. A clean run "
                   f"under ~0.35 has not been tested where it fails.")
+            p95_lev = float(np.percentile(lev, 95))
+            if p95_lev > LEVERAGE_TUNED_MAX_M:
+                print(
+                    f"\033[93m     p95 {p95_lev:.3f} m is OUTSIDE the band every "
+                    f"gain here was tuned in (up to ~{LEVERAGE_TUNED_MAX_M:.2f}). "
+                    f"Loop gain is leverage x K, so this pose is running "
+                    f"{p95_lev / 0.47:.1f}x the gain the operating point was "
+                    f"chosen at -- expect the 30 Hz mode, and lower "
+                    f"--dtc-fn-lin (or move the task to a pose with a shorter "
+                    f"moment arm) rather than touching D.\033[0m")
     print(f"\n  burst oscillation ({BURST_WIN_S:g} s windows, "
           f">{BURST_FLOOR_HZ:g} Hz share, rail-independent)")
     # The margin, not just the verdict. A binary "none" hides how close a run
