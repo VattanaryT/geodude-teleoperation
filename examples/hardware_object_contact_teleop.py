@@ -1895,6 +1895,13 @@ def build_arg_parser():
              "falls under half of it. Magnitude, not signed, so an inverted "
              "--force-sign still trips it. Default 2x --target-force")
     parser.add_argument(
+        "--path-stall-abort-s", type=float, default=2.0, metavar="S",
+        help="abort the run when the arm has been stuck this long behind the "
+             "command (0 disables). A stalled pose spring is not harmless: it "
+             "keeps commanding Lambda*K*err, so a jammed tool is ground into "
+             "the part at full authority for as long as the plan runs "
+             "(default %(default)s s)")
+    parser.add_argument(
         "--path-plot", dest="path_plot", action="store_true",
         help="after every executed path, render commanded vs actual joints and "
              "tool pose to a PNG next to the dtc log (examples/plot_path_run.py "
@@ -1909,7 +1916,7 @@ def build_arg_parser():
 # Fraction of --max-lead-m at which the plan stops advancing and waits for the
 # arm. Below 1.0 on purpose: the clamp itself is the hard stop, and a plan that
 # only notices at the stop has already wound the command up against it.
-PATH_LAG_HOLD_FRAC = 0.8
+PATH_LAG_HOLD_FRAC = 0.6
 
 
 def path_mode_on(args) -> bool:
@@ -2844,7 +2851,7 @@ def main():
     # anything left over is the controller's own latency.
     # ------------------------------------------------------------------
     path_session = None
-    path_t = {"last": None, "held": False}
+    path_t = {"last": None, "held": False, "held_since": None}
     stop_keys = threading.Event()
 
     def _path_enter_contact():
@@ -2880,6 +2887,21 @@ def main():
             toggle_contact_mode()
         _spawn_path_plot()
 
+    def _render_path_plot(delay_s=0.0):
+        """Run plot_path_run.py on the newest logs. Never raises."""
+        if not path_mode_on(args) or not args.path_plot:
+            return
+        script = pathlib.Path(__file__).resolve().parent / "plot_path_run.py"
+        if delay_s > 0.0:
+            time.sleep(delay_s)
+        try:
+            subprocess.run([sys.executable, str(script), "--no-show"],
+                           check=False, timeout=180)
+        except Exception as exc:
+            print(f"\033[93mpath plot failed ({exc}); run "
+                  f"'python examples/plot_path_run.py' by hand\033[0m",
+                  flush=True)
+
     def _spawn_path_plot():
         """Render commanded-vs-actual for the run that just finished.
 
@@ -2889,21 +2911,8 @@ def main():
         contact CSV -- closed by contact_controller.stop() in the toggle above
         -- and the line-buffered dtc log are both on disk first.
         """
-        if not path_mode_on(args) or not args.path_plot:
-            return
-        script = pathlib.Path(__file__).resolve().parent / "plot_path_run.py"
-
-        def _run():
-            time.sleep(1.0)
-            try:
-                subprocess.run([sys.executable, str(script), "--no-show"],
-                               check=False, timeout=180)
-            except Exception as exc:
-                print(f"\033[93mpath plot failed ({exc}); run "
-                      f"'python examples/plot_path_run.py' by hand\033[0m",
-                      flush=True)
-
-        threading.Thread(target=_run, daemon=True, name="path-plot").start()
+        threading.Thread(target=lambda: _render_path_plot(delay_s=1.0),
+                         daemon=True, name="path-plot").start()
 
     if path_mode_on(args):
         path_session = PathSession(
@@ -2959,10 +2968,26 @@ def main():
         hold = lag >= PATH_LAG_HOLD_FRAC * float(args.max_lead_m)
         if hold != path_t["held"]:
             path_t["held"] = hold
+            path_t["held_since"] = now if hold else None
             if hold and path_session.running:
                 print(f"path: holding, the arm is {1e3 * lag:.1f} mm behind the "
                       f"command (clamp {1e3 * args.max_lead_m:.0f} mm)",
                       flush=True)
+        # A hold that never clears is a stall, and a stalled spring is not
+        # harmless: it commands Lambda*K*err for as long as it lasts.
+        # dtc_20260906_192810.csv held 30 N against 22.3 mm of error with
+        # |qdot| ~ 0 for the last 14 s of the run, grinding the tool into the
+        # part while the plan walked on. Give the arm a bounded chance to break
+        # free, then stop rather than keep pushing.
+        if (hold and path_session.running and args.path_stall_abort_s > 0.0
+                and path_t["held_since"] is not None
+                and (now - path_t["held_since"]) >= args.path_stall_abort_s):
+            print(f"\033[91mpath: the arm has not moved for "
+                  f"{args.path_stall_abort_s:.1f}s while "
+                  f"{1e3 * lag:.1f} mm behind the command -- stalled against "
+                  f"something. Aborting rather than pushing harder.\033[0m",
+                  flush=True)
+            path_session.request_abort()
         step = path_session.tick(dt, carrot, tcp_xyz=tcp, fs=fs,
                                  allow_execute=not blocked,
                                  block_reason=blocked, hold=hold)
@@ -3489,6 +3514,11 @@ def main():
         # single keypress arrives without Enter, and a daemon thread parked
         # there through exit leaves the shell with no echo -- which looks like
         # the script crashed, and outlives it.
+        if path_mode_on(args) and path_session is not None:
+            # Ctrl+C is how most runs end, and it is the run you most want to
+            # look at. Synchronous here (the logs are already closing) rather
+            # than the deferred thread the normal end-of-path uses.
+            _render_path_plot(delay_s=0.0)
         stop_keys.set()
         if tty_saved is not None:
             try:

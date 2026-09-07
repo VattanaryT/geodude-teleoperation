@@ -1437,3 +1437,31 @@ class PathHandoffTest(unittest.TestCase):
         mod = _load_example()
         self.assertGreater(
             mod.build_arg_parser().parse_args([]).dtc_rearm_wrench_s, 0.0)
+
+
+class PathStallAbortTest(unittest.TestCase):
+    """A stalled pose spring is not harmless -- it keeps commanding K*err."""
+
+    def test_stall_abort_defaults_to_two_seconds(self):
+        mod = _load_example()
+        self.assertAlmostEqual(
+            mod.build_arg_parser().parse_args([]).path_stall_abort_s, 2.0)
+
+    def test_the_hold_engages_well_before_the_clamp(self):
+        # dtc_20260906_192810.csv stalled at 22.3 mm against a 30 mm clamp
+        # (0.74 of it) and ground 30 N into the part for 14 s. A threshold at
+        # 0.8 would have watched it happen.
+        mod = _load_example()
+        self.assertLessEqual(mod.PATH_LAG_HOLD_FRAC * 0.030, 0.0223)
+
+    def test_it_aborts_rather_than_pushing_harder(self):
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("Aborting rather than ", src)
+        self.assertIn("(now - path_t[\"held_since\"]) >= args.path_stall_abort_s",
+                      src)
+        self.assertIn("path_session.request_abort()", src)
+
+    def test_ctrl_c_leaves_the_plot_behind(self):
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        teardown = src.split("    finally:")[-1]
+        self.assertIn("_render_path_plot(delay_s=0.0)", teardown)
