@@ -1058,6 +1058,20 @@ class DirectTorqueBackend:
     def n_joints(self) -> int:
         return self._n
 
+    def last_q_cmd(self):
+        """Commanded joint angles, driven joints only, or None.
+
+        The resolved-rate estimate `_note_q_cmd_for_log` builds -- a torque law
+        has no joint setpoint, so this is the joints the pose error is asking
+        for, not a setpoint the loop is servoing to. Only populated while a log
+        is open, which is the same condition that computes it.
+        """
+        q = self._last_q_cmd
+        if q is None:
+            return None
+        q = np.asarray(q, dtype=float).reshape(-1)
+        return None if q.size != self._n or not np.all(np.isfinite(q)) else q
+
     @property
     def ur_slots(self) -> list:
         """Positions of the driven joints inside the control-group slice."""

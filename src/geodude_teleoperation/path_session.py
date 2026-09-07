@@ -44,7 +44,8 @@ class PathSession:
                  standoff_m=0.03, ds_m=0.005, engage_gap_m=0.002,
                  release_gap_m=0.005, arrive_m=0.002, depth_m=0.0,
                  touch_n=0.0, max_seek_m=0.01, axial_approach=True,
-                 dither_m=0.0, dither_hz=3.0, log_path=None,
+                 dither_m=0.0, dither_hz=3.0, single_point=True,
+                 log_path=None,
                  on_execute_start=None, on_execute_end=None,
                  use_field_normal=True):
         self.vf = vf
@@ -81,6 +82,11 @@ class PathSession:
         self.dither_m = float(max(0.0, dither_m))
         self.dither_hz = float(max(0.0, dither_hz))
         self._dither_off = np.zeros(3)
+        # One click, not two: the start is wherever the tool already is,
+        # projected onto the surface. The long free-space traverse to a picked
+        # green dot is the part that kept failing, and it was never the
+        # experiment -- the experiment is the descent and the trace.
+        self.single_point = bool(single_point)
         self._log_path = None if log_path is None else str(log_path)
         self._log_fh = None
         self._t0 = None
@@ -148,13 +154,14 @@ class PathSession:
     def status_line(self) -> str:
         d = self.latch_distance_m
         picked = sum(p is not None for p in (self.p_start, self.p_end))
+        need = 1 if self.single_point else 2
         bias = 0.0 if self.runner is None else self.runner.depth_bias
         extra = ""
         if self.touch_n > 0.0:
             extra = (f" Fs={self.last_fs:+.1f}N "
                      f"{'touched' if self._touched else 'seeking' if self._seeking else 'no-touch'}"
                      f" seek={bias * 1000:.1f}mm")
-        return (f"path[{self.state}]: picked={picked}/2 "
+        return (f"path[{self.state}]: picked={picked}/{need} "
                 f"phase={self._phase} engaged={int(self._engaged)} "
                 f"d_surf={d * 1000.0:+.1f}mm "
                 f"wp={self.runner.index if self.runner else 0}"
@@ -179,8 +186,27 @@ class PathSession:
         return n
 
     def pick(self, xyz):
-        """Record a picked point. First = start, second = end, third resets."""
+        """Record a picked point.
+
+        Single-point mode (the default): every click is the END point, and the
+        start is the tool's own position projected onto the surface -- so the
+        plan reads "descend where you are, then trace to here". Two-point mode
+        keeps the original first = start, second = end, third starts over.
+        """
         p = np.asarray(xyz, dtype=float).reshape(3)
+        if self.single_point:
+            with self._lock:
+                if self.state in (STATE_RUN, STATE_PREVIEW):
+                    return self.state
+                if self._live_tcp is None:
+                    print("\033[93mpath: no live TCP yet -- wait for the first "
+                          "viser tick, then click\033[0m", flush=True)
+                    return self.state
+                self.p_start = project_to_surface(self.mesh, self._live_tcp)[0]
+                self.p_end = p
+            self.replan()
+            self._refresh_scene()
+            return self.state
         with self._lock:
             if self.state in (STATE_RUN, STATE_PREVIEW):
                 return self.state

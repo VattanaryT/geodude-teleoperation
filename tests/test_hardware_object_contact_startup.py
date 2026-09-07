@@ -1549,3 +1549,64 @@ class PathContactEntryTest(unittest.TestCase):
         src = _EXAMPLE.read_text(encoding="utf-8")
         start = src.split("def _path_execute_start():")[1].split("\n    def ")[0]
         self.assertIn("_snap_follow_to_live()", start)
+
+
+class PathOwnsTheCarrotTest(unittest.TestCase):
+    """Nothing but the plan may move the carrot once DTC is live.
+
+    drive_field_follow's catch-up branch snaps the carrot onto the live TCP
+    when the leftover passes --max-lead-m. Under a stick that is a re-base
+    between gestures; under a plan it is a step change in the commanded pose
+    (position AND rotation), which is what "cmd y and z stepped and the wrist
+    rotated instead of the arm tracking" was.
+    """
+
+    def test_path_mode_disables_the_idle_rebase_once_dtc_is_live(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args(["--path-mode"])
+        self.assertFalse(mod.follow_rebase_on_idle(args, on_dtc=True))
+
+    def test_it_still_rebases_before_the_handoff(self):
+        # speedJ startup align has no _input_active gate, so the idle hold is
+        # the only thing keeping a hands-off arm off a stale target there.
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args(["--path-mode"])
+        self.assertTrue(mod.follow_rebase_on_idle(args, on_dtc=False))
+
+    def test_teleop_is_untouched(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args([])
+        self.assertTrue(mod.follow_rebase_on_idle(args, on_dtc=True))
+
+
+class CommandedArmGhostTest(unittest.TestCase):
+    """A second arm at the commanded joints, so "which joint is being asked" is
+    visible rather than inferred from six overlaid torque traces."""
+
+    def test_on_by_default_in_path_mode(self):
+        mod = _load_example()
+        self.assertTrue(mod.build_arg_parser().parse_args([]).path_ghost_arm)
+        self.assertFalse(mod.build_arg_parser().parse_args(
+            ["--no-path-ghost-arm"]).path_ghost_arm)
+
+    def test_it_is_posed_from_the_resolved_rate_estimate(self):
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("dtc_backend.last_q_cmd()", src)
+        # Spliced through ur_slots, not [:n]: the control group carries the
+        # rail at slot 0 and the driven joints are not the first six.
+        self.assertIn("dtc_backend.ur_slots", src)
+
+    def test_last_q_cmd_is_a_method_and_validates_its_own_shape(self):
+        from geodude_teleoperation.torque_backend import DirectTorqueBackend
+        import inspect
+        self.assertTrue(inspect.isfunction(DirectTorqueBackend.last_q_cmd))
+        obj = DirectTorqueBackend.__new__(DirectTorqueBackend)
+        obj._last_q_cmd = None
+        obj._n = 6
+        self.assertIsNone(obj.last_q_cmd())
+        obj._last_q_cmd = np.full(6, np.nan)
+        self.assertIsNone(obj.last_q_cmd())
+        obj._last_q_cmd = np.zeros(3)
+        self.assertIsNone(obj.last_q_cmd())
+        obj._last_q_cmd = np.arange(6.0)
+        np.testing.assert_allclose(obj.last_q_cmd(), np.arange(6.0))

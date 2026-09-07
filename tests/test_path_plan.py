@@ -204,7 +204,7 @@ class SessionRequestTest(unittest.TestCase):
         self.STATE_READY = STATE_READY
         self.STATE_RUN = STATE_RUN
         s = PathSession(vf=None, mesh=_plate(), use_field_normal=False,
-                        standoff_m=0.02, ds_m=0.01)
+                        standoff_m=0.02, ds_m=0.01, single_point=False)
         s.pick([0.0, 0.0, 0.0])
         s.pick([0.05, 0.0, 0.0])
         return s
@@ -247,7 +247,7 @@ class SessionRequestTest(unittest.TestCase):
         from geodude_teleoperation.path_session import PathSession
         calls = []
         s = PathSession(vf=None, mesh=_plate(), use_field_normal=False,
-                        standoff_m=0.02, ds_m=0.01,
+                        standoff_m=0.02, ds_m=0.01, single_point=False,
                         on_execute_start=lambda: calls.append("start"),
                         on_execute_end=lambda: calls.append("end"))
         s.pick([0.0, 0.0, 0.0])
@@ -301,7 +301,8 @@ class DepthAndTouchTest(unittest.TestCase):
     def _run_session(self, **kw):
         from geodude_teleoperation.path_session import PathSession
         s = PathSession(vf=None, mesh=self.mesh, use_field_normal=False,
-                        standoff_m=0.02, ds_m=0.02, contact_speed_m_s=0.01, **kw)
+                        standoff_m=0.02, ds_m=0.02, contact_speed_m_s=0.01,
+                        single_point=False, **kw)
         s.pick([0.0, 0.0, 0.0])
         s.pick([0.04, 0.0, 0.0])
         s.request_execute()
@@ -366,7 +367,7 @@ class HoldWhenTheArmFallsBehindTest(unittest.TestCase):
     def _session(self, **kw):
         from geodude_teleoperation.path_session import PathSession
         s = PathSession(vf=None, mesh=_plate(), use_field_normal=False,
-                        standoff_m=0.02, ds_m=0.02, **kw)
+                        standoff_m=0.02, ds_m=0.02, single_point=False, **kw)
         s.pick([0.0, 0.0, 0.0])
         s.pick([0.04, 0.0, 0.0])
         s.request_execute()
@@ -416,7 +417,7 @@ class DitherTest(unittest.TestCase):
     def _session(self, **kw):
         from geodude_teleoperation.path_session import PathSession
         s = PathSession(vf=None, mesh=_plate(), use_field_normal=False,
-                        standoff_m=0.02, ds_m=0.02, **kw)
+                        standoff_m=0.02, ds_m=0.02, single_point=False, **kw)
         s.pick([0.0, 0.0, 0.0])
         s.pick([0.04, 0.0, 0.0])
         s.request_execute()
@@ -464,3 +465,48 @@ class DitherTest(unittest.TestCase):
         a = s.tick(0.005, p, tcp_xyz=p)
         b = s.tick(0.005, p, tcp_xyz=p)
         np.testing.assert_allclose(a.delta_world, b.delta_world, atol=1e-12)
+
+
+class SinglePointPickTest(unittest.TestCase):
+    """One click: the end point. The start is where the tool already is.
+
+    The long free-space traverse to a picked start was the part that kept
+    failing on hardware and it was never the experiment -- the experiment is
+    the descent and the trace.
+    """
+
+    def _session(self, **kw):
+        from geodude_teleoperation.path_session import PathSession
+        return PathSession(vf=None, mesh=_plate(), use_field_normal=False,
+                           standoff_m=0.02, ds_m=0.02, **kw)
+
+    def test_one_click_plans_from_the_live_tool(self):
+        s = self._session()
+        s.set_live_tcp([0.01, 0.0, 0.05])
+        s.pick([0.06, 0.0, 0.0])
+        self.assertIsNotNone(s.plan)
+        # Start is the live TCP projected onto the plate, end is the click.
+        np.testing.assert_allclose(s.plan.start_surface, [0.01, 0.0, 0.0],
+                                   atol=1e-9)
+        np.testing.assert_allclose(s.plan.end_surface, [0.06, 0.0, 0.0],
+                                   atol=1e-9)
+
+    def test_a_second_click_replans_to_the_new_end(self):
+        s = self._session()
+        s.set_live_tcp([0.01, 0.0, 0.05])
+        s.pick([0.06, 0.0, 0.0])
+        s.pick([-0.04, 0.0, 0.0])
+        np.testing.assert_allclose(s.plan.end_surface, [-0.04, 0.0, 0.0],
+                                   atol=1e-9)
+
+    def test_it_refuses_before_the_first_live_tcp(self):
+        s = self._session()
+        s.pick([0.06, 0.0, 0.0])
+        self.assertIsNone(s.plan)
+
+    def test_two_point_mode_still_works(self):
+        s = self._session(single_point=False)
+        s.pick([0.0, 0.0, 0.0])
+        self.assertIsNone(s.plan)
+        s.pick([0.05, 0.0, 0.0])
+        self.assertIsNotNone(s.plan)

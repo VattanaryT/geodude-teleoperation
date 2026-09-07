@@ -182,6 +182,7 @@ from geodude_teleoperation.torque_backend import (
     DEFAULT_RAIL_OSC_HOLD_S,
     RAIL_OSC_WINDOW_S,
     DirectTorqueBackend,
+    splice_ur,
 )
 from geodude_teleoperation.virtual_fixture import FieldAlignPreview, workstation_field_z_arrows
 
@@ -851,6 +852,18 @@ def follow_rebase_on_idle(args, *, on_dtc) -> bool:
         # The release snap owns the idle target now, and it must be the *only*
         # thing writing it: field-follow's quiet branch re-bases at the main
         # loop's 50 Hz, which would re-introduce the chase this flag removes.
+        return False
+    if path_mode_on(args) and bool(on_dtc):
+        # **The plan owns the carrot, so nothing else may move it.** With this
+        # on, drive_field_follow's catch-up branch calls `follow.snap_tcp(live)`
+        # the moment the leftover passes --max-lead-m -- it TELEPORTS the
+        # command back onto the arm. Under a stick that is a helpful re-base
+        # between gestures; under a plan it is a step change in the commanded
+        # pose, the spring unloads, the plan pushes out again, and the arm gets
+        # a sawtooth instead of a ramp. Reported from hardware as "a step
+        # change in cmd y and z, and the wrist rotated instead of the arm
+        # tracking" -- snap_tcp also re-bases the commanded rotation, which is
+        # what the wrist was following.
         return False
     return bool(args.dtc_hold_at_tick) or not bool(on_dtc)
 
@@ -1905,6 +1918,17 @@ def build_arg_parser():
              "surface normal and every distance the press latch measures are "
              "identical in A and B -- only the roll changes")
     parser.add_argument(
+        "--no-path-ghost-arm", dest="path_ghost_arm", action="store_false",
+        help="do not draw the second, commanded-joints arm in viser under "
+             "--path-mode")
+    parser.add_argument(
+        "--path-two-point", dest="path_single_point", action="store_false",
+        help="pick BOTH ends of the path in viser (the original behaviour). "
+             "The default is one click: the red dot is the end, and the run "
+             "starts by descending onto the surface from wherever the tool "
+             "already is. The long free-space traverse to a picked start point "
+             "was the part that kept failing, and it was never the experiment")
+    parser.add_argument(
         "--path-dither-mm", type=float, default=0.0, metavar="MM",
         help="wobble the carrot this far across its direction of travel while "
              "the arm is being dragged (0 = off). This is the one measured "
@@ -1961,7 +1985,8 @@ def build_arg_parser():
     parser.add_argument(
         "--no-path-plot", dest="path_plot", action="store_false",
         help="skip the post-run plot")
-    parser.set_defaults(press_feedforward=None, path_plot=True)
+    parser.set_defaults(press_feedforward=None, path_plot=True,
+                        path_single_point=True, path_ghost_arm=True)
     return parser
 
 
@@ -3005,6 +3030,7 @@ def main():
             max_seek_m=args.path_max_seek,
             dither_m=1e-3 * args.path_dither_mm,
             dither_hz=args.path_dither_hz,
+            single_point=args.path_single_point,
             on_execute_start=_path_execute_start,
             on_execute_end=_path_exit_contact,
         )
@@ -3474,6 +3500,29 @@ def main():
                                       name="geodude", joint_sliders=False)
             robot_viz.update(q_with_vention())
             n_hidden = hide_gripper_visuals(robot_viz)
+            ghost_robot = None
+            if path_mode_on(args) and args.path_ghost_arm:
+                # A second arm at the joints the command implies, so "which
+                # joint is the plan actually asking to move" is visible rather
+                # than inferred from six overlaid torque traces. It is posed
+                # from qc0..qc5 -- the resolved-rate estimate the dtc log
+                # already carries -- because a torque law has no joint
+                # setpoint; it is an estimate and the scene label says so.
+                try:
+                    ghost_robot = viz.add_robot(
+                        kin_system, name="geodude_cmd", joint_sliders=False)
+                    ghost_robot.update(q_with_vention())
+                    hide_gripper_visuals(ghost_robot)
+                    print(
+                        "viser: /geodude_cmd is a second arm at the COMMANDED "
+                        "joints (resolved-rate estimate of what the pose error "
+                        "is asking for -- a torque law has no joint setpoint). "
+                        "Hide it in the scene tree if it is in the way.",
+                        flush=True,
+                    )
+                except Exception as exc:
+                    print(f"path: command-arm ghost unavailable ({exc})",
+                          flush=True)
             update_chamfer = add_right_chamfer_visual(
                 viz, kin_system, q=q_with_vention())
             update_ghost = add_ghost_chamfer_visual(viz, visible=True)
@@ -3570,6 +3619,12 @@ def main():
                 q = q_with_vention()
                 robot_viz.update(q)
                 update_chamfer(q)
+                if ghost_robot is not None and dtc_backend is not None:
+                    q_cmd = dtc_backend.last_q_cmd()
+                    if q_cmd is not None:
+                        ghost_robot.update(splice_ur(
+                            np.asarray(q, dtype=float).copy(), q_cmd,
+                            [joint_idx[i] for i in dtc_backend.ur_slots]))
                 fk = kin_system.compute_forward_kinematics(q)
                 T_wrist = np.asarray(
                     fk.get_link_pose("right_ur5e/wrist_3_link").to_transformation_matrix())
@@ -3650,8 +3705,12 @@ def main():
                       f"(F flips it 180 deg about tool Z, free space only)",
                       flush=True)
                 print(
-                    "path mode: click a START point then an END point on the "
-                    "object in viser (a third click starts over). "
+                    ("path mode: click the END point on the object in viser "
+                     "-- the run descends onto the surface where the tool "
+                     "already is, then traces to your click. "
+                     if args.path_single_point else
+                     "path mode: click a START point then an END point on the "
+                     "object in viser (a third click starts over). ")
                     + path_key_help() + ".",
                     flush=True,
                 )
