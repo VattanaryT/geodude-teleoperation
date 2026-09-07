@@ -1903,11 +1903,18 @@ def build_arg_parser():
              "identical in A and B -- only the roll changes")
     parser.add_argument(
         "--path-stall-abort-s", type=float, default=2.0, metavar="S",
-        help="abort the run when the arm has been stuck this long behind the "
-             "command (0 disables). A stalled pose spring is not harmless: it "
-             "keeps commanding Lambda*K*err, so a jammed tool is ground into "
-             "the part at full authority for as long as the plan runs "
-             "(default %(default)s s)")
+        help="window over which a stall is judged (0 disables). A stalled pose "
+             "spring is not harmless: it keeps commanding Lambda*K*err, so a "
+             "jammed tool is ground into the part at full authority for as "
+             "long as the plan runs (default %(default)s s)")
+    parser.add_argument(
+        "--path-stall-mm", type=float, default=1.0, metavar="MM",
+        help="TCP travel below this over --path-stall-abort-s, while the arm "
+             "is also behind the command, counts as stalled (default "
+             "%(default)s mm). Displacement over a window, not speed: the "
+             "motion is stick-slip, so an instantaneous speed reads zero most "
+             "of the time even on an arm that is making progress. Measured "
+             "idle noise floor on this rig is 0.18 mm/s p95")
     parser.add_argument(
         "--path-plot", dest="path_plot", action="store_true",
         help="after every executed path, render commanded vs actual joints and "
@@ -2858,7 +2865,7 @@ def main():
     # anything left over is the controller's own latency.
     # ------------------------------------------------------------------
     path_session = None
-    path_t = {"last": None, "held": False, "held_since": None}
+    path_t = {"last": None, "held": False, "held_since": None, "hist": []}
     stop_keys = threading.Event()
 
     def _path_enter_contact():
@@ -2980,21 +2987,33 @@ def main():
                 print(f"path: holding, the arm is {1e3 * lag:.1f} mm behind the "
                       f"command (clamp {1e3 * args.max_lead_m:.0f} mm)",
                       flush=True)
-        # A hold that never clears is a stall, and a stalled spring is not
-        # harmless: it commands Lambda*K*err for as long as it lasts.
-        # dtc_20260906_192810.csv held 30 N against 22.3 mm of error with
-        # |qdot| ~ 0 for the last 14 s of the run, grinding the tool into the
-        # part while the plan walked on. Give the arm a bounded chance to break
-        # free, then stop rather than keep pushing.
-        if (hold and path_session.running and args.path_stall_abort_s > 0.0
-                and path_t["held_since"] is not None
-                and (now - path_t["held_since"]) >= args.path_stall_abort_s):
-            print(f"\033[91mpath: the arm has not moved for "
-                  f"{args.path_stall_abort_s:.1f}s while "
-                  f"{1e3 * lag:.1f} mm behind the command -- stalled against "
-                  f"something. Aborting rather than pushing harder.\033[0m",
-                  flush=True)
+        # A stall is the arm NOT MOVING, not the arm being behind. Being
+        # behind is the normal state of a spring dragging a friction-limited
+        # arm: dtc_20260907_131940.csv sat at 20.9 mm of lag for its whole run
+        # and still covered 17 mm in 2.8 s -- and an abort on lag alone killed
+        # it twice. Measure displacement over the abort window instead. It has
+        # to be a window, not a tick: the motion is stick-slip (median TCP
+        # speed 0.14 mm/s, peaks over 40 mm/s), so any instantaneous speed
+        # reads zero most of the time.
+        hist = path_t["hist"]
+        if path_session.running:
+            hist.append((now, np.asarray(tcp, dtype=float).copy()))
+        else:
+            hist.clear()
+        window = max(float(args.path_stall_abort_s), 0.5)
+        while len(hist) > 2 and (now - hist[0][0]) > window:
+            hist.pop(0)
+        moved = None
+        if hist and (now - hist[0][0]) >= float(args.path_stall_abort_s) > 0.0:
+            moved = float(np.linalg.norm(np.asarray(tcp) - hist[0][1]))
+        if (hold and path_session.running and moved is not None
+                and moved < 1e-3 * args.path_stall_mm):
+            print(f"\033[91mpath: the arm moved {1e3 * moved:.2f} mm in "
+                  f"{args.path_stall_abort_s:.1f}s while {1e3 * lag:.1f} mm "
+                  f"behind the command -- stalled against something. Aborting "
+                  f"rather than pushing harder.\033[0m", flush=True)
             path_session.request_abort()
+            hist.clear()
         step = path_session.tick(dt, carrot, tcp_xyz=tcp, fs=fs,
                                  allow_execute=not blocked,
                                  block_reason=blocked, hold=hold)

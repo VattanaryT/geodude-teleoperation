@@ -1456,10 +1456,22 @@ class PathStallAbortTest(unittest.TestCase):
 
     def test_it_aborts_rather_than_pushing_harder(self):
         src = _EXAMPLE.read_text(encoding="utf-8")
-        self.assertIn("Aborting rather than ", src)
-        self.assertIn("(now - path_t[\"held_since\"]) >= args.path_stall_abort_s",
-                      src)
+        self.assertIn("stalled against something. Aborting ", src)
         self.assertIn("path_session.request_abort()", src)
+
+    def test_a_stall_is_measured_as_displacement_not_as_lag(self):
+        # dtc_20260907_131940.csv: 20.9 mm of lag for the whole run, 17 mm of
+        # travel in 2.8 s. Lag alone aborted a healthy approach, twice.
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("moved < 1e-3 * args.path_stall_mm", src)
+        self.assertIn("moved is not None", src)
+        mod = _load_example()
+        self.assertAlmostEqual(
+            mod.build_arg_parser().parse_args([]).path_stall_mm, 1.0)
+
+    def test_the_stall_window_clears_when_the_run_stops(self):
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("hist.clear()", src)
 
     def test_ctrl_c_leaves_the_plot_behind(self):
         src = _EXAMPLE.read_text(encoding="utf-8")
