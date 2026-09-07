@@ -1,3 +1,4 @@
+import time
 import unittest
 
 import numpy as np
@@ -510,3 +511,64 @@ class SinglePointPickTest(unittest.TestCase):
         self.assertIsNone(s.plan)
         s.pick([0.05, 0.0, 0.0])
         self.assertIsNotNone(s.plan)
+
+
+class SeekPacingTest(unittest.TestCase):
+    """The seek budget is millimetres the ARM followed, not seconds elapsed.
+
+    Growing depth_bias at the commanded speed spends --path-max-seek in
+    max_seek/contact_speed seconds whatever the arm does: 10 mm at 20 mm/s is
+    0.5 s, and four consecutive hardware runs aborted with "no touch within
+    10 mm" while the tool had barely moved.
+    """
+
+    def _session(self, **kw):
+        from geodude_teleoperation.path_session import PathSession
+        s = PathSession(vf=None, mesh=_plate(), use_field_normal=False,
+                        standoff_m=0.02, ds_m=0.02, contact_speed_m_s=0.02,
+                        touch_n=3.0, max_seek_m=0.01, single_point=False, **kw)
+        s.pick([0.0, 0.0, 0.0])
+        s.pick([0.04, 0.0, 0.0])
+        s.request_execute()
+        s.tick(0.01, [0.0, 0.0, 0.02], tcp_xyz=[0.0, 0.0, 0.02], fs=0.0)
+        return s
+
+    def test_a_lagging_arm_does_not_spend_the_budget(self):
+        s = self._session()
+        before = s.runner.depth_bias      # one tick from the setup, arm at the carrot
+        carrot = np.array([0.0, 0.0, 0.005])
+        tcp = np.array([0.0, 0.0, 0.05])          # 45 mm behind
+        for _ in range(200):
+            s.tick(0.01, carrot, tcp_xyz=tcp, fs=0.0)
+        # 200 ticks at 20 mm/s would be 40 mm of clock-paced seek, four times
+        # the whole budget. The arm followed none of it, so neither did this.
+        self.assertAlmostEqual(s.runner.depth_bias, before, places=9)
+        self.assertTrue(s.running)
+
+    def test_an_arm_that_keeps_up_does_spend_it(self):
+        s = self._session()
+        p = np.array([0.0, 0.0, 0.0])
+        for _ in range(200):
+            step = s.tick(0.01, p, tcp_xyz=p, fs=0.0)
+            if step is None or not s.running:
+                break
+        self.assertGreater(s.runner.depth_bias, 0.0)
+
+    def test_a_seek_the_arm_never_follows_times_out(self):
+        s = self._session(seek_timeout_s=0.05)
+        carrot = np.array([0.0, 0.0, 0.005])
+        tcp = np.array([0.0, 0.0, 0.05])
+        for _ in range(50):
+            s.tick(0.01, carrot, tcp_xyz=tcp, fs=0.0)
+            if not s.running:
+                break
+            time.sleep(0.005)
+        self.assertFalse(s.running)
+
+    def test_touch_still_ends_the_seek(self):
+        s = self._session()
+        p = np.array([0.0, 0.0, 0.0])
+        for _ in range(10):
+            s.tick(0.01, p, tcp_xyz=p, fs=5.0)
+        self.assertTrue(s.running)
+        self.assertLess(s.runner.depth_bias, 0.01)

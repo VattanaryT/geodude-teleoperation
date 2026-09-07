@@ -91,6 +91,67 @@ python examples/analyze_contact_log.py
 Watch `F_emit` (what reached the arm) against `F_press` (what the law asked
 for), `engaged` going 0→1, and `n_deg` staying near 2–3°.
 
+## Deterministic path (`--path-mode`) — every knob
+
+No input device. Align, click **one point** on the object in viser (the end),
+`p` previews with the orange ghost, Enter executes: descend where the tool is →
+trace to the click → retract. `a` aborts, `r` clears, `f` flips the tool 180°.
+
+### Geometry — where the plan goes
+
+| flag | default | what it does |
+|---|---|---|
+| `--path-standoff` | 0.03 m | height above the surface the approach and retract sit at |
+| `--path-depth` | 0.002 m | how far **below** the scanned surface the plunge and traverse are commanded. The knob for "it does not go far enough in" **before** the hand-off; after the latch engages the spring loses the normal and `--target-force` owns it alone |
+| `--path-ds` | 0.005 m | traverse waypoint spacing. Lower it on tight curvature |
+| `--path-two-point` | off | go back to picking start *and* end |
+| `--no-path-axial-approach` | — | one diagonal lead-in instead of normal-then-tangential |
+
+### Speed — and slower is NOT gentler
+
+| flag | default | what it does |
+|---|---|---|
+| `--path-speed` | 0.02 m/s | free-space carrot speed |
+| `--path-contact-speed` | 0.005 m/s | plunge and traverse speed |
+| `--path-dither-mm` | 0 | transverse wobble on the carrot; **the measured difference between the stick and the plan** |
+| `--path-dither-hz` | 3.0 | its frequency (under the 15 Hz mode and the 31 Hz `f_90`) |
+
+A slow command is *stickier*, not gentler: `--stick-linear-scale` 0.0015 →
+0.0008 took the stall fraction 5.6% → 37.5%. The stick runs at ~75 mm/s. Try
+`--path-speed 0.05`.
+
+### Contact — when the press takes over
+
+| flag | default | what it does |
+|---|---|---|
+| `--target-force` | 15 N | the press, feed-forward, once latched |
+| `--path-engage-gap` | 0.002 m | latch ON at this distance to the surface. Smaller = later = deeper |
+| `--path-release-gap` | 0.005 m | latch OFF above this (the gap is hysteresis) |
+| `--path-touch-n` | 0 | also require this much measured `Fs`. **The gate that catches a scan offset** |
+| `--path-max-seek` | 0.01 m | how far past the planned depth the touch seek may go — millimetres the *arm* followed, not seconds |
+| `--path-seek-lag` | 0.003 m | the seek deepens only while the arm is this close to the carrot |
+| `--path-seek-timeout-s` | 20 s | give up on a seek the arm never follows |
+| `--path-contact-at` | plunge | `execute` switches to contact mode at the start instead |
+| `--press-overload-n` | 2×Fd | \|Fs\| above this cuts the press |
+
+### Pacing and safety
+
+| flag | default | what it does |
+|---|---|---|
+| `--path-hold-frac` | 0.8 | fraction of `--max-lead-m` at which the plan waits. **A force cap**: 0.6 delivered 13 N where 0.8 delivered 30 |
+| `--path-stall-abort-s` | 2.0 s | window a stall is judged over |
+| `--path-stall-mm` | 1.0 mm | TCP travel below this over that window, while behind, counts as stalled |
+| `--path-plot` / `--no-path-plot` | on | render the PNG after every run and on Ctrl+C |
+| `--no-path-ghost-arm` | — | hide the second, commanded-joints arm in viser |
+
+### The gains that matter most here
+
+`--dtc-fn-lin` (loop gain is `leverage × K`; leverage is the pose),
+`--dtc-k-ang` under `--no-dtc-lambda` (the angular blade competes with the
+descent for the same shoulder torque), and `--max-lead-m` (force ceiling).
+`--no-dtc-lambda --dtc-k-lin 3000` makes `W = -K e` antiparallel to the error
+by construction — it removed a 50° misalignment and all the burst windows.
+
 ## Other
 
 - The live matplotlib plot is **off** by default; `--speedj-plot` opens it.

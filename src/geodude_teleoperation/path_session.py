@@ -43,7 +43,8 @@ class PathSession:
     def __init__(self, *, vf, mesh, free_speed_m_s=0.02, contact_speed_m_s=0.01,
                  standoff_m=0.03, ds_m=0.005, engage_gap_m=0.002,
                  release_gap_m=0.005, arrive_m=0.002, depth_m=0.0,
-                 touch_n=0.0, max_seek_m=0.01, axial_approach=True,
+                 touch_n=0.0, max_seek_m=0.01, seek_lag_m=0.003,
+                 seek_timeout_s=20.0, axial_approach=True,
                  dither_m=0.0, dither_hz=3.0, single_point=True,
                  log_path=None,
                  on_execute_start=None, on_execute_end=None,
@@ -68,6 +69,17 @@ class PathSession:
         # pure TCP force rotates the wrist instead of translating the arm.
         self.touch_n = float(max(0.0, touch_n))
         self.max_seek_m = float(max(0.0, max_seek_m))
+        # The seek is paced by the ARM, not by the clock. Growing depth_bias at
+        # the commanded speed spends --path-max-seek in max_seek/contact_speed
+        # seconds whatever the arm does -- 10 mm at 20 mm/s is 0.5 s, which is
+        # how four consecutive runs aborted with "no touch within 10 mm" while
+        # the tool had barely moved. It only deepens while the arm is within
+        # seek_lag_m of the carrot, so the budget measures real commanded
+        # penetration; seek_timeout_s is the backstop for an arm that never
+        # arrives at all.
+        self.seek_lag_m = float(max(0.0, seek_lag_m))
+        self.seek_timeout_s = float(max(0.0, seek_timeout_s))
+        self._seek_t0 = None
         self._seeking = False
         self._touched = False
         self.last_fs = float("nan")
@@ -341,12 +353,16 @@ class PathSession:
         if self.state != STATE_RUN or self.runner is None:
             return None
 
+        tcp = self._live_tcp if tcp_xyz is None else np.asarray(
+            tcp_xyz, dtype=float).reshape(3)
         step = self.runner.step(0.0 if hold else dt, carrot_xyz)
         self._phase = step.phase
         if not hold:
-            step = self._seek_for_touch(dt, step)
-        tcp = self._live_tcp if tcp_xyz is None else np.asarray(
-            tcp_xyz, dtype=float).reshape(3)
+            lag = None
+            if tcp is not None and carrot_xyz is not None:
+                lag = float(np.linalg.norm(
+                    np.asarray(carrot_xyz, dtype=float).reshape(3) - tcp))
+            step = self._seek_for_touch(dt, step, lag)
         self._engaged = bool(self.latch.update(LatchState(
             tcp_xyz=tcp,
             surface_xyz=step.surface_xyz,
@@ -400,7 +416,7 @@ class PathSession:
         self._dither_off = off
         return replace(step, delta_world=delta)
 
-    def _seek_for_touch(self, dt, step):
+    def _seek_for_touch(self, dt, step, lag=None):
         """Keep the plunge descending until the force says the tool is there.
 
         Off unless ``touch_n`` is set. The plan's surface is a laser scan
@@ -429,16 +445,35 @@ class PathSession:
             return step
         if self.runner.depth_bias >= self.max_seek_m:
             print(f"\033[91mpath: no touch within {self.max_seek_m * 1000:.0f} mm "
-                  f"of the planned surface (Fs={self.last_fs:.1f} N). The scan "
-                  f"and the part disagree by more than that, or the force sign "
-                  f"is inverted. Aborting.\033[0m", flush=True)
+                  f"of the planned surface, commanded AND followed "
+                  f"(Fs={self.last_fs:.1f} N). The scan and the part disagree "
+                  f"by more than that, or the force sign is inverted. "
+                  f"Aborting.\033[0m", flush=True)
             self.request_abort()
             return step
+        now = time.monotonic()
         if not self._seeking:
             self._seeking = True
+            self._seek_t0 = now
             print(f"path: seeking for contact (Fs={self.last_fs:.1f} N < "
                   f"{self.touch_n:.1f} N), up to "
-                  f"{self.max_seek_m * 1000:.0f} mm deeper", flush=True)
+                  f"{self.max_seek_m * 1000:.0f} mm deeper, paced by the arm",
+                  flush=True)
+        if (self.seek_timeout_s > 0.0 and self._seek_t0 is not None
+                and (now - self._seek_t0) > self.seek_timeout_s):
+            print(f"\033[91mpath: the seek has run {self.seek_timeout_s:.0f}s "
+                  f"and the arm has followed only "
+                  f"{self.runner.depth_bias * 1000:.1f} mm of it "
+                  f"(Fs={self.last_fs:.1f} N). The arm is not descending, so "
+                  f"this is not a scan-offset problem. Aborting.\033[0m",
+                  flush=True)
+            self.request_abort()
+            return step
+        if lag is not None and lag > self.seek_lag_m:
+            # The carrot is already ahead of the arm; deepening it further buys
+            # no force the lead clamp will not throw away, and it would spend
+            # the whole budget in a second of wall clock.
+            return step
         # One tick behind by construction: this tick's delta was computed
         # against the previous goal. At the contact speed that is tens of
         # microns, and being a tick late on a search is the safe direction.
@@ -468,6 +503,7 @@ class PathSession:
             self._engaged = False
             self._touched = False
             self._seeking = False
+            self._seek_t0 = None
             self._dither_off = np.zeros(3)
             self.state = STATE_RUN
             self._preview_pts = None

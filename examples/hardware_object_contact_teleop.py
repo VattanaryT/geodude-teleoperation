@@ -1881,7 +1881,21 @@ def build_arg_parser():
     parser.add_argument(
         "--path-max-seek", type=float, default=0.01, metavar="M",
         help="how far past the planned depth --path-touch-n may seek before "
-             "giving up and aborting the run (default %(default)s m)")
+             "giving up and aborting the run (default %(default)s m). Paced by "
+             "the ARM: it only deepens while the tool is within "
+             "--path-seek-lag of the carrot, so this is real commanded "
+             "penetration and not a stopwatch")
+    parser.add_argument(
+        "--path-seek-lag", type=float, default=0.003, metavar="M",
+        help="the seek deepens only while the arm is within this of the carrot "
+             "(default %(default)s m). Growing it while the arm is already "
+             "behind spends the whole --path-max-seek budget in a second of "
+             "wall clock and buys no force the lead clamp will not discard")
+    parser.add_argument(
+        "--path-seek-timeout-s", type=float, default=20.0, metavar="S",
+        help="give up on a seek the arm never follows (default %(default)s s, "
+             "0 disables). Distinguishes 'the scan is wrong' from 'the arm is "
+             "not descending', which the same abort used to conflate")
     parser.add_argument(
         "--path-engage-gap", type=float, default=0.002, metavar="M",
         help="press latch ON at this signed distance from the planned surface "
@@ -3028,6 +3042,8 @@ def main():
             depth_m=args.path_depth,
             touch_n=args.path_touch_n,
             max_seek_m=args.path_max_seek,
+            seek_lag_m=args.path_seek_lag,
+            seek_timeout_s=args.path_seek_timeout_s,
             dither_m=1e-3 * args.path_dither_mm,
             dither_hz=args.path_dither_hz,
             single_point=args.path_single_point,
