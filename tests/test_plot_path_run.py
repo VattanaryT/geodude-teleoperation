@@ -155,3 +155,48 @@ class PlotPathRunTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FieldFrameTest(unittest.TestCase):
+    """The logged pose error's frame, settled by measurement.
+
+    `ex,ey,ez` is `R_ee^T (ee - tgt)`: the LIVE EE BODY frame, oriented
+    (arm - target). Measured over dtc_20260907_150828.csv the residual against
+    that candidate is 0.00 mm, while base-frame and target-frame candidates
+    miss by 10-26 mm. Two things follow, and both were got wrong once:
+    `W = -K e` really does drive toward the target, and reaching the commanded
+    field frame from the logged error is `R_cmd^T R_ee`, not `R_cmd^T`.
+    """
+
+    def setUp(self):
+        self.mod = _load()
+
+    def test_quaternion_to_matrix_round_trips(self):
+        from scipy.spatial.transform import Rotation
+        r = Rotation.from_euler("xyz", [[0.3, -0.7, 1.1], [0.0, 0.0, 0.0]])
+        q = r.as_quat()[:, [3, 0, 1, 2]]      # scipy is xyzw, ours is wxyz
+        np.testing.assert_allclose(self.mod._rot_from_quat(q), r.as_matrix(),
+                                   atol=1e-12)
+
+    def test_it_returns_none_without_the_columns(self):
+        self.assertIsNone(self.mod._rot_from_quat(np.full((4, 4), np.nan)))
+        self.assertIsNone(self.mod._rot_from_quat(np.zeros((3, 3))))
+
+    def test_the_field_frame_rotation_preserves_length(self):
+        from scipy.spatial.transform import Rotation
+        rng = np.random.default_rng(0)
+        R_cmd = Rotation.random(8, random_state=1).as_matrix()
+        R_ee = Rotation.random(8, random_state=2).as_matrix()
+        e = rng.normal(size=(8, 3))
+        R_rel = np.einsum("nji,njk->nik", R_cmd, R_ee)
+        e_f = np.einsum("nij,nj->ni", R_rel, e)
+        np.testing.assert_allclose(np.linalg.norm(e_f, axis=1),
+                                   np.linalg.norm(e, axis=1), atol=1e-12)
+
+    def test_n_is_the_commanded_tool_z(self):
+        # With the commanded and live frames equal, the field-frame split is
+        # just the body-frame error, so +n is body Z by construction.
+        R = np.eye(3)[None]
+        R_rel = np.einsum("nji,njk->nik", R, R)
+        e = np.array([[1.0, 2.0, 3.0]])
+        np.testing.assert_allclose(np.einsum("nij,nj->ni", R_rel, e), e)

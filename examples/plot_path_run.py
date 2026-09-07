@@ -30,7 +30,12 @@ Six rows:
    the commanded press ``F_press`` and what actually reached the arm
    ``F_emit`` -- they differ silently whenever the contact axis is refused --
    plus the latch distance ``d_surf`` and the ``engaged`` bool it produced.
-7. **Raw six-axis F/T**, untared, reference only. Its own panel because the
+7. **The field frame** -- the pose error and the commanded force rotated into
+   the *commanded* tool frame, whose Z column is the field's approach axis. This
+   is the t1 / t2 / n view the plan is written in: approach and retract are pure
+   +n, the plunge is pure -n, the traverse is tangential. Base XYZ is what the
+   task-space controller consumes; this is what the geometry means.
+8. **Raw six-axis F/T**, untared, reference only. Its own panel because the
    free-space offset is several N of tool weight: the sensor is not gravity
    compensated and the speedj backend cannot issue ``zero_ftsensor``.
 """
@@ -119,6 +124,21 @@ def _finite(a):
     return np.isfinite(a).any()
 
 
+def _rot_from_quat(q_wxyz):
+    """(N, 4) w-x-y-z -> (N, 3, 3), or None when the column is absent/empty."""
+    q = np.asarray(q_wxyz, dtype=float)
+    if q.ndim != 2 or q.shape[1] != 4 or not np.isfinite(q).any():
+        return None
+    n = np.linalg.norm(q, axis=1, keepdims=True)
+    q = np.divide(q, np.where(n > 1e-12, n, np.nan))
+    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+    return np.stack([
+        np.stack([1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)], -1),
+        np.stack([2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)], -1),
+        np.stack([2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)], -1),
+    ], axis=1)
+
+
 def _phase_on_dtc_clock(dtc_t, contact_rows):
     """The contact loop's ``phase`` column resampled onto the dtc tick clock.
 
@@ -178,7 +198,7 @@ def main(argv=None):
     err_ang = np.linalg.norm(
         np.stack([col(rows, f"er{a}") for a in ("x", "y", "z")], axis=1), axis=1)
 
-    fig, axes = plt.subplots(7, 1, figsize=(13.5, 22.0), sharex=False)
+    fig, axes = plt.subplots(8, 1, figsize=(13.5, 25.0), sharex=False)
     fig.suptitle(f"{pathlib.Path(path).name}"
                  + (f"   +   {pathlib.Path(c_path).name}" if c_rows else ""),
                  fontsize=10)
@@ -303,11 +323,56 @@ def main(argv=None):
                 transform=ax.transAxes, fontsize=9)
         ax.set_xlabel("t [s]")
 
-    # 7. raw six-axis F/T, untared -- reference only, no loop reads it. Its own
+    # 7. the field frame: what is commanded along tangent1 / tangent2 / normal.
+    # Base XYZ is what the controller consumes, but the plan and the stick both
+    # speak the field frame -- approach and retract are pure +n, plunge is pure
+    # -n, traverse is tangential -- so a panel in XYZ cannot answer "is it
+    # pushing into the surface or across it". The commanded rotation is logged
+    # (tgt_q*) and its Z column IS the field approach axis, so no new logging is
+    # needed: rotate the error and the commanded force into that frame.
+    ax = axes[6]
+    R_cmd = _rot_from_quat(np.stack([col(rows, f"tgt_q{a}") for a in "wxyz"],
+                                    axis=1))
+    R_ee = _rot_from_quat(np.stack([col(rows, f"ee_q{a}") for a in "wxyz"],
+                                   axis=1))
+    if R_cmd is not None and R_ee is not None:
+        shade_phases(ax, t, phase)
+        w_lin = np.stack([col(rows, f"w{i}") for i in (3, 4, 5)], axis=1)
+        # `ex,ey,ez` and `w3..w5` are already in the LIVE EE BODY frame, and
+        # the error is oriented (arm - target): measured against the absolute
+        # pose pair over a whole run, e == R_ee^T (ee - tgt) to a residual of
+        # 0.00 mm, while base-frame and target-frame candidates miss by 10-26.
+        # So `W = -K e` does drive toward the target (the repo's convention is
+        # right), and reaching the commanded field frame from here is
+        # R_cmd^T R_ee, not R_cmd^T.
+        R_rel = np.einsum("nji,njk->nik", R_cmd, R_ee)
+        e_f = np.einsum("nij,nj->ni", R_rel, err)
+        w_f = np.einsum("nij,nj->ni", R_rel, w_lin)
+        for i, (name, style) in enumerate((("t1", "-"), ("t2", "-"),
+                                           ("n (into surface)", "-"))):
+            ax.plot(t, 1e3 * e_f[:, i], ls=style, lw=1.2 if i < 2 else 1.8,
+                    label=f"e_{name}")
+        ax.set_ylabel("pose error in the\nfield frame [mm]")
+        axf = ax.twinx()
+        for i, name in enumerate(("t1", "t2", "n")):
+            axf.plot(t, w_f[:, i], lw=0.9, ls="--", alpha=0.75,
+                     label=f"W_{name}")
+        axf.set_ylabel("commanded force [N]")
+        h1, l1 = ax.get_legend_handles_labels()
+        h2, l2 = axf.get_legend_handles_labels()
+        ax.legend(h1 + h2, l1 + l2, ncol=6, fontsize=7, loc="upper right")
+        ax.set_title("field frame: +n is the commanded tool Z, into the "
+                     "surface. Approach/retract are pure n, traverse is "
+                     "tangential.", fontsize=8, loc="left")
+    else:
+        ax.text(0.01, 0.5, "no ee_q*/tgt_q* columns (log predates them)",
+                transform=ax.transAxes, fontsize=9)
+
+    # 8. raw six-axis F/T, untared -- reference only, no loop reads it. Its own
     # panel because the free-space offset is several N of tool weight (the
     # sensor is not gravity compensated and the speedj backend cannot issue
     # zero_ftsensor), so plotting it next to a tared 15 N target squashes both.
-    ax = axes[6]
+    ax = axes[7]
     drew_ft = False
     if c_rows:
         ct = col(c_rows, "elapsed")
