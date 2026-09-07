@@ -1465,3 +1465,31 @@ class PathStallAbortTest(unittest.TestCase):
         src = _EXAMPLE.read_text(encoding="utf-8")
         teardown = src.split("    finally:")[-1]
         self.assertIn("_render_path_plot(delay_s=0.0)", teardown)
+
+
+class ToolOrientationWiringTest(unittest.TestCase):
+    """A and B are a choice; the operator has to be able to see which is live."""
+
+    def test_the_flag_exists_and_defaults_to_a(self):
+        mod = _load_example()
+        self.assertFalse(mod.build_arg_parser().parse_args([]).tool_flip)
+        self.assertTrue(mod.build_arg_parser().parse_args(["--tool-flip"]).tool_flip)
+
+    def test_the_flip_reaches_both_copies_of_the_field(self):
+        # vf lives here for approach_basis_at and in the helper process for
+        # project(); if only one is flipped the ghost and the command are two
+        # different orientations.
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("follow.set_roll_flip(flip)", src)
+
+    def test_it_is_refused_in_contact_and_mid_path(self):
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        toggle = src.split("def toggle_tool_roll():")[1].split("\n    def ")[0]
+        self.assertIn('mode["active"] == "contact"', toggle)
+        self.assertIn("path_session.running", toggle)
+
+    def test_it_is_marked_in_viser_and_in_the_terminal(self):
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn('add_label(\n                        "/tool_orientation"', src)
+        self.assertIn("tool orientation:", src)
+        self.assertIn("f=flip tool 180 deg", src)

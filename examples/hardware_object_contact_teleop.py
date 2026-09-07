@@ -1895,6 +1895,13 @@ def build_arg_parser():
              "falls under half of it. Magnitude, not signed, so an inverted "
              "--force-sign still trips it. Default 2x --target-force")
     parser.add_argument(
+        "--tool-flip", action="store_true",
+        help="start in tool orientation B: the whole field rolled 180 deg "
+             "about tool Z, so the chamfer faces the other way down the "
+             "stringer. 'F' toggles it live (free space only). Tool +Z, the "
+             "surface normal and every distance the press latch measures are "
+             "identical in A and B -- only the roll changes")
+    parser.add_argument(
         "--path-stall-abort-s", type=float, default=2.0, metavar="S",
         help="abort the run when the arm has been stuck this long behind the "
              "command (0 disables). A stalled pose spring is not harmless: it "
@@ -3044,11 +3051,60 @@ def main():
         print(f"path mode: command loop at {args.loop_hz:.0f} Hz on its own "
               f"thread (viser ticks the visuals at 20 Hz).", flush=True)
 
+    tool_roll = {"flip": bool(args.tool_flip), "label": None}
+
+    def tool_roll_name(flip=None):
+        flip = tool_roll["flip"] if flip is None else bool(flip)
+        return "B (180 deg)" if flip else "A (0 deg)"
+
+    def apply_tool_roll(flip, *, announce=True):
+        """Set tool orientation A/B on the field, the helper and the display."""
+        flip = bool(flip)
+        tool_roll["flip"] = flip
+        if follow is not None:
+            follow.set_roll_flip(flip)
+        else:
+            setter = getattr(vf, "set_roll_flip", None)
+            if callable(setter):
+                setter(flip)
+        if tool_roll["label"] is not None:
+            try:
+                tool_roll["label"].text = f"TOOL {tool_roll_name(flip)}"
+            except Exception:
+                pass
+        if path_session is not None:
+            path_session.tool_label = f"TOOL {tool_roll_name(flip)}"
+        if announce:
+            print(f"\033[96mtool orientation -> {tool_roll_name(flip)}\033[0m",
+                  flush=True)
+
+    def toggle_tool_roll():
+        """Flip the tool 180 deg about its own axis. Free space only.
+
+        A 180 deg roll is a real wrist move, and commanding one while the tool
+        is on the part drags it across the surface at the full angular
+        stiffness. Contact and a running path both refuse.
+        """
+        if mode["active"] == "contact":
+            print("\033[93mtool flip refused: leave contact mode first (the "
+                  "tool is on the part)\033[0m", flush=True)
+            return
+        if path_session is not None and path_session.running:
+            print("\033[93mtool flip refused: a path is running ('a' aborts "
+                  "it first)\033[0m", flush=True)
+            return
+        apply_tool_roll(not tool_roll["flip"])
+        print("the arm will roll wrist 3 through 180 deg as the field target "
+              "moves -- watch it, and re-pick the path if you had one",
+              flush=True)
+
     def on_path_key(key):
         if path_session is None:
             return False
         if key in ("\r", "\n"):
             path_session.request_execute()
+        elif key in ("f", "F"):
+            toggle_tool_roll()
         elif key == "p":
             path_session.request_preview()
         elif key == "a":
@@ -3058,6 +3114,10 @@ def main():
         else:
             return False
         return True
+
+    def path_key_help() -> str:
+        return ("keys: Enter=execute  p=preview  a=abort  r=reset picks  "
+                "f=flip tool 180 deg")
 
     def start_path_keys():
         """Enter=execute, p=preview, a=abort, r=reset. Survives align finishing.
@@ -3213,8 +3273,7 @@ def main():
         if path_mode_on(args):
             print(
                 "path mode: no input device opened. Click a start and an end "
-                "point on the object in viser, 'p' previews with the ghost, "
-                "Enter executes, 'a' aborts, 'r' clears the picks.",
+                "point on the object in viser. " + path_key_help() + ".",
                 flush=True,
             )
             return
@@ -3273,6 +3332,9 @@ def main():
                   f"-- {backend_note}; button {args.mode_button} toggles. Ctrl+C to quit.")
             start_control_and_device()
             if path_mode_on(args):
+                apply_tool_roll(tool_roll["flip"], announce=False)
+                print(f"tool orientation: {tool_roll_name()}  (F flips it)",
+                      flush=True)
                 start_path_keys()
             elif align is not None and args.align_delay is None:
                 print(
@@ -3469,12 +3531,26 @@ def main():
             viz.add_ticker(lambda: update())
 
             if path_session is not None:
+                path_session.on_flip_tool = toggle_tool_roll
                 path_session.attach(viz.server)
+                try:
+                    # A scene label, not just a GUI field: which way the tool
+                    # faces is a property of the arm in the scene, and the
+                    # operator is looking at the arm, not at the sidebar.
+                    tool_roll["label"] = viz.scene.add_label(
+                        "/tool_orientation",
+                        text=f"TOOL {tool_roll_name()}",
+                        position=(0.0, 0.0, 0.6))
+                except Exception as exc:
+                    print(f"path: tool label unavailable ({exc})", flush=True)
+                apply_tool_roll(tool_roll["flip"], announce=False)
+                print(f"tool orientation: {tool_roll_name()}  "
+                      f"(F flips it 180 deg about tool Z, free space only)",
+                      flush=True)
                 print(
                     "path mode: click a START point then an END point on the "
-                    "object in viser (a third click starts over). 'p' or the "
-                    "preview button walks the orange ghost along the plan; "
-                    "Enter or EXECUTE runs it on the arm; 'a' aborts.",
+                    "object in viser (a third click starts over). "
+                    + path_key_help() + ".",
                     flush=True,
                 )
             start_control_and_device()

@@ -197,6 +197,15 @@ def _project_helper_main(kind, payload, in_q, out_q):
         msg = in_q.get()
         if msg is None:
             break
+        # Control messages carry a string first: they change the field and
+        # answer nothing, so the request/response pairing of a project query is
+        # untouched. Anything else is (xyz, R).
+        if isinstance(msg[0], str):
+            if msg[0] == "roll_flip":
+                setter = getattr(vf, "set_roll_flip", None)
+                if callable(setter):
+                    setter(bool(msg[1]))
+            continue
         xyz, R = msg
         out_q.put(_project_once(vf, xyz, R))
 
@@ -283,6 +292,12 @@ class FieldFollow:
         if project_in_process:
             self._start_helper(mesh)
         self._pending = np.zeros(3, dtype=float)
+        # Tool orientation A/B, forwarded to the helper on the NEXT project
+        # call rather than written to the queue from whichever thread pressed
+        # the key: the queue is a call/response pair owned by the follow tick,
+        # and a second producer on it is how a response gets read by the wrong
+        # request.
+        self._roll_flip_pending = None
         self._idle = True
         self._xyz = None
         self._xyz_cmd = None
@@ -418,8 +433,30 @@ class FieldFollow:
             self._proc.terminate()
         self._proc = None
 
+    def set_roll_flip(self, flip) -> bool:
+        """Tool orientation A (0 deg) / B (180 deg). Applies to both copies.
+
+        ``vf`` lives here for ``approach_basis_at`` and in the helper process
+        for ``project()``; both have to agree or the ghost and the command are
+        two different orientations.
+        """
+        flip = bool(flip)
+        setter = getattr(self._vf, "set_roll_flip", None)
+        if callable(setter):
+            setter(flip)
+        if self._proc is not None:
+            self._roll_flip_pending = flip
+        return flip
+
     def _project(self, xyz, R):
         if self._proc is not None:
+            if self._roll_flip_pending is not None:
+                flip, self._roll_flip_pending = self._roll_flip_pending, None
+                try:
+                    self._in_q.put(("roll_flip", bool(flip)), timeout=1.0)
+                except Exception as exc:
+                    print(f"field follow: could not forward the tool roll to "
+                          f"the project helper ({exc})", flush=True)
             self._in_q.put((
                 np.asarray(xyz, dtype=float).reshape(3).copy(),
                 np.asarray(R, dtype=float).reshape(3, 3).copy(),

@@ -101,6 +101,10 @@ class PathSession:
         self._server = None
         self._gui = {}
         self._status_cb = None
+        # Set by the host when the tool orientation changes; shown in the GUI
+        # and the terminal status so A and B are never guessed from the render.
+        self.tool_label = ""
+        self.on_flip_tool = None
 
     # ---------------------------------------------------------------- state
 
@@ -138,7 +142,8 @@ class PathSession:
                 f"phase={self._phase} engaged={int(self._engaged)} "
                 f"d_surf={d * 1000.0:+.1f}mm "
                 f"wp={self.runner.index if self.runner else 0}"
-                f"/{len(self.plan) if self.plan else 0}{extra}")
+                f"/{len(self.plan) if self.plan else 0}{extra}"
+                + (f"  {self.tool_label}" if self.tool_label else ""))
 
     # ---------------------------------------------------------------- picking
 
@@ -496,7 +501,12 @@ class PathSession:
             b_execute = gui.add_button("EXECUTE")
             b_abort = gui.add_button("ABORT")
             b_reset = gui.add_button("reset picks")
-        self._gui = {"status": status, "speed": speed, "cspeed": cspeed}
+            tool = gui.add_text("tool orientation",
+                                initial_value=self.tool_label or "TOOL A (0 deg)",
+                                disabled=True)
+            b_flip = gui.add_button("flip tool 180 deg (free space only)")
+        self._gui = {"status": status, "speed": speed, "cspeed": cspeed,
+                     "tool": tool}
 
         @speed.on_update
         def _(_e):
@@ -537,12 +547,21 @@ class PathSession:
         b_execute.on_click(_click("EXECUTE", self.request_execute))
         b_abort.on_click(_click("ABORT", self.request_abort))
         b_reset.on_click(_click("reset picks", lambda: self.request("reset")))
+        b_flip.on_click(_click(
+            "flip tool", lambda: self.on_flip_tool()
+            if self.on_flip_tool is not None else None))
 
     def refresh_gui(self):
         status = self._gui.get("status")
         if status is not None:
             try:
                 status.value = self.status_line()
+            except Exception:
+                pass
+        tool = self._gui.get("tool")
+        if tool is not None and self.tool_label:
+            try:
+                tool.value = self.tool_label
             except Exception:
                 pass
         if self._status_cb is not None:

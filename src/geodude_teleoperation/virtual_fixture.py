@@ -244,7 +244,7 @@ class OrientationField:
     def __init__(self, mesh, key_direction=None, source_vertex=None, t_surface=None,
                  t_spatial=None, num_boundary_samples=None, max_iterations=50,
                  smoothing=0.75, end_line_fraction=0.06, swap_end_lines=False,
-                 diffusion_scalar=5000.0, flow="length"):
+                 diffusion_scalar=5000.0, flow="length", roll_flip=False):
         del key_direction, source_vertex, t_surface
         vertices = np.asarray(mesh.vertices, dtype=np.float64)
         normals = np.asarray(mesh.vertex_normals, dtype=np.float64)
@@ -258,6 +258,12 @@ class OrientationField:
         if np.dot(mean_t, axis) < 0.0:
             axis = -np.asarray(axis, dtype=float)
         self._length_axis = axis / np.linalg.norm(axis)
+        # Tool orientation A (False) or B (True). Roll about tool Z is locked
+        # to the PCA length axis, so the opposite axis IS the 180 deg flip --
+        # exactly, and with no separate rotation to compose. Tool +Z, the
+        # surface normal and therefore every distance the press latch measures
+        # are untouched by it.
+        self._roll_flip = bool(roll_flip)
         self.sink_points = vertices[sink]
         self.source_points = vertices[source]
 
@@ -317,12 +323,39 @@ class OrientationField:
             local = _nlerp_matrices(local, self._table_flat, w)
         return local
 
+    @property
+    def roll_flip(self) -> bool:
+        return bool(getattr(self, "_roll_flip", False))
+
+    def set_roll_flip(self, flip) -> bool:
+        """Select tool orientation A (0 deg) or B (rolled 180 deg about tool Z).
+
+        The stringer looks the same from either side, but the tool does not:
+        one roll puts the chamfer's working face down the part and the other
+        puts it up. Both are legitimate approaches to the same surface, so this
+        is a choice, not a correction.
+
+        Applied as ``R @ Rz(pi)`` *after* the roll lock, not by negating the
+        roll-lock axis: ``lock_roll_to_axis`` re-flips a candidate +X that
+        opposes the field's own, so negating the axis is a no-op (measured --
+        it returns the identical matrix).
+        """
+        self._roll_flip = bool(flip)
+        return self._roll_flip
+
     def _approach_from_local(self, local_basis):
         approach = _orient_approach_into_surface(local_basis)
         axis = getattr(self, "_length_axis", None)
         if axis is None:
             return approach
-        return lock_roll_to_axis(approach, axis)
+        approach = lock_roll_to_axis(approach, axis)
+        if getattr(self, "_roll_flip", False):
+            # Rz(pi) in the TOOL frame: negate +X and +Y, keep +Z. Negating the
+            # roll-lock axis instead does nothing, because lock_roll_to_axis
+            # re-flips a candidate +X that opposes the field's own -- measured,
+            # it returns the identical matrix.
+            approach = approach @ np.diag([-1.0, -1.0, 1.0])
+        return approach
 
     def project(self, proposed_reference):
         translator, position = _motor_position(proposed_reference)
