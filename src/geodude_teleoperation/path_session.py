@@ -20,12 +20,14 @@ import numpy as np
 
 from .path_plan import (
     PHASE_DONE,
+    PHASE_PLUNGE,
     PathRunner,
     plan_surface_path,
     preview_positions,
     project_to_surface,
 )
-from .press_latch import AllOf, DistanceLatch, LatchState, PhaseLatch
+from .press_latch import (
+    AllOf, DistanceLatch, ForceLatch, LatchState, PhaseLatch)
 
 STATE_PICK = "pick"          # waiting for two clicks
 STATE_READY = "ready"        # planned, not moving
@@ -39,7 +41,8 @@ class PathSession:
 
     def __init__(self, *, vf, mesh, free_speed_m_s=0.02, contact_speed_m_s=0.01,
                  standoff_m=0.03, ds_m=0.005, engage_gap_m=0.002,
-                 release_gap_m=0.005, arrive_m=0.002,
+                 release_gap_m=0.005, arrive_m=0.002, depth_m=0.0,
+                 touch_n=0.0, max_seek_m=0.01,
                  on_execute_start=None, on_execute_end=None,
                  use_field_normal=True):
         self.vf = vf
@@ -49,6 +52,22 @@ class PathSession:
         self.standoff_m = float(standoff_m)
         self.ds_m = float(ds_m)
         self.arrive_m = float(arrive_m)
+        # How far BELOW the nominal surface the plunge and traverse are
+        # commanded. The scan is placed by calibration, so the model surface
+        # and the real one differ by millimetres; a plan that stops exactly on
+        # the model leaves the tool touching lightly or not at all.
+        self.depth_m = float(depth_m)
+        # Optional force confirmation. 0 disables and the latch is pure
+        # geometry. Above 0 the plunge keeps descending until Fs reaches it
+        # (bounded by max_seek_m) AND the latch requires it, which is what
+        # stops the press handing over while the tool is still in the air --
+        # the failure this rig already has a log of: with the normal freed, a
+        # pure TCP force rotates the wrist instead of translating the arm.
+        self.touch_n = float(max(0.0, touch_n))
+        self.max_seek_m = float(max(0.0, max_seek_m))
+        self._seeking = False
+        self._touched = False
+        self.last_fs = float("nan")
         self._on_execute_start = on_execute_start
         self._on_execute_end = on_execute_end
         self._use_field_normal = bool(use_field_normal)
@@ -59,11 +78,19 @@ class PathSession:
         self.p_end = None
         self.plan = None
         self.runner = None
-        self.latch = AllOf([
+        latches = [
             PhaseLatch(),
             DistanceLatch(engage_gap_m=engage_gap_m,
                           release_gap_m=release_gap_m),
-        ])
+        ]
+        if self.touch_n > 0.0:
+            # A threshold, not a regulator: this sensor's spread is well under
+            # a newton and the gate sits several newtons up, so it is a
+            # trustworthy "is anything there at all" even though it is not
+            # trustworthy enough to close a 15 N loop on.
+            latches.append(ForceLatch(self.touch_n, engage_frac=1.0,
+                                      release_frac=0.3))
+        self.latch = AllOf(latches)
         self._distance_latch = self.latch.latches[1]
         self._engaged = False
         self._phase = "-"
@@ -101,11 +128,17 @@ class PathSession:
     def status_line(self) -> str:
         d = self.latch_distance_m
         picked = sum(p is not None for p in (self.p_start, self.p_end))
+        bias = 0.0 if self.runner is None else self.runner.depth_bias
+        extra = ""
+        if self.touch_n > 0.0:
+            extra = (f" Fs={self.last_fs:+.1f}N "
+                     f"{'touched' if self._touched else 'seeking' if self._seeking else 'no-touch'}"
+                     f" seek={bias * 1000:.1f}mm")
         return (f"path[{self.state}]: picked={picked}/2 "
                 f"phase={self._phase} engaged={int(self._engaged)} "
                 f"d_surf={d * 1000.0:+.1f}mm "
                 f"wp={self.runner.index if self.runner else 0}"
-                f"/{len(self.plan) if self.plan else 0}")
+                f"/{len(self.plan) if self.plan else 0}{extra}")
 
     # ---------------------------------------------------------------- picking
 
@@ -153,7 +186,7 @@ class PathSession:
         plan = plan_surface_path(
             self.mesh, self.p_start, self.p_end,
             standoff_m=self.standoff_m, ds_m=self.ds_m,
-            normal_fn=self.normal_at)
+            depth_m=self.depth_m, normal_fn=self.normal_at)
         with self._lock:
             self.plan = plan
             self.runner = PathRunner(
@@ -165,8 +198,11 @@ class PathSession:
             self.state = STATE_READY
             self._preview_pts = None
         print(f"path planned: {len(plan)} waypoints, {plan.length_m() * 100:.1f} cm "
-              f"(standoff {self.standoff_m * 100:.1f} cm, ds {self.ds_m * 1000:.0f} mm)",
-              flush=True)
+              f"(standoff {self.standoff_m * 100:.1f} cm, ds {self.ds_m * 1000:.0f} mm, "
+              f"depth {self.depth_m * 1000:.1f} mm"
+              + (f", seek to {self.touch_n:.1f} N within "
+                 f"{self.max_seek_m * 1000:.0f} mm" if self.touch_n > 0 else "")
+              + ")", flush=True)
         self._refresh_scene()
         return plan
 
@@ -206,7 +242,7 @@ class PathSession:
 
     # ------------------------------------------------------------------ tick
 
-    def tick(self, dt, carrot_xyz, tcp_xyz=None, allow_execute=True,
+    def tick(self, dt, carrot_xyz, tcp_xyz=None, fs=None, allow_execute=True,
              block_reason=""):
         """Advance the state machine. Returns a ``PathStep`` or ``None``.
 
@@ -222,6 +258,8 @@ class PathSession:
         arm, and only EXECUTE has to wait for it.
         """
         self.set_live_tcp(tcp_xyz)
+        if fs is not None:
+            self.last_fs = float(fs)
         req = self._take_request()
         if req == "execute" and not allow_execute:
             print(f"\033[93mpath: not ready to execute{': ' + block_reason if block_reason else ''}\033[0m",
@@ -244,6 +282,7 @@ class PathSession:
 
         step = self.runner.step(dt, carrot_xyz)
         self._phase = step.phase
+        step = self._seek_for_touch(dt, step)
         tcp = self._live_tcp if tcp_xyz is None else np.asarray(
             tcp_xyz, dtype=float).reshape(3)
         self._engaged = bool(self.latch.update(LatchState(
@@ -251,9 +290,57 @@ class PathSession:
             surface_xyz=step.surface_xyz,
             normal=step.normal,
             phase_press=step.press_phase,
+            fs=self.last_fs,
         )))
         if step.done:
             self._finish()
+        return step
+
+    def _seek_for_touch(self, dt, step):
+        """Keep the plunge descending until the force says the tool is there.
+
+        Off unless ``touch_n`` is set. The plan's surface is a laser scan
+        placed by calibration; the real part can sit a few millimetres either
+        side of it. Descending on geometry alone therefore ends one of two
+        ways -- pressed harder than asked, or hovering while the log reports a
+        healthy 15 N command that never reaches anything -- and only a force
+        reading tells the two apart.
+
+        The seek grows the runner's ``depth_bias``, so the goal keeps sinking
+        and the runner never "arrives" at the plunge waypoint. On touch it
+        freezes, and every later traverse waypoint inherits the same bias: the
+        traverse then follows the surface at the depth contact was actually
+        found, not the depth the model predicted.
+        """
+        if self.touch_n <= 0.0 or self.runner is None or self._touched:
+            return step
+        if step.phase != PHASE_PLUNGE:
+            return step
+        if np.isfinite(self.last_fs) and self.last_fs >= self.touch_n:
+            self._touched = True
+            self._seeking = False
+            print(f"path: touch confirmed at Fs={self.last_fs:.1f} N, "
+                  f"{self.runner.depth_bias * 1000:.1f} mm past the planned "
+                  f"depth", flush=True)
+            return step
+        if self.runner.depth_bias >= self.max_seek_m:
+            print(f"\033[91mpath: no touch within {self.max_seek_m * 1000:.0f} mm "
+                  f"of the planned surface (Fs={self.last_fs:.1f} N). The scan "
+                  f"and the part disagree by more than that, or the force sign "
+                  f"is inverted. Aborting.\033[0m", flush=True)
+            self.request_abort()
+            return step
+        if not self._seeking:
+            self._seeking = True
+            print(f"path: seeking for contact (Fs={self.last_fs:.1f} N < "
+                  f"{self.touch_n:.1f} N), up to "
+                  f"{self.max_seek_m * 1000:.0f} mm deeper", flush=True)
+        # One tick behind by construction: this tick's delta was computed
+        # against the previous goal. At the contact speed that is tens of
+        # microns, and being a tick late on a search is the safe direction.
+        self.runner.depth_bias = min(
+            self.max_seek_m,
+            self.runner.depth_bias + self.runner.contact_speed * float(dt))
         return step
 
     def _start_preview(self):
@@ -272,8 +359,11 @@ class PathSession:
             if self.runner is None:
                 return
             self.runner.start()
+            self.runner.depth_bias = 0.0
             self.latch.reset()
             self._engaged = False
+            self._touched = False
+            self._seeking = False
             self.state = STATE_RUN
             self._preview_pts = None
         print("path EXECUTE: driving the field-follow carrot along the plan.",

@@ -1387,3 +1387,23 @@ class PathTickPlacementTest(unittest.TestCase):
         src = _EXAMPLE.read_text(encoding="utf-8")
         self.assertIn("stop_keys.set()", src)
         self.assertIn("tty_saved = termios.tcgetattr(sys.stdin.fileno())", src)
+
+
+class PathDepthAndTouchWiringTest(unittest.TestCase):
+    def test_depth_defaults_to_two_millimetres(self):
+        mod = _load_example()
+        self.assertAlmostEqual(
+            mod.build_arg_parser().parse_args([]).path_depth, 0.002)
+
+    def test_touch_confirmation_is_off_by_default(self):
+        mod = _load_example()
+        args = mod.build_arg_parser().parse_args([])
+        self.assertEqual(args.path_touch_n, 0.0)
+        self.assertAlmostEqual(args.path_max_seek, 0.01)
+
+    def test_the_measured_force_reaches_the_session(self):
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("fs = (None if contact_controller is None", src)
+        self.assertIn("tcp_xyz=tcp, fs=fs", src)
+        self.assertIn("depth_m=args.path_depth", src)
+        self.assertIn("touch_n=args.path_touch_n", src)

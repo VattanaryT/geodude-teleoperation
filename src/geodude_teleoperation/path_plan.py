@@ -115,13 +115,21 @@ def project_to_surface(mesh, p):
 
 
 def plan_surface_path(mesh, p_start, p_end, *, standoff_m=0.03, ds_m=0.005,
-                      normal_fn=None) -> PathPlan:
+                      depth_m=0.0, normal_fn=None) -> PathPlan:
     """Plan approach -> plunge -> traverse -> retract between two picked points.
 
     ``p_start`` / ``p_end`` are anywhere near the surface (viser click rays land
     *on* it); both are projected onto the mesh. ``normal_fn`` overrides the mesh
     normal -- pass the *field* normal (``-vf.approach_basis_at(p)[:, 2]``) so the
     plan and the controller agree on which way is up off the part.
+
+    ``depth_m`` sinks the commanded plunge and traverse points that far BELOW
+    the surface, along its normal. The mesh is a laser scan placed by
+    calibration, so the real part is not exactly where the model says; a
+    commanded pose on the nominal surface therefore leaves the tool touching
+    lightly, or not at all. ``surface_xyz`` keeps the true projected point, so
+    the latch still measures distance to the *surface* and ``d_surf`` still
+    reads 0 there and goes negative when the tool is commanded into the part.
 
     The plan starts at the standoff point, not at the arm: the runner walks from
     wherever the carrot actually is, so nothing here needs the live pose.
@@ -134,10 +142,11 @@ def plan_surface_path(mesh, p_start, p_end, *, standoff_m=0.03, ds_m=0.005,
 
     standoff_m = float(max(0.0, standoff_m))
     ds_m = float(max(1e-4, ds_m))
+    depth_m = float(depth_m)
 
     wps: List[Waypoint] = []
     wps.append(Waypoint(p0 + standoff_m * n0, p0, n0, PHASE_APPROACH))
-    wps.append(Waypoint(np.array(p0, copy=True), p0, n0, PHASE_PLUNGE))
+    wps.append(Waypoint(p0 - depth_m * n0, p0, n0, PHASE_PLUNGE))
 
     span = np.asarray(p1, dtype=float) - np.asarray(p0, dtype=float)
     dist = float(np.linalg.norm(span))
@@ -147,7 +156,7 @@ def plan_surface_path(mesh, p_start, p_end, *, standoff_m=0.03, ds_m=0.005,
         p_s, n_s = project_to_surface(mesh, p_lin)
         if normal_fn is not None:
             n_s = _unit(normal_fn(p_s), fallback=n_s)
-        wps.append(Waypoint(np.array(p_s, copy=True), p_s, n_s, PHASE_TRAVERSE))
+        wps.append(Waypoint(p_s - depth_m * n_s, p_s, n_s, PHASE_TRAVERSE))
 
     wps.append(Waypoint(p1 + standoff_m * n1, p1, n1, PHASE_RETRACT))
     return PathPlan(waypoints=wps, start_surface=p0, end_surface=p1)
@@ -182,6 +191,12 @@ class PathRunner:
         self.free_speed = abs(float(free_speed_m_s))
         self.contact_speed = abs(float(contact_speed_m_s))
         self.arrive_m = abs(float(arrive_m))
+        # Extra depth, along each waypoint's own normal, applied to the press
+        # phases only. The caller grows it while seeking for a real touch (the
+        # scan is not exactly where the part is) and freezes it once found, so
+        # the traverse stays seated at the depth where contact actually
+        # happened rather than the depth the model predicted.
+        self.depth_bias = 0.0
         self._i = 0
         self._running = False
         self._done = False
@@ -214,6 +229,13 @@ class PathRunner:
     def speed_for(self, phase: str) -> float:
         return self.contact_speed if phase in PRESS_PHASES else self.free_speed
 
+    def goal_of(self, wp) -> np.ndarray:
+        """Commanded point for ``wp``, with the live depth bias applied."""
+        if not wp.press_phase or self.depth_bias == 0.0:
+            return np.asarray(wp.xyz, dtype=float)
+        return (np.asarray(wp.xyz, dtype=float)
+                - float(self.depth_bias) * np.asarray(wp.normal, dtype=float))
+
     def step(self, dt, carrot_xyz) -> PathStep:
         dt = float(max(0.0, dt))
         carrot = np.asarray(carrot_xyz, dtype=float).reshape(3)
@@ -230,7 +252,7 @@ class PathRunner:
         # it has passed.
         while self._i < len(self.plan):
             wp = self.plan.waypoints[self._i]
-            if float(np.linalg.norm(wp.xyz - carrot)) > self.arrive_m:
+            if float(np.linalg.norm(self.goal_of(wp) - carrot)) > self.arrive_m:
                 break
             self._i += 1
         if self._i >= len(self.plan):
@@ -241,12 +263,13 @@ class PathRunner:
                             last.surface_xyz, last.normal, False, True, False)
 
         wp = self.plan.waypoints[self._i]
-        to_go = np.asarray(wp.xyz, dtype=float) - carrot
+        goal = self.goal_of(wp)
+        to_go = goal - carrot
         d = float(np.linalg.norm(to_go))
         v = self.speed_for(wp.phase)
         reach = v * dt
         delta = to_go if (d <= reach or d < 1e-12) else to_go * (reach / d)
-        return PathStep(delta, wp.phase, self._i, wp.xyz, wp.surface_xyz,
+        return PathStep(delta, wp.phase, self._i, goal, wp.surface_xyz,
                         wp.normal, wp.press_phase, False, True)
 
 

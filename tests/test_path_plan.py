@@ -258,3 +258,96 @@ class SessionRequestTest(unittest.TestCase):
         s.request_abort()
         s.tick(0.02, [0.0, 0.0, 0.02])
         self.assertEqual(calls, ["start", "end"])
+
+
+class DepthAndTouchTest(unittest.TestCase):
+    """Depth sinks the commanded points; touch confirms they reached anything.
+
+    The two are different failures. Depth is the scan being a few mm off, which
+    geometry can absorb blindly. Touch is the scan being off by MORE than the
+    depth, which only a force reading can catch -- and the consequence of
+    missing it is the press handing over while the tool is still in the air,
+    where a pure TCP force rotates the wrist instead of translating the arm.
+    """
+
+    def setUp(self):
+        self.mesh = _plate()
+
+    def test_depth_sinks_the_press_phases_only(self):
+        plan = plan_surface_path(self.mesh, [0.0, 0.0, 0.0], [0.05, 0.0, 0.0],
+                                 standoff_m=0.02, ds_m=0.05, depth_m=0.003)
+        by_phase = {w.phase: w for w in plan.waypoints}
+        self.assertAlmostEqual(by_phase[PHASE_PLUNGE].xyz[2], -0.003)
+        self.assertAlmostEqual(by_phase[PHASE_TRAVERSE].xyz[2], -0.003)
+        # Approach and retract keep their standoff above the surface.
+        self.assertAlmostEqual(by_phase[PHASE_APPROACH].xyz[2], 0.02)
+        self.assertAlmostEqual(by_phase[PHASE_RETRACT].xyz[2], 0.02)
+
+    def test_depth_does_not_move_the_surface_the_latch_measures(self):
+        plan = plan_surface_path(self.mesh, [0.0, 0.0, 0.0], [0.05, 0.0, 0.0],
+                                 standoff_m=0.02, ds_m=0.05, depth_m=0.003)
+        for w in plan.waypoints:
+            self.assertAlmostEqual(w.surface_xyz[2], 0.0)
+
+    def test_depth_bias_deepens_press_goals_and_leaves_free_ones_alone(self):
+        plan = plan_surface_path(self.mesh, [0.0, 0.0, 0.0], [0.05, 0.0, 0.0],
+                                 standoff_m=0.02, ds_m=0.05)
+        runner = PathRunner(plan)
+        runner.depth_bias = 0.004
+        by_phase = {w.phase: w for w in plan.waypoints}
+        self.assertAlmostEqual(runner.goal_of(by_phase[PHASE_PLUNGE])[2], -0.004)
+        self.assertAlmostEqual(runner.goal_of(by_phase[PHASE_APPROACH])[2], 0.02)
+
+    def _run_session(self, **kw):
+        from geodude_teleoperation.path_session import PathSession
+        s = PathSession(vf=None, mesh=self.mesh, use_field_normal=False,
+                        standoff_m=0.02, ds_m=0.02, contact_speed_m_s=0.01, **kw)
+        s.pick([0.0, 0.0, 0.0])
+        s.pick([0.04, 0.0, 0.0])
+        s.request_execute()
+        return s
+
+    def test_seek_deepens_until_the_force_arrives(self):
+        s = self._run_session(touch_n=3.0, max_seek_m=0.01)
+        p = np.array([0.0, 0.0, 0.02])
+        # No force: the plunge keeps sinking instead of moving on.
+        for _ in range(50):
+            step = s.tick(0.01, p, tcp_xyz=p, fs=0.2)
+            p = p + step.delta_world
+        self.assertGreater(s.runner.depth_bias, 0.0)
+        self.assertEqual(s.phase, PHASE_PLUNGE)
+        self.assertFalse(s.press_engaged)
+        # Force arrives: the bias freezes and the run proceeds.
+        frozen = s.runner.depth_bias
+        s.tick(0.01, p, tcp_xyz=p, fs=5.0)
+        s.tick(0.01, p, tcp_xyz=p, fs=5.0)
+        self.assertAlmostEqual(s.runner.depth_bias, frozen)
+
+    def test_seek_aborts_rather_than_diving_forever(self):
+        s = self._run_session(touch_n=3.0, max_seek_m=0.002)
+        p = np.array([0.0, 0.0, 0.02])
+        for _ in range(400):
+            step = s.tick(0.01, p, tcp_xyz=p, fs=0.0)
+            if step is None:
+                break
+            p = p + step.delta_world
+        self.assertLessEqual(s.runner.depth_bias, 0.002 + 1e-9)
+        self.assertFalse(s.running)
+
+    def test_touch_gate_is_part_of_the_latch(self):
+        s = self._run_session(touch_n=3.0)
+        # On the surface, in a press phase, but nothing is being felt.
+        p = np.array([0.0, 0.0, 0.0])
+        for _ in range(5):
+            s.tick(0.01, p, tcp_xyz=p, fs=0.1)
+        self.assertFalse(s.press_engaged)
+
+    def test_geometry_only_latch_is_the_default(self):
+        s = self._run_session()
+        p = np.array([0.0, 0.0, 0.02])
+        for _ in range(400):
+            step = s.tick(0.01, p, tcp_xyz=p)
+            if step is None or step.done:
+                break
+            p = p + step.delta_world
+        self.assertEqual(s.runner.depth_bias, 0.0)

@@ -1842,6 +1842,31 @@ def build_arg_parser():
         "--path-ds", type=float, default=0.005, metavar="M",
         help="traverse waypoint spacing along the surface (default %(default)s m)")
     parser.add_argument(
+        "--path-depth", type=float, default=0.002, metavar="M",
+        help="how far BELOW the scanned surface the plunge and traverse are "
+             "COMMANDED (default %(default)s m). The mesh is a laser scan "
+             "placed by calibration, so a pose commanded exactly on the model "
+             "leaves the tool touching lightly or hovering. This is the knob "
+             "for 'the tool does not go far enough in' BEFORE the press takes "
+             "over -- after the latch engages, free_along_normal removes the "
+             "normal from the pose spring and --target-force owns it alone, so "
+             "depth does not add force in contact. d_surf goes negative by "
+             "this much when the plan is being followed")
+    parser.add_argument(
+        "--path-touch-n", type=float, default=0.0, metavar="N",
+        help="require this much measured Fs before the plunge hands over "
+             "(0 = geometry only, the default). Above 0 it does two things: "
+             "the plunge keeps descending until Fs reaches it (up to "
+             "--path-max-seek, then aborts), and the press latch requires it "
+             "as well as the distance. This is the one gate that closes the "
+             "scan-vs-part gap, because geometry alone cannot tell 'touching' "
+             "from 'the model is 3 mm off'. A threshold is a fair use of a "
+             "noisy sensor; regulating on it is not")
+    parser.add_argument(
+        "--path-max-seek", type=float, default=0.01, metavar="M",
+        help="how far past the planned depth --path-touch-n may seek before "
+             "giving up and aborting the run (default %(default)s m)")
+    parser.add_argument(
         "--path-engage-gap", type=float, default=0.002, metavar="M",
         help="press latch ON at this signed distance from the planned surface "
              "point, measured along its normal (default %(default)s m). This "
@@ -1912,7 +1937,10 @@ def configure_path_mode(args) -> None:
         f"{'feedforward' if resolve_press_feedforward(args) else 'closed loop'}, "
         f"latch = plan phase AND distance "
         f"(on <= {args.path_engage_gap * 1000:.0f}mm, "
-        f"off > {args.path_release_gap * 1000:.0f}mm), "
+        f"off > {args.path_release_gap * 1000:.0f}mm)"
+        + (f" AND Fs >= {args.path_touch_n:.1f}N" if args.path_touch_n > 0
+           else "")
+        + f", depth {args.path_depth * 1000:.1f}mm, "
         f"speeds {args.path_speed * 1000:.0f}/{args.path_contact_speed * 1000:.0f} mm/s "
         f"free/contact.",
         flush=True,
@@ -2872,6 +2900,9 @@ def main():
             ds_m=args.path_ds,
             engage_gap_m=args.path_engage_gap,
             release_gap_m=args.path_release_gap,
+            depth_m=args.path_depth,
+            touch_n=args.path_touch_n,
+            max_seek_m=args.path_max_seek,
             on_execute_start=_path_enter_contact,
             on_execute_end=_path_exit_contact,
         )
@@ -2901,7 +2932,9 @@ def main():
         elif args.dtc_hold_zero:
             blocked = ("--dtc-hold-zero streams tau=0, so the arm cannot move. "
                        "Re-run without it to execute")
-        step = path_session.tick(dt, carrot, tcp_xyz=tcp,
+        fs = (None if contact_controller is None
+              else contact_controller.last_fs)
+        step = path_session.tick(dt, carrot, tcp_xyz=tcp, fs=fs,
                                  allow_execute=not blocked,
                                  block_reason=blocked)
         if contact_controller is not None:

@@ -1204,6 +1204,10 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         # slid" is exactly the question a traverse raises.
         self._measured_wrench_fn = measured_wrench_fn
         self._last_ft = np.full(6, np.nan)
+        # Most recent tared along-tool-Z force, for callers that need to gate
+        # on "is anything there at all" without opening a second reader -- the
+        # single-RTDE-client rule makes a second one impossible anyway.
+        self._last_fs = float("nan")
         self._dead_wrench_abort_s = max(0.0, float(dead_wrench_abort_s))
         self._dead_wrench_eps_n = max(0.0, float(dead_wrench_eps_n))
 
@@ -1298,6 +1302,11 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
     def set_measured_force_fn(self, measured_force_fn):
         """Callable () -> (fx, fy, fz) tool-frame force in N, for the dtc loop."""
         self._measured_force_fn = measured_force_fn
+
+    @property
+    def last_fs(self) -> float:
+        """Tared along-tool-Z force from the last force tick, N. NaN before one."""
+        return float(self._last_fs)
 
     def set_measured_wrench_fn(self, measured_wrench_fn):
         """Callable () -> 6 raw tool-frame F/T values, for the log only."""
@@ -1928,6 +1937,7 @@ class ContactTeleoperationController(gafropy.control.VelocityAdmittanceControlle
         # read as dead feedback.
         bias_tool = self._bias_tool_now()
         fs = self._fs(fz_raw - float(bias_tool[2]))
+        self._last_fs = fs
         now = time.monotonic()
         dt = self._tick_dt(now)
         elapsed = 0.0 if self._t_start is None else now - self._t_start
