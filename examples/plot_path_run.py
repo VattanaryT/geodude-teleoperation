@@ -262,6 +262,16 @@ def main(argv=None):
              label="max |tau|")
     ax3.set_ylabel("|tau| [N.m]")
     ax3.legend(fontsize=7, loc="lower right")
+    # Per-joint torque at the end of the run, in the title: when an approach
+    # stops, the question is always "which joint is being asked, and is it
+    # anywhere near its breakaway" -- and reading that off six overlaid traces
+    # is hopeless.
+    tail = t >= (t[-1] - 1.0) if len(t) else np.zeros(0, bool)
+    if tail.any():
+        last = np.nanmedian(np.abs(tau[tail]), axis=0)
+        ax.set_title("last second |tau| per joint: "
+                     + "  ".join(f"j{i}={v:.1f}" for i, v in enumerate(last))
+                     + " N.m", fontsize=8, loc="left")
 
     # 6. force, on the contact loop's own clock
     ax = axes[5]

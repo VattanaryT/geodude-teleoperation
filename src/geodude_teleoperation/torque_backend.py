@@ -805,6 +805,7 @@ class DirectTorqueBackend:
         self._last_lambda_lin_pre = None
         self._last_lambda_dir_kg = float("nan")
         self._last_lambda_lin_hi = float("nan")
+        self._last_lambda_lin_lo = float("nan")
         # Effective moment arm |J_lin.T u| for the unit direction the linear
         # wrench is currently pointing: how many N.m of joint torque one N of
         # TCP force buys. Measured 0.195 m along body x and 0.82 m along z on
@@ -1565,7 +1566,16 @@ class DirectTorqueBackend:
         self._last_lambda_ang_min = ang_eig
         lin_pre = 0.5 * (lam[3:, 3:] + lam[3:, 3:].T)
         self._last_lambda_lin_pre = lin_pre
-        self._last_lambda_lin_hi = float(np.linalg.eigvalsh(lin_pre)[-1])
+        lin_eig = np.linalg.eigvalsh(lin_pre)
+        self._last_lambda_lin_hi = float(lin_eig[-1])
+        # The SMALLEST linear eigenvalue, pre-clamp. lam_hi and lam_dir are
+        # both large numbers on a run where the arm will not move, because both
+        # look along directions Lambda is heavy about. What decides whether a
+        # commanded direction gets any force is the light one: W = Lambda(K e),
+        # so an approach along a near-null linear direction is scaled by THIS,
+        # and LAMBDA_MIN_LIN_KG (1.0) is what stops it reaching zero. Same
+        # starvation the angular floor was built for, one blade over.
+        self._last_lambda_lin_lo = float(lin_eig[0])
         if ang_eig < LAMBDA_MIN_ANG_KGM2:
             self._n_lambda_ang_floor += 1
         lam = _clamp_spd(lam[:3, :3], LAMBDA_MIN_ANG_KGM2, LAMBDA_MAX_ANG_KGM2,
@@ -2067,7 +2077,7 @@ class DirectTorqueBackend:
         # deadband is tau_friction / (lev * Lambda * K), so these are the two
         # denominators -- without them a stuck run and a well-conditioned one
         # look identical in every other column.
-        cols += ["lam_ang", "lam_dir", "lam_hi", "lev"]
+        cols += ["lam_ang", "lam_dir", "lam_hi", "lam_lo", "lev"]
         # Absolute pose, base frame. A push test asks one question -- did the
         # target stay put while the arm was pushed -- and a relative error
         # cannot distinguish "the target held and the arm stopped short" from
@@ -2261,6 +2271,7 @@ class DirectTorqueBackend:
         for v, fmt in ((self._last_lambda_ang_min, "%.6f"),
                        (self._last_lambda_dir_kg, "%.3f"),
                        (self._last_lambda_lin_hi, "%.3f"),
+                       (self._last_lambda_lin_lo, "%.3f"),
                        (self._last_leverage_m, "%.4f")):
             fields.append("" if not np.isfinite(v) else fmt % v)
         for v in list(self._last_ee_xyz) + list(self._last_tgt_xyz):

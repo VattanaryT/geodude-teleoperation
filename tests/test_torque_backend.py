@@ -1140,8 +1140,9 @@ def test_the_log_records_the_tracking_error_and_field_conformity(tmp_path):
     # of the joints the pose error is asking for (there is no joint setpoint
     # under a torque law). All appended at the end, because every analyzer here
     # reads by header name and trailing columns are additive.
-    assert header[-32:] == ["erx", "ery", "erz", "ex", "ey", "ez", "n_deg",
-                            "act", "lam_ang", "lam_dir", "lam_hi", "lev",
+    assert header[-33:] == ["erx", "ery", "erz", "ex", "ey", "ez", "n_deg",
+                            "act", "lam_ang", "lam_dir", "lam_hi", "lam_lo",
+                            "lev",
                             "ee_x", "ee_y", "ee_z", "tgt_x", "tgt_y", "tgt_z",
                             "ee_qw", "ee_qx", "ee_qy", "ee_qz",
                             "tgt_qw", "tgt_qx", "tgt_qy", "tgt_qz",
