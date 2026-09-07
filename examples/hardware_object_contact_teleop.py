@@ -2851,6 +2851,15 @@ def main():
         # Entered from FREE SPACE, deliberately: start() tares the F/T sensor
         # and a tare taken while touching absorbs the contact force into the
         # bias. The press still commands 0 N until the distance latch engages.
+        #
+        # Re-base the carrot on the live TCP FIRST. Between align finishing and
+        # EXECUTE the carrot sits wherever the seed left it while the arm sags
+        # or is nudged, and the first commit would then command that stale pose
+        # -- a step of up to --max-lead-m in one tick. Snapping makes the first
+        # commanded pose the live one, so the run opens at zero error. Same
+        # rule as leaving contact, in the other direction: whoever snaps the
+        # objective must re-base the carrot, or the carrot wins on the next tick.
+        _snap_follow_to_live()
         if contact_controller is not None:
             contact_controller.set_press_external(False)
         if mode["active"] == "approach":

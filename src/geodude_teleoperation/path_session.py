@@ -197,6 +197,12 @@ class PathSession:
             self._phase = plan.waypoints[0].phase if len(plan) else PHASE_DONE
             self.state = STATE_READY
             self._preview_pts = None
+        d0 = float(np.linalg.norm(np.asarray(self.p_start) - plan.start_surface))
+        d1 = float(np.linalg.norm(np.asarray(self.p_end) - plan.end_surface))
+        if max(d0, d1) > 0.005:
+            print(f"\033[93mpath: picks projected {d0 * 1000:.0f}/{d1 * 1000:.0f} mm "
+                  f"onto the mesh -- click on the object, not past it\033[0m",
+                  flush=True)
         print(f"path planned: {len(plan)} waypoints, {plan.length_m() * 100:.1f} cm "
               f"(standoff {self.standoff_m * 100:.1f} cm, ds {self.ds_m * 1000:.0f} mm, "
               f"depth {self.depth_m * 1000:.1f} mm"
@@ -504,26 +510,33 @@ class PathSession:
             if self.runner is not None:
                 self.runner.contact_speed = self.contact_speed
 
-        @b_start_live.on_click
-        def _(_e):
-            if self._live_tcp is not None:
-                self.pick(self._live_tcp)
+        def _click(label, action):
+            """Wrap a button so a press is visible in the terminal either way.
 
-        @b_preview.on_click
-        def _(_e):
-            self.request_preview()
+            viser runs these on its own thread pool: an exception in one is
+            swallowed there, and a button that silently does nothing is
+            indistinguishable from a button whose request nobody consumes.
+            The print separates those two cases in one run.
+            """
 
-        @b_execute.on_click
-        def _(_e):
-            self.request_execute()
+            def handler(_event):
+                print(f"path: [{label}] pressed", flush=True)
+                try:
+                    action()
+                except Exception as exc:
+                    print(f"\033[91mpath: [{label}] failed: {exc}\033[0m",
+                          flush=True)
 
-        @b_abort.on_click
-        def _(_e):
-            self.request_abort()
+            return handler
 
-        @b_reset.on_click
-        def _(_e):
-            self.request("reset")
+        b_start_live.on_click(_click(
+            "start = live TCP",
+            lambda: self.pick(self._live_tcp)
+            if self._live_tcp is not None else None))
+        b_preview.on_click(_click("preview", self.request_preview))
+        b_execute.on_click(_click("EXECUTE", self.request_execute))
+        b_abort.on_click(_click("ABORT", self.request_abort))
+        b_reset.on_click(_click("reset picks", lambda: self.request("reset")))
 
     def refresh_gui(self):
         status = self._gui.get("status")
@@ -544,8 +557,13 @@ class PathSession:
             return
         try:
             scene = server.scene
-            for name, p, color in (("/path_start", self.p_start, (40, 200, 90)),
-                                   ("/path_end", self.p_end, (220, 60, 40))):
+            # The projected surface points, not the raw click: the plan works
+            # off the projection, so drawing the click would hide a pick that
+            # landed centimetres off the mesh.
+            p0 = self.p_start if self.plan is None else self.plan.start_surface
+            p1 = self.p_end if self.plan is None else self.plan.end_surface
+            for name, p, color in (("/path_start", p0, (40, 200, 90)),
+                                   ("/path_end", p1, (220, 60, 40))):
                 if p is None:
                     continue
                 scene.add_icosphere(name, radius=0.005, color=color,

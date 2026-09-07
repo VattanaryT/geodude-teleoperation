@@ -1417,3 +1417,23 @@ class PathSelfPacingTest(unittest.TestCase):
         self.assertIn("hold = lag >= PATH_LAG_HOLD_FRAC * float(args.max_lead_m)",
                       src)
         self.assertIn("block_reason=blocked, hold=hold)", src)
+
+
+class PathHandoffTest(unittest.TestCase):
+    """No step between align finishing and the first commanded pose."""
+
+    def test_execute_rebases_the_carrot_before_entering_contact(self):
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        enter = src.split("def _path_enter_contact():")[1].split("def ")[0]
+        self.assertIn("_snap_follow_to_live()", enter)
+        # ...and before the toggle, or the toggle's own hold_live_pose is
+        # overwritten by the stale carrot on the next tick.
+        self.assertLess(enter.index("_snap_follow_to_live()"),
+                        enter.index("toggle_contact_mode()"))
+
+    def test_the_wrench_rearm_ramp_is_armed_by_default(self):
+        # The 0->1 input_active edge at EXECUTE is exactly the edge this ramp
+        # exists for: it blends out of the wrench already holding the arm.
+        mod = _load_example()
+        self.assertGreater(
+            mod.build_arg_parser().parse_args([]).dtc_rearm_wrench_s, 0.0)
