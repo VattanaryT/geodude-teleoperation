@@ -185,3 +185,76 @@ class LatchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SessionRequestTest(unittest.TestCase):
+    """Requests are recorded by viser's threads and consumed in tick().
+
+    A tick that is skipped is a button that does nothing -- which is exactly
+    what happened on the first hardware run: tick() was only called from the
+    field-follow branch, unreachable until startup align finished, so 'p', 'r'
+    and every GUI button queued forever.
+    """
+
+    def _session(self):
+        from geodude_teleoperation.path_session import (
+            PathSession, STATE_PICK, STATE_PREVIEW, STATE_READY, STATE_RUN)
+        self.STATE_PICK = STATE_PICK
+        self.STATE_PREVIEW = STATE_PREVIEW
+        self.STATE_READY = STATE_READY
+        self.STATE_RUN = STATE_RUN
+        s = PathSession(vf=None, mesh=_plate(), use_field_normal=False,
+                        standoff_m=0.02, ds_m=0.01)
+        s.pick([0.0, 0.0, 0.0])
+        s.pick([0.05, 0.0, 0.0])
+        return s
+
+    def test_preview_runs_even_when_execution_is_blocked(self):
+        s = self._session()
+        s.request_preview()
+        s.tick(0.02, [0.0, 0.0, 0.02], allow_execute=False,
+               block_reason="align has not finished")
+        self.assertEqual(s.state, self.STATE_PREVIEW)
+        self.assertIsNotNone(s.preview_xyz())
+
+    def test_reset_and_abort_run_even_when_execution_is_blocked(self):
+        s = self._session()
+        s.request_abort()
+        s.tick(0.02, [0.0, 0.0, 0.02], allow_execute=False)
+        self.assertEqual(s.state, self.STATE_READY)
+        s.request("reset")
+        s.tick(0.02, [0.0, 0.0, 0.02], allow_execute=False)
+        self.assertEqual(s.state, self.STATE_PICK)
+        self.assertIsNone(s.p_start)
+
+    def test_execute_is_refused_and_dropped_while_blocked(self):
+        s = self._session()
+        s.request_execute()
+        s.tick(0.02, [0.0, 0.0, 0.02], allow_execute=False,
+               block_reason="align has not finished")
+        self.assertEqual(s.state, self.STATE_READY)
+        # Dropped, not queued: it must not fire the moment the gate opens.
+        s.tick(0.02, [0.0, 0.0, 0.02], allow_execute=True)
+        self.assertEqual(s.state, self.STATE_READY)
+
+    def test_execute_runs_once_the_gate_opens(self):
+        s = self._session()
+        s.request_execute()
+        s.tick(0.02, [0.0, 0.0, 0.02], allow_execute=True)
+        self.assertEqual(s.state, self.STATE_RUN)
+
+    def test_execute_calls_back_exactly_once(self):
+        from geodude_teleoperation.path_session import PathSession
+        calls = []
+        s = PathSession(vf=None, mesh=_plate(), use_field_normal=False,
+                        standoff_m=0.02, ds_m=0.01,
+                        on_execute_start=lambda: calls.append("start"),
+                        on_execute_end=lambda: calls.append("end"))
+        s.pick([0.0, 0.0, 0.0])
+        s.pick([0.02, 0.0, 0.0])
+        s.request_execute()
+        s.tick(0.02, [0.0, 0.0, 0.02])
+        self.assertEqual(calls, ["start"])
+        s.request_abort()
+        s.tick(0.02, [0.0, 0.0, 0.02])
+        self.assertEqual(calls, ["start", "end"])

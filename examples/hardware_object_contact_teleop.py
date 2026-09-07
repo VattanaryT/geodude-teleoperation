@@ -2040,6 +2040,12 @@ def install_termination_guards():
 
 def main():
     args = build_arg_parser().parse_args()
+    # Snapshot the terminal before anything can put it in cbreak, so the
+    # teardown can restore it even if the key thread never got that far.
+    try:
+        tty_saved = termios.tcgetattr(sys.stdin.fileno())
+    except Exception:
+        tty_saved = None
     install_termination_guards()
     configure_dtc_compliance_hold(args)
     configure_path_mode(args)
@@ -2805,6 +2811,7 @@ def main():
     # ------------------------------------------------------------------
     path_session = None
     path_t = {"last": None}
+    stop_keys = threading.Event()
 
     def _path_enter_contact():
         # Entered from FREE SPACE, deliberately: start() tares the F/T sensor
@@ -2870,7 +2877,14 @@ def main():
         )
 
     def tick_path(T_flange_viz):
-        """Drive the follow carrot from the plan. Called before run_field_follow."""
+        """Drive the follow carrot from the plan.
+
+        Called on EVERY main-loop tick, including the ones that cannot move the
+        arm -- during startup align, and under --dtc-hold-zero. Viser records
+        button and key presses on its own threads and this is where they are
+        consumed, so a tick skipped here is a button that does nothing. Only
+        EXECUTE is gated; preview, abort and reset always run.
+        """
         if path_session is None or follow is None:
             return
         now = time.monotonic()
@@ -2881,7 +2895,15 @@ def main():
         carrot = follow.xyz
         if carrot is None:
             carrot = tcp
-        step = path_session.tick(dt, carrot, tcp_xyz=tcp)
+        blocked = ""
+        if align is not None and not align.finished:
+            blocked = "startup align has not finished -- press Enter to align first"
+        elif args.dtc_hold_zero:
+            blocked = ("--dtc-hold-zero streams tau=0, so the arm cannot move. "
+                       "Re-run without it to execute")
+        step = path_session.tick(dt, carrot, tcp_xyz=tcp,
+                                 allow_execute=not blocked,
+                                 block_reason=blocked)
         if contact_controller is not None:
             contact_controller.set_press_latch_debug(
                 distance_m=path_session.latch_distance_m,
@@ -2902,6 +2924,39 @@ def main():
         R_field = np.asarray(vf.approach_basis_at(carrot), dtype=float).reshape(3, 3)
         follow.add_body_linear(R_field.T @ d)
 
+    def start_path_loop():
+        """Run the command side at --loop-hz on its own thread, under viser.
+
+        gafropy's ``Visualizer.show()`` ticks its callbacks at 20 Hz
+        (``time.sleep(0.05)``), so with the carrot fed from the viser ticker a
+        20 mm/s path would advance in 1 mm steps -- the same staircase into the
+        loop that ``--follow-linear-approach`` exists to smooth, reintroduced
+        by the visualization. The viser ticker keeps the visuals; this owns the
+        commands, exactly as the headless loop does. Nothing else drives them
+        in path mode, so the two threads never write the objective together.
+        """
+        loop_dt = 1.0 / max(1.0, float(args.loop_hz))
+
+        def _run():
+            while not stop_keys.is_set():
+                try:
+                    q = q_with_vention()
+                    T_flange = chamfer_flange_from_q(q)
+                    T_ee = np.asarray(live_ee_motor().to_transformation_matrix())
+                    tick_path(T_flange)
+                    if align is not None and not align.finished:
+                        run_startup_align(T_flange, T_ee)
+                    elif field_follow_in_mode(mode["active"],
+                                              args.contact_backend):
+                        run_field_follow(T_flange, T_ee)
+                except Exception as exc:
+                    print(f"path loop tick skipped: {exc}", flush=True)
+                time.sleep(loop_dt)
+
+        threading.Thread(target=_run, daemon=True, name="path-loop").start()
+        print(f"path mode: command loop at {args.loop_hz:.0f} Hz on its own "
+              f"thread (viser ticks the visuals at 20 Hz).", flush=True)
+
     def on_path_key(key):
         if path_session is None:
             return False
@@ -2918,27 +2973,37 @@ def main():
         return True
 
     def start_path_keys():
-        """Enter=execute, p=preview, a=abort, r=reset. Survives align finishing."""
+        """Enter=execute, p=preview, a=abort, r=reset. Survives align finishing.
+
+        Align gets first refusal on every key while it is running ('t' and
+        Enter are its), and anything it does not claim falls through to the
+        path -- otherwise previewing and clearing the picks are dead until the
+        arm has aligned, which is exactly backwards.
+
+        The loop watches ``stop_keys`` and restores the terminal on the way
+        out. A daemon thread sitting in cbreak that never exits leaves the
+        shell without echo after Ctrl+C, which reads as "the script crashed".
+        """
 
         def _run():
             fd = sys.stdin.fileno()
-            old = termios.tcgetattr(fd)
+            saved = termios.tcgetattr(fd)
             try:
                 tty.setcbreak(fd)
-                while True:
+                while not stop_keys.is_set():
                     ready, _, _ = select.select([sys.stdin], [], [], 0.1)
                     if not ready:
                         continue
                     key = sys.stdin.read(1)
                     if align is not None and not align.finished:
-                        on_align_key(key)
-                        continue
+                        if on_align_key(key):
+                            continue
                     on_path_key(key)
             except Exception:
                 pass
             finally:
                 try:
-                    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                    termios.tcsetattr(fd, termios.TCSADRAIN, saved)
                 except Exception:
                     pass
 
@@ -3143,10 +3208,10 @@ def main():
                 q = q_with_vention()
                 T_flange = chamfer_flange_from_q(q)
                 T_ee = np.asarray(live_ee_motor().to_transformation_matrix())
+                tick_path(T_flange)
                 if align is not None and not align.finished:
                     run_startup_align(T_flange, T_ee)
                 elif field_follow_in_mode(mode["active"], args.contact_backend):
-                    tick_path(T_flange)
                     run_field_follow(T_flange, T_ee)
                 time.sleep(loop_dt)
         else:
@@ -3265,6 +3330,19 @@ def main():
                     path_session.set_live_tcp(
                         live_tcp_xyz_from_flange(T_live_flange))
                     path_session.refresh_gui()
+                if path_session is not None:
+                    # Visuals only here: start_path_loop owns every command in
+                    # path mode, so this tick must not drive anything.
+                    p_preview = path_session.preview_xyz()
+                    if p_preview is not None:
+                        update_ghost(ghost_flange_world(
+                            T_live_flange, vf.approach_basis_at(p_preview),
+                            p_preview, 1.0))
+                    elif follow.last_target is not None:
+                        T_tcp = matrix_from_motor(follow.last_target)
+                        update_ghost(ghost_flange_world(
+                            T_live_flange, T_tcp[:3, :3], T_tcp[:3, 3], 1.0))
+                    return
                 if align is not None and not align.finished:
                     run_startup_align(T_live_flange, T_ee)
                     probe = sim_probe["p"]
@@ -3286,18 +3364,9 @@ def main():
                             T_live_flange, R_field, p_tcp, 1.0))
                     return
                 if field_follow_in_mode(mode["active"], args.contact_backend):
-                    tick_path(T_live_flange)
+                    # tick_path already ran above, before the align branch, so
+                    # the preview and the requests are handled in one place.
                     run_field_follow(T_live_flange, T_ee)
-                    if path_session is not None:
-                        p_preview = path_session.preview_xyz()
-                        if p_preview is not None:
-                            # Preview only moves the ghost; the arm is still
-                            # following its own (unchanged) carrot.
-                            update_ghost(ghost_flange_world(
-                                T_live_flange,
-                                vf.approach_basis_at(p_preview),
-                                p_preview, 1.0))
-                            return
                     if follow.last_target is not None:
                         T_tcp = matrix_from_motor(follow.last_target)
                         update_ghost(ghost_flange_world(
@@ -3324,6 +3393,7 @@ def main():
             start_control_and_device()
             if path_mode_on(args):
                 start_path_keys()
+                start_path_loop()
             elif align is not None and args.align_delay is None:
                 print(
                     "startup align: orange ghost is the live-TCP snap. Press t to "
@@ -3353,6 +3423,17 @@ def main():
                 except Exception:
                     pass
                 break
+        # Stop the key reader and put the terminal back. It runs in cbreak so a
+        # single keypress arrives without Enter, and a daemon thread parked
+        # there through exit leaves the shell with no echo -- which looks like
+        # the script crashed, and outlives it.
+        stop_keys.set()
+        if tty_saved is not None:
+            try:
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN,
+                                  tty_saved)
+            except Exception:
+                pass
         if device is not None:
             device.stop()
         if speedj_trace is not None:

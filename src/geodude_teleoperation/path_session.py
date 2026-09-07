@@ -66,7 +66,7 @@ class PathSession:
         ])
         self._distance_latch = self.latch.latches[1]
         self._engaged = False
-        self._phase = PHASE_DONE
+        self._phase = "-"
         self._request = None          # "execute" | "preview" | "abort" | "reset"
         self._preview_pts = None
         self._preview_t0 = None
@@ -178,7 +178,7 @@ class PathSession:
             self.runner = None
             self.latch.reset()
             self._engaged = False
-            self._phase = PHASE_DONE
+            self._phase = "-"
             self.state = STATE_PICK
             self._preview_pts = None
         self._refresh_scene()
@@ -206,15 +206,27 @@ class PathSession:
 
     # ------------------------------------------------------------------ tick
 
-    def tick(self, dt, carrot_xyz, tcp_xyz=None):
+    def tick(self, dt, carrot_xyz, tcp_xyz=None, allow_execute=True,
+             block_reason=""):
         """Advance the state machine. Returns a ``PathStep`` or ``None``.
 
         ``carrot_xyz`` is what the caller is driving (field-follow's own
         command), never the arm -- the lead clamp is what bounds the gap between
         them, exactly as it does for a held stick.
+
+        **Call this on every main-loop tick, including the ones that cannot
+        move the arm**, with ``allow_execute=False`` on those. Requests are
+        recorded by viser's own threads and consumed here, so a tick that is
+        skipped is a button that does nothing: previewing, resetting and
+        aborting must keep working while startup align is still holding the
+        arm, and only EXECUTE has to wait for it.
         """
         self.set_live_tcp(tcp_xyz)
         req = self._take_request()
+        if req == "execute" and not allow_execute:
+            print(f"\033[93mpath: not ready to execute{': ' + block_reason if block_reason else ''}\033[0m",
+                  flush=True)
+            req = None
         if req == "reset":
             self.reset()
             return None

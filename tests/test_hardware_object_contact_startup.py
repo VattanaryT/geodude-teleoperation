@@ -1346,3 +1346,44 @@ class PathLoggingWiringTest(unittest.TestCase):
         src = _EXAMPLE.read_text(encoding="utf-8")
         self.assertIn("subprocess.run([sys.executable, str(script)", src)
         self.assertNotIn("import matplotlib", src)
+
+
+class PathTickPlacementTest(unittest.TestCase):
+    """Where tick_path is called from decides whether the buttons work.
+
+    First hardware run: it was called only from the field-follow branch, which
+    startup align makes unreachable, so 'p'/'r'/EXECUTE queued and nothing
+    happened. It must run on every main-loop tick, with EXECUTE gated instead.
+    """
+
+    def test_it_runs_before_the_align_branch_in_the_headless_loop(self):
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn(
+            "                tick_path(T_flange)\n"
+            "                if align is not None and not align.finished:", src)
+
+    def test_viser_drives_from_its_own_loop_not_the_20_hz_ticker(self):
+        # gafropy's Visualizer.show() ticks at 20 Hz, which would feed the
+        # carrot in 1 mm steps at 20 mm/s -- the staircase the experiment
+        # exists to remove. The ticker keeps the visuals only.
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("def start_path_loop():", src)
+        self.assertIn("loop_dt = 1.0 / max(1.0, float(args.loop_hz))", src)
+        self.assertIn("# Visuals only here: start_path_loop owns every command",
+                      src)
+
+    def test_execute_is_gated_rather_than_the_tick_being_skipped(self):
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("allow_execute=not blocked", src)
+        self.assertIn("--dtc-hold-zero streams tau=0", src)
+
+    def test_align_gets_first_refusal_on_a_key_then_the_path_does(self):
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("if on_align_key(key):\n"
+                      "                            continue\n"
+                      "                    on_path_key(key)", src)
+
+    def test_the_terminal_is_restored_on_teardown(self):
+        src = _EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("stop_keys.set()", src)
+        self.assertIn("tty_saved = termios.tcgetattr(sys.stdin.fileno())", src)
