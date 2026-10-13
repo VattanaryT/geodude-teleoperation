@@ -117,21 +117,21 @@ def main() -> None:
 
     cloud = load_points(args.ply) if args.ply.is_file() else None
     server = viser.ViserServer(port=args.port)
-    server.gui.configure_theme(control_width="large")
-    server.gui.main_panel.dock_right()
-    server.gui.main_panel.set_width(560)
+    # viser 1.x: control_width only; main_panel dock/width API is gone
+    server.gui.configure_theme(control_width="large", control_layout="fixed")
     apply_stringer_view(server, cloud if cloud is not None else actual)
     if cloud is not None:
         server.scene.add_point_cloud(
             "/object", points=cloud, colors=(180, 180, 185), point_size=0.002)
+    # viser>=1 uses line_width (px); older builds used thickness (m)
     server.scene.add_line_segments(
         "/replay", points=polyline_segments(replay_xyz),
         colors=contact_segment_colors(mode_flags, n - 1),
-        thickness=0.0025,
+        line_width=3.0,
     )
     server.scene.add_line_segments(
         "/actual", points=polyline_segments(actual),
-        colors=(255, 170, 40), thickness=0.0015,
+        colors=(255, 170, 40), line_width=2.0,
     )
     server.scene.add_frame("/axes", axes_length=0.08, axes_radius=0.003)
 

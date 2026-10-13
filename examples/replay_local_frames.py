@@ -82,19 +82,20 @@ def main() -> None:
         server.scene.add_point_cloud(
             "/object", points=cloud, colors=(180, 180, 185), point_size=0.002)
     segs = _polyline_segments(replay_xyz)
+    # viser>=1 uses line_width (px); older builds used thickness (m)
     server.scene.add_line_segments(
         "/replay", points=segs,
         colors=_contact_segment_colors(series["in_contact"], len(segs)),
-        thickness=0.0025,
+        line_width=3.0,
     )
     server.scene.add_line_segments(
         "/actual", points=_polyline_segments(actual),
-        colors=(255, 170, 40), thickness=0.0015,
+        colors=(255, 170, 40), line_width=2.0,
     )
     if ep.action_source == "actual":
         server.scene.add_line_segments(
             "/command", points=_polyline_segments(ep.poses_desired_xyz),
-            colors=(140, 140, 220), thickness=0.0012,
+            colors=(140, 140, 220), line_width=1.5,
         )
     server.scene.add_frame("/axes", axes_length=0.08, axes_radius=0.003)
 
